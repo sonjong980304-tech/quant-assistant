@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -78,9 +79,19 @@ class WikiUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
+# /api/models 캐시 — 매 요청마다 각 모델의 가용성을 네트워크로 확인하면 짧은 간격의
+# 반복 요청(프론트 폴링 등)에서 낭비가 크다. 60초 동안은 캐시된 값을 그대로 돌려준다.
+_MODELS_CACHE: dict = {"data": None, "fetched_at": 0.0}
+_MODELS_CACHE_TTL_SECONDS = 60.0
+
+
 @app.get("/api/models")
 def api_models():
-    """선택 가능한 LLM 후보 + 각 가용성."""
+    """선택 가능한 LLM 후보 + 각 가용성(60초 캐싱)."""
+    now = time.time()
+    if _MODELS_CACHE["data"] is not None and (now - _MODELS_CACHE["fetched_at"]) < _MODELS_CACHE_TTL_SECONDS:
+        return _MODELS_CACHE["data"]
+
     from src.llm import LLMClient
 
     out = []
@@ -90,6 +101,9 @@ def api_models():
         except Exception:
             available = False
         out.append({**m, "available": available})
+
+    _MODELS_CACHE["data"] = out
+    _MODELS_CACHE["fetched_at"] = now
     return out
 
 
