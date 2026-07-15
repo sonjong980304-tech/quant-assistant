@@ -281,6 +281,76 @@ def test_answer_kr_question_routes_screening_question_to_screening(monkeypatch):
     assert fsc_calls == []  # 단일종목 경로(find_stock_code)로 새지 않음
 
 
+# ── answer_kr_question: 스크리닝 분기 시 질문의 기간(연도/분기)이 asof로 반영돼야 한다
+#    ('25년기준 코스피 pbr 최저 3개'가 항상 오늘 날짜로만 조회되던 회귀 재현) ──────────
+def test_answer_kr_question_screening_with_year_resolves_asof_from_period(monkeypatch):
+    captured = {}
+
+    def spy_screening(question, conn, **kwargs):
+        captured.update(kwargs)
+        return {"intent": "screening", "result": [], "errors": []}
+
+    monkeypatch.setattr(kr, "answer_kr_screening", spy_screening)
+
+    def fake_exec(sql, _conn):
+        assert "2025-12-31" in sql  # 연도만 있으면 그 해 말일 이하로 조회해야 함
+        return {"ok": True, "rows": [{"d": "2025-12-30"}]}
+
+    kr.answer_kr_question(
+        "25년기준 코스피 종목중 pbr이 가장 낮은 종목 3개", conn=None, execute_sql_fn=fake_exec,
+    )
+    assert captured.get("asof") == "2025-12-30"
+
+
+def test_answer_kr_question_screening_with_quarter_resolves_asof_from_quarter_end(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        kr, "answer_kr_screening",
+        lambda question, conn, **kwargs: captured.update(kwargs) or {"intent": "screening", "result": [], "errors": []},
+    )
+
+    def fake_exec(sql, _conn):
+        assert "2025-03-31" in sql  # 2025년 1분기 → 분기말(3/31) 이하로 조회
+        return {"ok": True, "rows": [{"d": "2025-03-28"}]}
+
+    kr.answer_kr_question(
+        "2025년 1분기 기준 PER 낮은 3개", conn=None, execute_sql_fn=fake_exec,
+    )
+    assert captured.get("asof") == "2025-03-28"
+
+
+def test_answer_kr_question_screening_without_period_leaves_asof_unresolved(monkeypatch):
+    """기간 언급이 없으면 기존과 동일하게 asof=None 을 넘겨 최신 거래일 폴백을 그대로 따른다."""
+    captured = {}
+    monkeypatch.setattr(
+        kr, "answer_kr_screening",
+        lambda question, conn, **kwargs: captured.update(kwargs) or {"intent": "screening", "result": [], "errors": []},
+    )
+
+    def fail_exec(_sql, _conn):
+        raise AssertionError("기간 미지정이면 asof 사전조회 SQL이 실행되면 안 된다")
+
+    kr.answer_kr_question("PER 낮은 3개", conn=None, execute_sql_fn=fail_exec)
+    assert captured.get("asof") is None
+
+
+def test_answer_us_question_screening_with_year_resolves_asof_from_period(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        us, "answer_us_screening",
+        lambda question, conn, **kwargs: captured.update(kwargs) or {"intent": "screening", "result": [], "errors": []},
+    )
+
+    def fake_exec(sql, _conn):
+        assert "us_prices" in sql and "2024-12-31" in sql
+        return {"ok": True, "rows": [{"d": "2024-12-31"}]}
+
+    us.answer_us_question(
+        "2024년기준 PER 가장 낮은 5개 회사", conn=None, execute_sql_fn=fake_exec,
+    )
+    assert captured.get("asof") == "2024-12-31"
+
+
 def test_answer_kr_question_non_screening_does_not_use_screening_path(monkeypatch):
     called = []
     monkeypatch.setattr(

@@ -34,6 +34,8 @@ from src.agents.data_price_us import get_price_history_us, get_price_snapshot_us
 from src.agents.domain_kr import (
     _intent_prompt,
     _parse_intent,
+    _parse_period,
+    _resolve_screening_asof,
     _run_screening,
     _strip_retry_feedback,
     _summarize_price_history,
@@ -390,6 +392,7 @@ def answer_us_question(
     price_fn: Callable | None = None,
     financial_fn: Callable | None = None,
     price_history_fn: Callable | None = None,
+    execute_sql_fn: Callable | None = None,
 ) -> dict:
     """미국주식 질문에 답한다 — 티커 해석 → 재무/주가 위임 → 결과 종합.
 
@@ -407,11 +410,17 @@ def answer_us_question(
     financial_fn = financial_fn or get_financials_us
     price_history_fn = price_history_fn or get_price_history_us
     base_question = _strip_retry_feedback(question)
+    period = _parse_period(base_question)
 
     # 스크리닝(다중종목 랭킹) 질문은 단일티커 조회 경로 대신 스크리닝 경로로 분기한다(HA-15).
     # is_screening_question 도 LLM 우선 판단이므로 llm_fn 을 관통시킨다(HA-6과 동일 배선 원칙).
+    # period(질문의 연도/분기)를 asof로 확정해 넘긴다 — 안 하면 스크리닝이 항상 오늘 날짜
+    # 기준으로만 계산돼 "2024년기준" 같은 조건이 무시되는 회귀(HA-6과 동일 버그).
     if is_screening_question(question, llm_fn=llm_fn):
-        return answer_us_screening(question, conn, llm_fn=llm_fn)
+        screening_asof = _resolve_screening_asof(period, conn, "us_prices", execute_sql_fn)
+        return answer_us_screening(
+            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof
+        )
 
     ticker = resolve_ticker_us(question, conn, llm_fn=llm_fn)
     if not ticker:

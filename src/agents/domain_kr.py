@@ -30,6 +30,7 @@ from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS
 from src.backtest.data_access_us import METRIC_FIELD_DESCRIPTIONS_US
 from src.backtest.primitives import combine, get_cross_section
 from src.llm import extract_json
+from src.version import quarter_end_date
 
 # _screening_prompt는 KR/US 공용 함수(domain_us.py가 그대로 import해 재사용)라 두 도메인의
 # 지표 설명 단일 정의처(canonical source)를 모두 여기서 갖고 있다가 domain 인자로 고른다.
@@ -529,6 +530,36 @@ def _default_screening_asof(
     return result["rows"][0].get("d")
 
 
+def _resolve_screening_asof(
+    period: dict | None,
+    conn,
+    table: str,
+    execute_sql_fn: Callable | None = None,
+) -> str | None:
+    """스크리닝 질문의 기간(period)을 실제 asof 날짜로 확정한다.
+
+    period가 없으면(질문에 연도/분기 언급이 없으면) None을 그대로 반환한다 — 호출부가
+    이 None을 answer_kr_screening/answer_us_screening의 asof에 그대로 넘기면 기존과 동일하게
+    _default_screening_asof(전체 최신 거래일)로 폴백한다. period가 있으면 그 기간의 말일
+    (연도→12/31, 분기→quarter_end_date) '이하' 최신 거래일을 찾는다 — 스크리닝은 combine이
+    바로 쓸 수 있는 구체적 날짜(asof) 하나가 필요하므로, resolve_metric처럼 quarter/year를
+    그대로 넘길 수 없어 이 변환이 필요하다. "이하"인 이유: 요청 기간 말일이 휴장일/미래일
+    수도 있으므로, 그 시점까지 실제로 존재하는 가장 최근 거래일을 찾는다(_default_screening_asof
+    와 동일한 "캘린더가 아니라 DB에 실재하는 날짜" 원칙).
+    """
+    if period is None:
+        return None
+    execute_sql_fn = execute_sql_fn or execute_sql
+    if period.get("kind") == "quarter":
+        bound = quarter_end_date(period["quarter"]).isoformat()
+    else:
+        bound = f"{period['year']}-12-31"
+    result = execute_sql_fn(f"SELECT MAX(date) AS d FROM {table} WHERE date <= '{bound}'", conn)
+    if not result.get("ok") or not result["rows"]:
+        return None
+    return result["rows"][0].get("d")
+
+
 def _run_screening(
     question: str,
     conn,
@@ -998,8 +1029,9 @@ def answer_kr_question(
     # is_screening_question 도 LLM 우선 판단이므로 llm_fn 을 관통시킨다(키워드 목록에 없는
     # "저PER 5종목" 같은 표현도 LLM 판단으로 인식되게 하기 위함).
     if is_screening_question(question, llm_fn=llm_fn):
+        screening_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
         return answer_kr_screening(
-            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn
+            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof
         )
 
     result: dict = {
