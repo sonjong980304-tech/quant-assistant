@@ -1,6 +1,6 @@
 # Quant Assistant
 
-> 저장소: https://github.com/sonjong980304-tech/dart-text2sql-wiki (비공개)
+> 저장소: https://github.com/sonjong980304-tech/dart-text2sql-wiki
 
 한국·미국 상장사 재무/주가/매크로 데이터를 SQLite에 적재하고, 자연어 질문에 답하는
 시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.
