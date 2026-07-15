@@ -26,7 +26,7 @@ from typing import Callable
 from src.agents.backtest_verification import run_backtest_with_audit
 from src.agents.data_price_kr import get_price_snapshot_kr
 from src.agents.data_price_us import get_price_snapshot_us
-from src.backtest.pipeline_exec import run_pipeline
+from src.backtest.pipeline_exec import PRIMITIVE_OPS, run_pipeline
 from src.llm import extract_json
 
 # ---------------------------------------------------------------------------
@@ -214,6 +214,41 @@ def generate_backtest_steps(
     return steps if isinstance(steps, list) else []
 
 
+def validate_pipeline_steps(steps: list[dict]) -> list[str]:
+    """steps를 run_pipeline에 넘기기 전에 정적으로 검사한다(실행 없이).
+
+    run_pipeline은 steps를 순서대로 실행하므로, 검증 없이는 파이프라인 뒷부분(예: 20단계
+    중 15번째)의 오류가 앞부분의 무거운 연산(DB 조회 등)을 이미 다 실행한 뒤에야 드러난다
+    (이 머신엔 실거래봇 quant_trader가 상주하므로 낭비된 연산도 비용이다). 여기서는 실행
+    없이 확인 가능한 두 가지만 미리 잡는다: (1) LLM이 지어낸 알 수 없는 연산, (2) 아직
+    정의되지 않은 결과를 가리키는 "$ref"(오타 등). 발견된 오류 메시지 리스트를 반환하며,
+    비어있으면 유효하다는 뜻이다.
+    """
+    if not isinstance(steps, list):
+        return ["pipeline steps는 list여야 합니다"]
+
+    errors: list[str] = []
+    defined: set[str] = set()
+    for i, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            errors.append(f"스텝 {i}: 각 스텝은 객체(dict)여야 합니다")
+            continue
+        op = step.get("op")
+        if op not in PRIMITIVE_OPS:
+            errors.append(f"스텝 {i}: 알 수 없는 연산 '{op}'")
+        params = step.get("params", {})
+        if isinstance(params, dict):
+            for val in params.values():
+                if isinstance(val, dict) and set(val.keys()) == {"$ref"}:
+                    ref = val["$ref"]
+                    if ref not in defined:
+                        errors.append(f"스텝 {i}: 참조 '{ref}'가 아직 정의되지 않았습니다")
+        out = step.get("out")
+        if out:
+            defined.add(out)
+    return errors
+
+
 def answer_backtest_question(
     question: str,
     steps: list[dict],
@@ -272,6 +307,23 @@ def answer_backtest_question(
         steps = generate_steps_fn(question, llm_fn)
         if on_progress:
             on_progress("audit", f"실행계획 생성 완료({len(steps)}단계)")
+
+    # 0.5) 사전검증: run_pipeline이 실제로 실행하기 전에 구조적 오류(알 수 없는 연산/
+    #      미정의 참조)를 잡는다. 통과하지 못하면 데이터 준비/감사배선 모두 건너뛰고
+    #      즉시 불확실 응답으로 처리한다 — 잘못된 파이프라인의 앞부분만 실행하고
+    #      뒷부분에서야 실패하는 연산 낭비를 막는다.
+    validation_errors = validate_pipeline_steps(steps)
+    if validation_errors:
+        if on_progress:
+            on_progress("audit", f"실행계획 검증 실패({len(validation_errors)}건)")
+        return {
+            "blocked": True,
+            "error": "실행계획이 유효하지 않습니다: " + "; ".join(validation_errors),
+            "result": None,
+            "hard": [],
+            "warnings": [],
+            "data": [],
+        }
 
     # 1) 데이터 준비(옵션): 시계열 스냅샷은 HA-1 실행기(execute_sql)를 경유하는
     #    데이터 에이전트에 위임한다. stock_codes가 없으면 무거운 조회를 생략한다.

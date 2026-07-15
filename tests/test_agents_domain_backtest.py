@@ -17,7 +17,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-from src.agents.domain_backtest import answer_backtest_question, generate_backtest_steps
+from src.agents.domain_backtest import (
+    answer_backtest_question,
+    generate_backtest_steps,
+    validate_pipeline_steps,
+)
 from src.backtest.pipeline_exec import run_pipeline as real_run_pipeline
 from src.db import connect, connect_readonly, init_db
 
@@ -371,3 +375,109 @@ def test_on_progress_without_it_is_unaffected(tmp_path):
         run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
     )
     assert out["blocked"] is False
+
+
+# ── 파이프라인 사전검증(HA-9) — LLM이 지어낸 알 수 없는 연산/미정의 참조를 run_pipeline이
+#    실제로 실행하기 전에 잡아낸다. 검증 없이는 20단계 중 뒷부분에서 문제가 생겨도 앞부분의
+#    무거운 연산(DB 조회 등)이 이미 다 실행된 뒤에야 실패가 드러난다(실거래봇 상주 머신이라
+#    낭비된 연산도 비용). ─────────────────────────────────────────────────────────────
+def test_validate_pipeline_steps_returns_empty_for_valid_pipeline():
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-15"}, "out": "xs"},
+        {"op": "combine", "params": {"rows": {"$ref": "xs"}, "criteria": []}, "out": "picked"},
+    ]
+    assert validate_pipeline_steps(steps) == []
+
+
+def test_validate_pipeline_steps_returns_empty_for_empty_list():
+    assert validate_pipeline_steps([]) == []
+
+
+def test_validate_pipeline_steps_detects_unknown_op():
+    steps = [{"op": "delete_all_data", "params": {}, "out": "x"}]
+    errors = validate_pipeline_steps(steps)
+    assert len(errors) == 1
+    assert "delete_all_data" in errors[0]
+
+
+def test_validate_pipeline_steps_detects_undefined_ref():
+    """앞 스텝이 정의하지 않은 이름을 참조하면(오타 등) 실행 전에 잡는다."""
+    steps = [{"op": "combine", "params": {"rows": {"$ref": "존재안함"}, "criteria": []}, "out": "picked"}]
+    errors = validate_pipeline_steps(steps)
+    assert len(errors) == 1
+    assert "존재안함" in errors[0]
+
+
+def test_validate_pipeline_steps_allows_ref_to_earlier_step_out():
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-15"}, "out": "xs"},
+        {"op": "zscore", "params": {"rows": {"$ref": "xs"}, "field": "per"}, "out": "ranked"},
+    ]
+    assert validate_pipeline_steps(steps) == []
+
+
+def test_validate_pipeline_steps_collects_multiple_errors():
+    steps = [
+        {"op": "unknown_op_1", "params": {}, "out": "a"},
+        {"op": "combine", "params": {"rows": {"$ref": "없는참조"}, "criteria": []}, "out": "b"},
+    ]
+    errors = validate_pipeline_steps(steps)
+    assert len(errors) == 2
+
+
+def test_answer_backtest_question_blocks_and_skips_execution_on_unknown_op(tmp_path):
+    """알 수 없는 연산이 있으면 run_pipeline_fn/run_audit_fn을 아예 호출하지 않는다(실행 낭비 방지)."""
+    conn = _writable_conn(tmp_path)
+    pipeline_calls: list = []
+    audit_calls: list = []
+
+    out = answer_backtest_question(
+        "이상한 백테스트", [{"op": "존재하지않는연산", "params": {}, "out": "x"}], conn,
+        run_pipeline_fn=lambda s, conn=None: pipeline_calls.append(s) or dict(_BT_RESULT),
+        run_audit_fn=lambda *a, **k: audit_calls.append(a) or {
+            "blocked": False, "error": None, "result": dict(_BT_RESULT), "hard": [], "warnings": [],
+        },
+    )
+
+    assert pipeline_calls == []
+    assert audit_calls == []
+    assert out["blocked"] is True
+    assert "존재하지않는연산" in out["error"]
+    assert out["result"] is None
+
+
+def test_answer_backtest_question_blocks_on_undefined_ref(tmp_path):
+    conn = _writable_conn(tmp_path)
+    steps = [{"op": "combine", "params": {"rows": {"$ref": "없음"}, "criteria": []}, "out": "picked"}]
+
+    out = answer_backtest_question(
+        "질문", steps, conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
+    )
+
+    assert out["blocked"] is True
+    assert "없음" in out["error"]
+
+
+def test_answer_backtest_question_reports_progress_on_validation_failure(tmp_path):
+    conn = _writable_conn(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    answer_backtest_question(
+        "질문", [{"op": "없는연산", "params": {}, "out": "x"}], conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
+        on_progress=lambda step, summary: events.append((step, summary)),
+    )
+
+    assert any("검증" in s for _, s in events)
+
+
+def test_answer_backtest_question_still_runs_valid_pipeline_after_validation_added(tmp_path):
+    """유효한 파이프라인은 검증 도입 후에도 그대로 실행된다(회귀 방지)."""
+    conn = _writable_conn(tmp_path)
+    out = answer_backtest_question(
+        "저PER 백테스트", [{"op": "run_backtest", "params": {}, "out": "bt"}], conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
+    )
+    assert out["blocked"] is False
+    assert out["result"]["performance"]["cagr"] == 5.0
