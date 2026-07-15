@@ -300,6 +300,32 @@ def test_resolve_ticker_us_extracts_ticker_from_verbose_llm_response(tmp_path):
     assert ticker == "NVDA"
 
 
+def test_resolve_ticker_us_prefers_exact_ticker_over_name_substring(tmp_path):
+    """LLM이 올바른 티커(META)를 줬는데 그 문자열이 다른 회사명("Aqua Metals")의 부분
+    문자열이라 회사명 부분조회가 엉뚱한 종목(AQMS)을 먼저 잡아채던 실측 버그 회귀 방지
+    (experiment/us-domain-llm-flexible 비교에서 세 접근법 모두 공통 실패했던 지점).
+    stock_code 완전일치(META)를 이름 부분일치(Aqua Metals)보다 먼저 확인해야 한다."""
+    db = _seed_us_db(tmp_path)
+    seed_conn = connect(db)
+    seed_conn.executemany(
+        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            ("AQMS", "Aqua Metals Inc. Common Stock", "NASDAQ", "Materials", 1.0e8, "2026-07-01"),
+            ("META", "Meta Platforms Inc. Class A Common Stock", "NASDAQ", "Technology", 1.2e12, "2026-07-01"),
+        ],
+    )
+    seed_conn.commit()
+    seed_conn.close()
+    conn = connect_readonly(db)
+
+    try:
+        ticker = resolve_ticker_us("메타 주가 알려줘", conn, llm_fn=lambda p: "META")
+    finally:
+        conn.close()
+    assert ticker == "META"  # AQMS가 아니라 완전일치 티커 META
+
+
 def test_resolve_ticker_us_returns_none_when_unresolvable(tmp_path):
     db = _seed_us_db(tmp_path)
     conn = connect_readonly(db)

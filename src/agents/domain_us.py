@@ -173,18 +173,45 @@ def resolve_ticker_us(
     return None
 
 
+def _lookup_exact_ticker(conn, code: str, execute_sql_fn: Callable | None = None) -> str | None:
+    """guess가 us_company.stock_code와 '완전히 일치'하는 실제 티커인지 확인한다.
+
+    회사명 부분일치(_lookup_ticker_by_name)와 달리 stock_code 완전일치만 본다. LLM이
+    올바른 티커(예: "META")를 돌려줬는데도 그 문자열이 다른 회사명의 부분 문자열이라
+    (예: "META" ⊂ "Aqua Metals Inc.") 회사명 조회가 엉뚱한 종목(AQMS)을 먼저 잡아채던
+    실측 버그(experiment/us-domain-llm-flexible 비교에서 A/B 세 접근 모두 공통 실패)를
+    막기 위해, 회사명 부분일치보다 먼저 이 완전일치를 확인한다.
+    """
+    execute_sql_fn = execute_sql_fn or execute_sql
+    up = (code or "").strip().upper()
+    if not _TICKER_RE.match(up):
+        return None
+    escaped = up.replace("'", "''")
+    result = execute_sql_fn(f"SELECT stock_code FROM us_company WHERE stock_code='{escaped}'", conn)
+    if not result.get("ok") or not result["rows"]:
+        return None
+    return result["rows"][0]["stock_code"]
+
+
 def _resolve_from_llm_guess(
     guess: str | None, conn, execute_sql_fn: Callable | None = None
 ) -> str | None:
-    """llm_fn 추측 하나를 회사명 조회 → 티커 형식 매치 순으로 티커로 확정 시도한다."""
+    """llm_fn 추측 하나를 (완전일치 티커 → 회사명 부분조회 → 티커 형식) 순으로 확정 시도한다."""
     if not guess:
         return None
     guess = guess.strip()
     if not guess:
         return None
-    # 회사명 조회를 먼저 시도한다 — 짧은 회사명(예: "Apple")은 티커 형식 정규식과 우연히
-    # 겹칠 수 있어(예: "APPLE"도 6자 이하 대문자), 실제 us_company에 존재하는지부터
-    # 확인하는 편이 오탐(hallucination) 위험이 낮다. 못 찾으면 리터럴 티커로 폴백한다.
+    # (1) 완전일치 티커 우선: guess가 실제 us_company.stock_code면 그대로 채택한다. 회사명
+    # 부분일치보다 먼저 봐야, 올바른 티커("META")가 다른 회사명("Aqua Metals")의 부분
+    # 문자열이라 엉뚱한 종목(AQMS)으로 새는 것을 막는다(실측 재현: "메타 주가" → AQMS).
+    exact = _lookup_exact_ticker(conn, guess, execute_sql_fn=execute_sql_fn)
+    if exact:
+        return exact
+    # (2) 회사명 부분조회 — 짧은 회사명(예: "Apple")은 티커 형식 정규식과 우연히 겹칠 수
+    # 있어(예: "APPLE"도 6자 이하 대문자), 실제 us_company에 존재하는지부터 확인하는 편이
+    # 오탐(hallucination) 위험이 낮다. "APPLE"은 완전일치 티커가 아니므로 (1)을 지나 여기서
+    # AAPL로 해석된다(회귀 없음). 못 찾으면 리터럴 티커로 폴백한다.
     by_name = _lookup_ticker_by_name(conn, guess, execute_sql_fn=execute_sql_fn)
     if by_name:
         return by_name
