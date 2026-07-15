@@ -99,6 +99,21 @@ def execute_sql(
          "error": str | None}
     """
     def _work() -> dict:
+        # 실행 전 스키마 유효성(존재하는 테이블/컬럼) 사전검증(SoT [SQL] 원칙).
+        # SQL을 직접 파싱하지 않고 SQLite 엔진에 위임한다: EXPLAIN은 실행 계획(opcode)만
+        # 컴파일하고 실제로 행을 읽지 않으므로, 존재하지 않는 테이블/컬럼이면 무거운 스캔이
+        # 시작되기 전에 이 컴파일 단계에서 곧바로 OperationalError가 난다.
+        try:
+            conn.execute(f"EXPLAIN {sql}")
+        except sqlite3.Error as e:
+            return {
+                "ok": False,
+                "columns": [],
+                "rows": [],
+                "row_count": 0,
+                "error": f"스키마 검증 실패: {type(e).__name__}: {e}",
+            }
+
         cur = conn.execute(sql)
         columns = [d[0] for d in cur.description] if cur.description else []
         fetched = cur.fetchmany(max_rows)

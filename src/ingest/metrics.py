@@ -1,7 +1,7 @@
 """파생 지표 계산 (financials + prices → metrics).
 
 밸류
-- PER = 시총 / 당기순이익(TTM) · PBR = 시총 / 자본총계
+- PER = 시총 / 당기순이익(TTM) · PBR = 시총 / 지배주주지분
 - PSR = 시총 / 매출(TTM) · PCR = 시총 / 영업현금흐름(TTM)
 - EV/EBITDA = (시총+부채-현금) / (영업이익+감가상각, TTM) · PEG = PER / 순이익성장률
 수익성
@@ -24,6 +24,14 @@ from datetime import date, timedelta
 from ..version import effective_price_date, effective_quarter, shift_quarter
 
 _PCT = 100.0
+
+# 이상치/오류 가드 임계값(단일 정의처 — src/backtest/data_access.py의 metrics_at()이
+# 질의 경로와 동일 기준을 쓰도록 여기서 import해 공유한다. son-checker 이슈 #23 IMP-C:
+# 예전엔 두 파일에 거의 동일하게 매직넘버가 복붙돼 있어 나중에 따로 놀 위험이 있었다).
+CONTROLLING_EQUITY_MAX_RATIO = 1.05  # 지배주주지분이 자본총계의 이 배수를 넘으면 수집 오류로 간주
+CONTROLLING_EQUITY_MIN_RATIO = 0.20  # 지배주주지분이 자본총계의 이 비율 미만이면 수집 오류로 간주
+NI_TO_EQUITY_MAX_RATIO = 20          # 순이익이 자기자본의 이 배수를 넘으면(Q4 차분 폭발 등) 무효화
+CAP_TO_EQUITY_MAX_RATIO = 100        # 시총이 자기자본의 이 배수를 넘으면(PBR 극단) 시총 기반 지표 무효화
 
 
 def _fin(conn, code, quarter, key):
@@ -62,7 +70,11 @@ def controlling_equity(conn, code, quarter):
     v = _fin(conn, code, quarter, "controlling_equity")
     total = _fin(conn, code, quarter, "total_equity")
     if total is not None and total > 0:
-        if v is None or v > total * 1.05 or v < total * 0.20:
+        if (
+            v is None
+            or v > total * CONTROLLING_EQUITY_MAX_RATIO
+            or v < total * CONTROLLING_EQUITY_MIN_RATIO
+        ):
             return total
     elif v is None:
         return total
@@ -171,14 +183,19 @@ def compute_metrics(conn: sqlite3.Connection, d=None) -> int:
         # - 스팩(기업인수목적회사): 현금성 자산 덩어리라 PER/ROE/PBR 무의미 → 가치·수익성 지표 제외
         is_spac = ("스팩" in name) or ("기업인수목적" in name)
         # - 순이익이 자기자본 대비 비현실적으로 거대(Q4 차분 폭발/원본 오류)면 순이익 기반 지표 무효화
-        if ni_ttm is not None and equity and equity > 0 and abs(ni_ttm) > equity * 20:
+        if ni_ttm is not None and equity and equity > 0 and abs(ni_ttm) > equity * NI_TO_EQUITY_MAX_RATIO:
             ni_ttm = None
-        if ctrl_ni_ttm is not None and equity and equity > 0 and abs(ctrl_ni_ttm) > equity * 20:
+        if (
+            ctrl_ni_ttm is not None
+            and equity
+            and equity > 0
+            and abs(ctrl_ni_ttm) > equity * NI_TO_EQUITY_MAX_RATIO
+        ):
             ctrl_ni_ttm = None
         # - 시총이 자기자본의 100배 초과(PBR>100) → 상장주식수/주가 데이터 오류 의심
         #   (예: 서린바이오 시총 40조 = 종가×주식수 91억주, 자본 853억 → PBR 469배).
         #   시총 기반 지표(PER·PBR·PSR·시총)를 무효화한다.
-        if cap is not None and equity and equity > 0 and cap > equity * 100:
+        if cap is not None and equity and equity > 0 and cap > equity * CAP_TO_EQUITY_MAX_RATIO:
             cap = None
 
         # 밸류
@@ -193,7 +210,8 @@ def compute_metrics(conn: sqlite3.Connection, d=None) -> int:
 
         # 수익성
         # ② ROE = 지배주주순이익(TTM) ÷ 4분기 평균 지배주주지분. 분자·분모 모두 지배주주 귀속으로 대응.
-        #    양수이고 자본 평균 미만(<100%)일 때만 인정(일회성 폭발 제외).
+        #    부호는 그대로 인정(적자면 음수=유효, net_margin과 동일 관례). 다만 자본 평균 초과(≥100%,
+        #    일회성 폭발)는 이상치로 보고 제외한다.
         roe = _div(ctrl_ni_ttm, avg_eq, pct=True) if (
             not is_spac and ctrl_ni_ttm and avg_eq and avg_eq > 0 and ctrl_ni_ttm < avg_eq
         ) else None

@@ -198,6 +198,62 @@ def test_execute_python_cpu_limit_kills_busy_loop():
     assert res["error"] != "timeout"  # CPU 상한이 먼저 걸려야 함(전체 타임아웃 120s보다 훨씬 빨리)
 
 
+# ── SQL 실행 전 스키마 사전검증 (son-checker 이슈 #23 BUG-3) ──────────────
+class _SpyConn:
+    """실제 conn.execute를 그대로 위임하되, 호출된 SQL 문자열을 전부 기록한다.
+
+    사전검증(EXPLAIN)이 실제 실행(원본 SQL 그대로의 execute 호출)보다 먼저 일어나고,
+    검증 실패 시 원본 SQL로는 아예 execute가 호출되지 않는지 확인하는 데 쓴다.
+    """
+
+    def __init__(self, real_conn):
+        self._real = real_conn
+        self.calls: list[str] = []
+
+    def execute(self, sql):
+        self.calls.append(sql)
+        return self._real.execute(sql)
+
+    def interrupt(self):
+        self._real.interrupt()
+
+
+def test_execute_sql_rejects_unknown_table_before_running_real_query(tmp_path):
+    real_conn = connect_readonly(_seed(tmp_path))
+    spy = _SpyConn(real_conn)
+    try:
+        res = execute_sql("SELECT * FROM no_such_table", spy)
+    finally:
+        real_conn.close()
+    assert res["ok"] is False
+    assert "no_such_table" in res["error"]
+    # 원본 SQL 그대로는 한 번도 execute되지 않아야 한다(사전검증에서 이미 차단됨).
+    assert "SELECT * FROM no_such_table" not in spy.calls
+
+
+def test_execute_sql_rejects_unknown_column_before_running_real_query(tmp_path):
+    real_conn = connect_readonly(_seed(tmp_path))
+    spy = _SpyConn(real_conn)
+    try:
+        res = execute_sql("SELECT no_such_col FROM company", spy)
+    finally:
+        real_conn.close()
+    assert res["ok"] is False
+    assert "no_such_col" in res["error"]
+    assert "SELECT no_such_col FROM company" not in spy.calls
+
+
+def test_execute_sql_valid_query_still_runs_normally_after_schema_check(tmp_path):
+    """사전검증 추가가 정상 SQL의 기존 동작(결과 반환)을 깨지 않는지 회귀 확인."""
+    conn = connect_readonly(_seed(tmp_path))
+    try:
+        res = execute_sql("SELECT stock_code, name FROM company ORDER BY stock_code", conn)
+    finally:
+        conn.close()
+    assert res["ok"] is True
+    assert res["row_count"] == 2
+
+
 # ── 정적 안전 검사 ─────────────────────────────────────────────────────────
 def test_source_has_no_primitive_ops_whitelist():
     """신규 실행기는 고정 dict 화이트리스트 디스패치를 쓰지 않는다."""

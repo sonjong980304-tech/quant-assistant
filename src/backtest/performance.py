@@ -54,6 +54,9 @@ def performance(navs: list[float], periods_per_year: float, benchmark: list[floa
         out["benchmark_return"] = round(b_total * 100, 2)
         out["excess_return"] = round((total_return - b_total) * 100, 2)
         if brets.std() > 1e-6:
-            beta = float(np.cov(rets, brets)[0, 1] / brets.var())
+            # np.cov는 기본 ddof=1(N-1)인데 ndarray.var()는 기본 ddof=0(N)이라 분자·분모의
+            # 추정량이 어긋나 베타가 항상 N/(N-1)배 과대계산됐다(son-checker 이슈 #23 BUG-2).
+            # 분모를 공분산과 같은 ddof=1로 맞춘다.
+            beta = float(np.cov(rets, brets)[0, 1] / brets.var(ddof=1))
             out["beta"] = round(beta, 3)
     return out

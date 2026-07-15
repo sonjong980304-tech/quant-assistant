@@ -111,7 +111,11 @@ def ingest_delisting(db_path: Optional[str] = None, years_back: int = 10,
 
     pykrx에 직접 상폐 목록 API가 없으므로, `years_back`년 전 시점 상장종목과
     현재 상장종목의 차집합을 상폐로 추정해 delisting 테이블에 적재한다.
-    delisting_date는 정확히 모르므로 공란("")으로 둔다.
+    delisting_date는 정확히 모르므로 NULL로 둔다.
+
+    이미 delisting 테이블에 있는 종목은 절대 덮어쓰지 않는다(INSERT OR IGNORE) —
+    수작업/별도 경로로 이미 정확한 delisting_date가 채워진 종목을 이 함수 재실행이
+    빈 값으로 지워버리는 사고(son-checker 이슈 #23 BUG-1)를 막기 위함이다.
 
     반환: 리포트 dict.
     """
@@ -147,8 +151,8 @@ def ingest_delisting(db_path: Optional[str] = None, years_back: int = 10,
             except Exception:  # noqa: BLE001
                 name = ""
             conn.execute(
-                "INSERT OR REPLACE INTO delisting(stock_code, name, delisting_date) VALUES(?,?,?)",
-                (code, name or "", ""),
+                "INSERT OR IGNORE INTO delisting(stock_code, name, delisting_date) VALUES(?,?,?)",
+                (code, name or "", None),
             )
             n += 1
         conn.commit()

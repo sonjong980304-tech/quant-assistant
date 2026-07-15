@@ -13,6 +13,7 @@ from ..data_quality import get_price_quality_excluded_codes
 from ..ingest.metrics import (
     _div, _fin, _sum_ttm, _yoy,
     controlling_equity, avg_controlling_equity,
+    NI_TO_EQUITY_MAX_RATIO, CAP_TO_EQUITY_MAX_RATIO,
 )
 
 
@@ -171,15 +172,21 @@ def metrics_at(conn, asof: str) -> list[dict]:
 
         # 순이익 데이터 오류(자기자본 대비 비현실적 거대 = Q4 차분 폭발/원본 오류) 방어.
         # 순이익 기반 지표(PER·ROE·ROA)를 무효화해 다원넥스뷰 5.7경 같은 종목을 배제.
-        if ni_ttm is not None and equity and equity > 0 and abs(ni_ttm) > equity * 20:
+        if ni_ttm is not None and equity and equity > 0 and abs(ni_ttm) > equity * NI_TO_EQUITY_MAX_RATIO:
             ni_ttm = None
-        if ctrl_ni_ttm is not None and equity and equity > 0 and abs(ctrl_ni_ttm) > equity * 20:
+        if (
+            ctrl_ni_ttm is not None
+            and equity
+            and equity > 0
+            and abs(ctrl_ni_ttm) > equity * NI_TO_EQUITY_MAX_RATIO
+        ):
             ctrl_ni_ttm = None
         # 시총이 자기자본의 100배 초과(PBR>100) → 상장주식수/주가 오류 의심 → 시총 기반 지표 무효
-        if cap is not None and equity and equity > 0 and cap > equity * 100:
+        if cap is not None and equity and equity > 0 and cap > equity * CAP_TO_EQUITY_MAX_RATIO:
             cap = None
 
-        # ROE = 지배주주순이익(TTM) ÷ 지배주주지분 평균. 양수이고 자본평균 미만(<100%)일 때만 인정.
+        # ROE = 지배주주순이익(TTM) ÷ 지배주주지분 평균. 부호는 그대로 인정(적자면 음수=유효,
+        # net_margin과 동일 관례). 자본평균 초과(≥100%, 일회성 폭발)만 이상치로 제외.
         roe = _div(ctrl_ni_ttm, avg_eq, pct=True) if (ctrl_ni_ttm and avg_eq and avg_eq > 0 and ctrl_ni_ttm < avg_eq) else None
         # 영업이익률은 단일분기 op<rev(마진<100%)일 때만 — 지주사·금융 지분법이익 폭발 제외
         op_margin = _div(op_q, rev_q, pct=True) if (rev_q and rev_q > 0 and op_q is not None and op_q < rev_q) else None
