@@ -65,11 +65,10 @@ flowchart TB
     MACRO_BOX --> VERIFY
     BT_BOX --> VERIFY
 
-    VERIFY{{"🔁 총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증"}}
-    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기"])
+    VERIFY{{"🔁 총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증<br/>불일치 시 도메인 재-dispatch (최대 3회 재시도)"}}
+    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기<br/>(3회 초과해도 uncertain=True로 그 상태 그대로 확정)"])
 
-    VERIFY -->|"불일치 → 재시도 (최대 3회)"| SUP
-    VERIFY -->|"일치 · 3회 초과 시 uncertain=True로 확정"| RESULT
+    VERIFY --> RESULT
 
     classDef q fill:#f1f3f5,stroke:#868e96,color:#212529,font-weight:bold
     classDef sup fill:#1f2a44,stroke:#0d1424,color:#ffffff,font-weight:bold
