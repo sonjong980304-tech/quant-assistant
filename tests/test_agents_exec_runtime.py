@@ -103,11 +103,64 @@ def test_execute_python_exception_is_captured_not_raised():
     assert res["result"] is None
 
 
-def test_execute_python_timeout_via_fake_slow_function():
-    """time.sleep을 흉내내는 느린 함수 주입 → 타임아웃 초과 시 실패 처리."""
-    res = execute_python("slow()", context={"slow": lambda: time.sleep(0.5)}, timeout=0.05)
+def test_execute_python_timeout_via_slow_code():
+    """느린 코드(문자열 자체에 sleep) → 타임아웃 초과 시 실패 처리.
+
+    별도 프로세스로 실행하므로 context에 함수 객체(lambda 등)를 담아 넘길 수 없다
+    (직렬화 불가) — 느린 동작은 code 문자열 안에서 직접 표현한다.
+    """
+    res = execute_python("import time; time.sleep(0.5)", timeout=0.05)
     assert res["ok"] is False
     assert res["error"] == "timeout"
+
+
+def test_execute_python_timeout_actually_kills_child_process(tmp_path):
+    """타임아웃 후에도 스레드처럼 백그라운드에 방치되지 않고 프로세스 자체가 죽는지 확인.
+
+    자식이 하트비트 파일에 계속 시각을 기록하게 하고, 타임아웃 반환 후 잠깐 기다렸다가
+    하트비트가 더 이상 갱신되지 않으면 프로세스가 실제로 종료된 것으로 판단한다.
+    """
+    heartbeat = tmp_path / "heartbeat.txt"
+    code = (
+        "import time\n"
+        f"path = {str(heartbeat)!r}\n"
+        "while True:\n"
+        "    with open(path, 'a') as f:\n"
+        "        f.write('x')\n"
+        "    time.sleep(0.02)\n"
+    )
+    res = execute_python(code, timeout=0.2)
+    assert res["ok"] is False
+    assert res["error"] == "timeout"
+
+    size_at_timeout = heartbeat.stat().st_size if heartbeat.exists() else 0
+    time.sleep(0.3)  # 프로세스가 살아있었다면 이 사이 하트비트가 더 늘어났을 것
+    size_after_wait = heartbeat.stat().st_size if heartbeat.exists() else 0
+    assert size_after_wait == size_at_timeout, "타임아웃 이후에도 자식 프로세스가 계속 실행 중임"
+
+
+def test_execute_python_runs_in_separate_process_not_main():
+    """메인 프로세스가 아니라 별도 프로세스에서 실행되는지 확인(pid 비교)."""
+    import os
+
+    res = execute_python("import os; result = os.getpid()")
+    assert res["ok"] is True
+    assert res["result"] != os.getpid()
+
+
+def test_execute_python_cpu_limit_kills_busy_loop():
+    """CPU 사용시간 상한(RLIMIT_CPU)이 걸려 있어, 오래 도는 순수 연산 루프가
+    (타임아웃보다 먼저) 상한 초과로 실패 처리된다.
+
+    실측 확인(macOS): RLIMIT_CPU는 실제로 강제되어 SIGXCPU로 프로세스가 죽는다
+    (RLIMIT_AS 메모리 상한과 달리 이 플랫폼에서 신뢰성 있게 동작함).
+    """
+    from src.agents import exec_runtime
+
+    code = "x = 0\nwhile True:\n    x += 1\n"
+    res = execute_python(code, timeout=exec_runtime.MAX_TIMEOUT, cpu_seconds=1)
+    assert res["ok"] is False
+    assert res["error"] != "timeout"  # CPU 상한이 먼저 걸려야 함(전체 타임아웃 120s보다 훨씬 빨리)
 
 
 # ── 정적 안전 검사 ─────────────────────────────────────────────────────────
