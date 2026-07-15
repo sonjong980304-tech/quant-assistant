@@ -10,7 +10,13 @@ pipeline_exec.py(고정 dict 연산 화이트리스트 + eval/exec 금지)와의
 1. SQL 경로는 **읽기전용 연결(connect_readonly, src/db.py)만** 받는다. LLM이 생성한
    신뢰불가 SQL을 읽기전용 연결에서만 실행하면, 필터를 우회당해도 sqlite 엔진이 모든
    쓰기/DDL을 거부한다("attempt to write a readonly database"). src/pipeline.py의
-   defense-in-depth 패턴(self.roconn)을 그대로 따른다.
+   defense-in-depth 패턴(self.roconn)을 그대로 따른다. timeout 초과 시
+   threading.Timer로 conn.interrupt()를 걸어 진행 중인 쿼리를 실제로 중단시킨다 —
+   그냥 future.result(timeout=...)만 쓰면 워커 스레드 자체는 계속 실행되며 방치되고,
+   web/app.py의 finally: conn.close()와 겹치면 아직 그 연결을 쓰는 백그라운드 스레드를
+   메인이 닫아버리는 레이스가 날 수 있었다(실측: check_same_thread=False 연결에서
+   다른 스레드의 conn.interrupt()가 진행 중인 execute()를 즉시 중단시키고, 그 뒤에도
+   연결이 정상 재사용 가능함을 확인).
 2. Python 경로는 **별도 프로세스**(multiprocessing, spawn)에서 실행한다. 이
    컴퓨터엔 실거래봇이 상주하고 웹서버가 외부에 노출돼 있어, 신뢰불가 코드를 메인
    프로세스 스레드에서 그대로 돌리던 이전 방식은 문제가 그 프로세스 전체로 번질 위험이
@@ -26,6 +32,7 @@ from __future__ import annotations
 
 import multiprocessing
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
@@ -58,6 +65,18 @@ def _run_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
             raise TimeoutError(f"실행 타임아웃({timeout}s 초과)") from exc
 
 
+def _interrupt_connection(conn: sqlite3.Connection) -> None:
+    """timeout 도달 시 진행 중인 쿼리를 실제로 중단시킨다(워커 스레드 정리 목적).
+
+    fake 커넥션(테스트용) 등 interrupt()가 없는 객체가 들어와도 조용히 무시한다 —
+    이 타이머의 실패가 execute_sql의 반환 흐름(정상/타임아웃 처리)을 막으면 안 된다.
+    """
+    try:
+        conn.interrupt()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def execute_sql(
     sql: str,
     conn: sqlite3.Connection,
@@ -70,7 +89,9 @@ def execute_sql(
         sql: 실행할 SQL(신뢰불가). 안전은 conn의 읽기전용 여부에 의존한다.
         conn: **읽기전용 연결(connect_readonly)** 을 넘겨야 한다. 쓰기 SQL이 들어와도
             엔진이 거부하며(ok=False, error에 'readonly ...'), 그 에러가 결과로 잡힌다.
-        timeout: 실행 상한(초). 초과 시 ok=False, error="timeout".
+        timeout: 실행 상한(초). 초과 시 ok=False, error="timeout"(또는 인터럽트로 인한
+            sqlite3 에러) — 어느 쪽이든 진행 중이던 쿼리는 conn.interrupt()로 실제
+            중단되며 워커 스레드가 방치되지 않는다.
         max_rows: 가져올 최대 행 수.
 
     Returns:
@@ -90,12 +111,19 @@ def execute_sql(
             "error": None,
         }
 
+    # timeout 시점에 진행 중인 쿼리를 실제로 중단시켜 워커 스레드가 방치되지 않게 한다
+    # (future.result(timeout=...)만으로는 스레드 자체는 계속 실행됨 — 그 상태로 호출부가
+    # conn.close()를 하면 아직 그 연결을 쓰는 스레드와 레이스가 날 수 있었다). 정상
+    # 완료 시에는 반드시 취소해야 다음 쿼리에 뒤늦게 인터럽트가 걸리는 걸 막는다.
+    timer = threading.Timer(timeout, _interrupt_connection, args=(conn,))
+    timer.start()
     try:
         return _run_with_timeout(_work, timeout)
     except TimeoutError:
         return {"ok": False, "columns": [], "rows": [], "row_count": 0, "error": "timeout"}
     except sqlite3.Error as e:
-        # 읽기전용 연결에 대한 쓰기 시도("attempt to write a readonly database") 등을 여기서 잡는다.
+        # 읽기전용 연결에 대한 쓰기 시도("attempt to write a readonly database"),
+        # 또는 위 타이머의 conn.interrupt()로 인한 중단("interrupted") 등을 여기서 잡는다.
         return {
             "ok": False,
             "columns": [],
@@ -103,6 +131,8 @@ def execute_sql(
             "row_count": 0,
             "error": f"{type(e).__name__}: {e}",
         }
+    finally:
+        timer.cancel()
 
 
 def _execute_python_child(

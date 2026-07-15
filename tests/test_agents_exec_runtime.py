@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -80,6 +81,40 @@ def test_execute_sql_timeout_with_fake_slow_connection():
     res = execute_sql("SELECT 1", _SlowConn(), timeout=0.05)
     assert res["ok"] is False
     assert res["error"] == "timeout"
+
+
+def test_execute_sql_timeout_interrupts_running_query_and_cleans_up_thread(tmp_path):
+    """타임아웃 시 conn.interrupt()로 진행 중인 쿼리를 실제로 중단시켜, 워커 스레드가
+    방치되지 않고 정리되는지 확인한다.
+
+    실측 확인(check_same_thread=False 연결에서): 다른 스레드의 conn.interrupt() 호출이
+    진행 중인 execute()를 sqlite3.OperationalError("interrupted")로 즉시 중단시키고,
+    그 이후에도 연결은 정상 재사용 가능하다. web/app.py의 finally: conn.close()가 아직
+    실행 중인 백그라운드 스레드와 겹치는 레이스를 막으려면, 타임아웃 시 워커 스레드가
+    실제로 빨리 정리돼야 한다(방치되면 안 됨).
+    """
+    conn = connect_readonly(_seed(tmp_path))
+    try:
+        slow_sql = (
+            "WITH RECURSIVE cnt(x) AS ("
+            "SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 500000000"
+            ") SELECT COUNT(*) FROM cnt"
+        )
+        threads_before = threading.active_count()
+        res = execute_sql(slow_sql, conn, timeout=0.2)
+        assert res["ok"] is False
+        assert res["error"]
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and threading.active_count() > threads_before:
+            time.sleep(0.05)
+        assert threading.active_count() <= threads_before, "타임아웃 후에도 워커 스레드가 방치됨"
+
+        # interrupt 후에도 연결이 정상 재사용 가능해야 한다(다음 쿼리가 막히지 않음).
+        res2 = execute_sql("SELECT stock_code FROM company ORDER BY stock_code LIMIT 1", conn)
+        assert res2["ok"] is True
+    finally:
+        conn.close()
 
 
 # ── Python 실행 경로 ───────────────────────────────────────────────────────
