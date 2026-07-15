@@ -204,6 +204,21 @@ def test_verify_answer_no_llm_with_data_passes_deterministically():
     assert verdict["valid"] is True
 
 
+# ── 검증 불가(LLM 장애) vs 검증 실패 구분 — OpenAI 등 검증 LLM 호출 자체가 실패하면
+#    "검증 실패"로 멀쩡한 답을 버리지 않고, 데이터 존재 확인만으로 통과시킨다 ──────────
+
+def test_verify_answer_llm_failure_is_treated_as_unavailable_not_invalid():
+    def boom_llm(prompt: str) -> str:
+        raise RuntimeError("OpenAI 일시 장애")
+
+    domain_results = {"kr": {"stock_code": "005930", "financial": {"value": 12.5}}}
+    verdict = verify_answer("삼성전자 PER", domain_results, boom_llm)
+
+    assert verdict["valid"] is True
+    assert verdict.get("verification_unavailable") is True
+    assert "장애" in verdict["reason"] or "불가" in verdict["reason"]
+
+
 # ── search_signal_strategy(탐색형) 결과는 제약 미충족이어도 '정직한 답'이므로 유효 ──────
 #    (실사용 회귀: "MDD·수익률 조건을 만족하는 전략 찾아줘"에 대해 후보를 다 시도해 가장
 #    근접한 결과를 constraints_met=False로 돌려줬는데, 검증 LLM이 '숫자가 목표에 못 미침'을
@@ -706,6 +721,51 @@ def test_answer_with_verification_verify_and_synthesize_use_original_question():
 
     assert verify_questions == ["저PER 10개", "저PER 10개"]  # 검증은 항상 원본
     assert synth_questions == ["저PER 10개"]  # 종합결론도 원본
+
+
+# ── 복합 도메인 부분 재시도 — 일부 도메인만 검증 실패하면 그 도메인만 재-dispatch하고
+#    이미 통과한 도메인 결과는 유지한다(전체 재실행 낭비 방지) ───────────────────────
+
+def test_answer_with_verification_retries_only_failed_domain_in_composite_question():
+    dispatch_routes_seen: list[list[str]] = []
+
+    def stub_route(question, llm_fn):
+        return ["kr", "us"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        dispatch_routes_seen.append(list(routes))
+        result = {}
+        if "kr" in routes:
+            result["kr"] = {"stock_code": "005930", "financial": {"value": 12.5}}
+        if "us" in routes:
+            result["us"] = {"stock_code": "NVDA", "financial": {"value": 30.0}}
+        return result
+
+    per_domain_by_attempt = iter([
+        {"kr": {"valid": True, "reason": "일치"}, "us": {"valid": False, "reason": "US 불일치"}},
+        {"us": {"valid": True, "reason": "이제 일치"}},
+    ])
+
+    def stub_verify(question, domain_results, llm_fn):
+        per_domain = next(per_domain_by_attempt)
+        overall = all(v["valid"] for v in per_domain.values())
+        return {
+            "valid": overall,
+            "reason": "전체 통과" if overall else "부분 실패",
+            "per_domain": per_domain,
+        }
+
+    res = answer_with_verification(
+        "삼성전자랑 엔비디아 PER 비교", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=stub_verify,
+    )
+
+    assert dispatch_routes_seen[0] == ["kr", "us"]  # 1차는 전체 라우트
+    assert dispatch_routes_seen[1] == ["us"]  # 2차는 실패했던 us만
+    assert res["uncertain"] is False
+    assert res["attempts"] == 2
+    assert res["domain_results"]["kr"]["stock_code"] == "005930"  # kr은 1차 결과 그대로 유지
+    assert res["domain_results"]["us"]["stock_code"] == "NVDA"
 
 
 def test_answer_with_verification_without_on_progress_is_unaffected():

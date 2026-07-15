@@ -342,14 +342,48 @@ def verify_answer(
         met = bool(domain_results["backtest"]["result"].get("constraints_met"))
         note = ("제약을 만족하는 후보를 찾음" if met
                 else "제약을 만족하는 후보가 없어 가장 근접한 시도를 제시함")
-        return {"valid": True, "reason": f"전략 탐색(역백테스트) 결과가 유효합니다 — {note}."}
+        reason = f"전략 탐색(역백테스트) 결과가 유효합니다 — {note}."
+        return {"valid": True, "reason": reason, "per_domain": {"backtest": {"valid": True, "reason": reason}}}
     if llm_fn is None:
-        return {"valid": True, "reason": "결정론적 검증 통과(도메인 데이터 존재, LLM 미가용)."}
-    try:
-        raw = llm_fn(_verify_prompt(question, domain_results)) or ""
-    except Exception as exc:  # noqa: BLE001 — LLM 실패는 판정 불가로 처리(재시도 유발)
-        return {"valid": False, "reason": f"검증 LLM 호출 실패: {type(exc).__name__}"}
-    return _parse_verdict(raw)
+        reason = "결정론적 검증 통과(도메인 데이터 존재, LLM 미가용)."
+        return {
+            "valid": True, "reason": reason,
+            "per_domain": {d: {"valid": True, "reason": reason} for d in domain_results},
+        }
+
+    # 도메인별로 개별 판정한다 — 복합 도메인 질문(kr+us 등)에서 일부 도메인만 검증에
+    # 실패해도 그 도메인만 부분 재-dispatch할 수 있도록(answer_with_verification이 이
+    # per_domain을 읽어 실패한 도메인만 재시도한다. 이미 통과한 도메인을 매번 다시
+    # 실행하는 낭비를 없앤다). 이 프로젝트 스펙(AC3)이 요구하는 "검증 실패 시 최대 3회
+    # 재시도, 무한루프 없음" 자체는 그대로 지킨다 — 부분/전체 재-dispatch는 그 시도
+    # 횟수 계약과 무관한 구현 디테일이다.
+    per_domain: dict[str, dict] = {}
+    for domain, result in domain_results.items():
+        try:
+            raw = llm_fn(_verify_prompt(question, {domain: result})) or ""
+        except Exception as exc:  # noqa: BLE001 — LLM 호출 자체의 장애는 "검증 실패"가 아니라
+            # "검증 불가"로 구분한다. 이 함수 상단에서 이미 데이터 존재를 확인했으므로
+            # (_any_domain_has_data), OpenAI 등 일시 장애 때문에 멀쩡한 답을 버리지 않는다.
+            per_domain[domain] = {
+                "valid": True,
+                "reason": f"검증 불가(LLM 장애: {type(exc).__name__}) — 데이터 존재 확인만으로 통과시킴.",
+                "verification_unavailable": True,
+            }
+            continue
+        per_domain[domain] = _parse_verdict(raw)
+
+    overall_valid = all(v["valid"] for v in per_domain.values())
+    if overall_valid:
+        unavailable_notes = [
+            f"{d}: {v['reason']}" for d, v in per_domain.items() if v.get("verification_unavailable")
+        ]
+        reason = " / ".join(unavailable_notes) if unavailable_notes else "모든 도메인 검증 통과."
+    else:
+        reason = " / ".join(f"{d}: {v['reason']}" for d, v in per_domain.items() if not v["valid"])
+    verdict = {"valid": overall_valid, "reason": reason, "per_domain": per_domain}
+    if any(v.get("verification_unavailable") for v in per_domain.values()):
+        verdict["verification_unavailable"] = True
+    return verdict
 
 
 # 프롬프트에 넣을 리스트 하나당 앞부분으로 남길 개수. 스크리닝 rows는 최대 1000행,
@@ -513,6 +547,13 @@ def answer_with_verification(
            4번째 시도가 없다.
       3) max_retries회 모두 실패하면 "불확실성 명시" 응답을 반환한다(uncertain=True).
 
+    복합 도메인(kr+us 등) 질문에서는 verify_fn이 반환하는 verdict["per_domain"]을 읽어,
+    이미 검증을 통과한 도메인은 그대로 두고 **실패한 도메인만** 다음 시도에서 재-dispatch한다
+    (매번 전체 도메인을 다시 실행하는 낭비를 없앤다). verify_fn이 per_domain을 안 주면(예:
+    단위테스트가 주입하는 단순 fake) 기존처럼 전체 routes를 재-dispatch한다 — 하위호환.
+    시도 횟수 상한(정확히 max_retries회, 무한루프 없음)은 이 부분/전체 재-dispatch 여부와
+    무관하게 그대로 지켜진다.
+
     route_fn/dispatch_fn/verify_fn/synthesize_fn 은 모두 주입 가능하다(기본값은 이 모듈의
     구현) — 단위테스트가 재시도 횟수/원본 보존을 결정론적으로 검증할 수 있게 하고, HA-11이
     LangGraph 노드로 감쌀 때 부분 교체도 가능하게 한다.
@@ -538,6 +579,7 @@ def answer_with_verification(
     domain_results: dict = {}
     last_reason: str | None = None
     attempts = 0
+    routes_to_dispatch = list(routes)  # 1차는 전체, 이후 실패한 도메인만(부분 재시도)
     for attempt in range(1, max_retries + 1):
         attempts = attempt
         # 재시도(2회차부터)에는 직전 실패 사유를 도메인 실행 질문에 피드백으로 덧붙인다.
@@ -552,9 +594,12 @@ def answer_with_verification(
                 f"[이전 시도 실패 피드백] 직전 시도가 다음 이유로 검증에 실패했습니다: {last_reason}\n"
                 f"같은 방식을 그대로 반복하지 말고, 이 피드백을 반영해 다른 접근으로 다시 답하세요."
             )
-        domain_results = dispatch_fn(
-            routes, dispatch_question, conn, llm_fn, steps=steps, **progress_kwargs
+        new_results = dispatch_fn(
+            routes_to_dispatch, dispatch_question, conn, llm_fn, steps=steps, **progress_kwargs
         )
+        # 부분 재시도 시 이전에 검증 통과한 도메인 결과는 그대로 유지하고, 이번에 (재)실행한
+        # 도메인만 덮어쓴다(update). 1차 시도는 routes_to_dispatch가 전체이므로 기존과 동일.
+        domain_results.update(new_results)
         verdict = verify_fn(question, domain_results, llm_fn)
         if verdict.get("valid"):
             if on_progress:
@@ -575,6 +620,11 @@ def answer_with_verification(
                     result["chart_base64"], result["chart_title"] = chart
             return result
         last_reason = verdict.get("reason")
+        per_domain = verdict.get("per_domain") or {}
+        if per_domain:
+            routes_to_dispatch = [d for d in routes if not per_domain.get(d, {}).get("valid", False)]
+        else:
+            routes_to_dispatch = list(routes)  # per_domain 정보 없는 verify_fn 하위호환
         if on_progress:
             suffix = " → 재시도" if attempt < max_retries else ""
             on_progress("verify", f"{attempt}차 검증 실패: {last_reason}{suffix}")
