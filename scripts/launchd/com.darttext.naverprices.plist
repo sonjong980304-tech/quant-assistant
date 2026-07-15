@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.naverprices</string>
+
+    <!-- 네이버 fchart 일별 수정주가 크롤러. 매일 18:30(장마감 후) + 22:00(실패 시 재시도)
+         2회 실행 — .omc/specs/brainstorming-naver-fnguide-crawlers.md AC4.
+         ingest_naver_prices()는 매번 company 전종목을 다시 훑고 INSERT OR REPLACE로
+         덮어쓰므로, 18:30에 이미 성공한 종목을 22:00에 다시 수집해도 안전(멱등). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/run_naver_prices.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/naver_prices.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/naver_prices.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

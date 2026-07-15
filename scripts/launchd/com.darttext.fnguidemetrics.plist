@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.fnguidemetrics</string>
+
+    <!-- FnGuide 재무 하이라이트+컨센서스 목표주가 크롤러. 매주 토요일 03:00
+         (그 주 거래 종료 후, 다음 데이터 갱신 전 새벽 시간대) —
+         .omc/specs/brainstorming-naver-fnguide-crawlers.md AC9. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/run_fnguide_metrics.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>6</integer>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/fnguide_metrics.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/fnguide_metrics.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

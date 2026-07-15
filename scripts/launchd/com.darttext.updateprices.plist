@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.updateprices</string>
+
+    <!-- caffeinate로 실행 중 잠자기 방지. update_prices는 '마지막 적재일~오늘' 갭을
+         메꾸는 증분 방식이라, 며칠 놓쳐도 다음 실행 때 자동 보충된다. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/usr/bin/python3</string>
+        <string>/Users/gyuyeong/dart-text2sql-wiki/scripts/update_prices.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki</string>
+
+    <!-- 매일 장마감 후(18:30) + 밤(22:00) + 오전(11:00) 3회 시도.
+         맥이 특정 시각에 꺼져 있어도 다른 시각에 잡히게. 거래일 아니면 스크립트가 '갱신 불필요'로 스킵. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki/data/logs/update_prices.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki/data/logs/update_prices.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/Library/Python/3.9/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

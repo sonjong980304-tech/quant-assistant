@@ -1,0 +1,282 @@
+"""HA-5: 백테스트 검증 배선(src/agents/backtest_verification.py) 통합테스트.
+
+.omc/state/sessions/f6b79d90-b7b2-4b4f-b4f7-405a8355724e/prd.json의 HA-5 참고.
+
+auditor.py 자체의 판정 로직(하드차단 3종/소프트경고 4종)은 이 스토리에서 전혀 건드리지
+않는다 — 새 계층형 아키텍처의 백테스트 도메인 에이전트가 쓸 오케스트레이션 함수
+run_backtest_with_audit이 pre_audit → 실행 콜백 → post_audit 순서로 올바르게 배선하고,
+하드차단 시 정상 결과를 폐기(AC11)하며 통과 시 run_soft_inspectors(소프트경고 4종)가
+호출되어 결과에 첨부(AC12)되는지만 검증한다. 기존 tests/test_backtest_auditor_wiring.py
+(레거시 src/graph/nodes.py 경로)는 이 스토리로 수정하지 않으며 그대로 통과해야 한다.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from src.agents.backtest_verification import run_backtest_with_audit
+from src.backtest import auditor
+
+
+def _seeded_conn(tmp_path):
+    from src.db import init_db
+
+    db = tmp_path / "verify.db"
+    init_db(str(db))
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+_BT_RESULT = {
+    "dates": ["2025-09-30", "2025-12-31"],
+    "navs": [1.0, 1.1],
+    "benchmark": None,
+    "performance": {"cagr": 5.0},
+    "holdings": [{"date": "2025-12-31", "codes": ["000001"]}],
+}
+
+
+def _json_llm(triggered=True, message="경고"):
+    return lambda prompt: json.dumps({"triggered": triggered, "message": message})
+
+
+# --------------------------------------------------------------------------
+# AC11: 하드차단 3종(check_survivorship/check_lookahead/check_short_positions)이
+# 결정론적으로 호출된다(auditor.py 원본 로직 그대로, monkeypatch로 호출 여부만 감시).
+# --------------------------------------------------------------------------
+def test_hard_checks_all_three_called(tmp_path, monkeypatch):
+    conn = _seeded_conn(tmp_path)
+    calls = {"survivorship": 0, "lookahead": 0, "short_positions": 0}
+
+    orig_survivorship = auditor.check_survivorship
+    orig_lookahead = auditor.check_lookahead
+    orig_short = auditor.check_short_positions
+
+    def spy_survivorship(*a, **k):
+        calls["survivorship"] += 1
+        return orig_survivorship(*a, **k)
+
+    def spy_lookahead(*a, **k):
+        calls["lookahead"] += 1
+        return orig_lookahead(*a, **k)
+
+    def spy_short(*a, **k):
+        calls["short_positions"] += 1
+        return orig_short(*a, **k)
+
+    monkeypatch.setattr(auditor, "check_survivorship", spy_survivorship)
+    monkeypatch.setattr(auditor, "check_lookahead", spy_lookahead)
+    monkeypatch.setattr(auditor, "check_short_positions", spy_short)
+
+    steps = [{"op": "run_backtest",
+              "params": {"weights": {"000001": 0.6, "000002": 0.4}}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR")
+
+    assert calls == {"survivorship": 1, "lookahead": 1, "short_positions": 1}
+    assert out["blocked"] is False
+
+
+# --------------------------------------------------------------------------
+# AC12: 하드차단 통과 시 run_soft_inspectors(소프트경고 4종)가 호출되고 결과에 첨부된다.
+# --------------------------------------------------------------------------
+def test_soft_inspectors_called_when_hard_checks_pass(tmp_path, monkeypatch):
+    conn = _seeded_conn(tmp_path)
+    calls = {"n": 0}
+    orig_run_soft = auditor.run_soft_inspectors
+
+    def spy_run_soft(*a, **k):
+        calls["n"] += 1
+        return orig_run_soft(*a, **k)
+
+    monkeypatch.setattr(auditor, "run_soft_inspectors", spy_run_soft)
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
+                                  llm_fn=_json_llm(True, "경고"), market="KR")
+
+    assert calls["n"] == 1
+    assert out["blocked"] is False
+    assert len(out["warnings"]) == 4
+    assert all(w["triggered"] for w in out["warnings"])
+
+
+# --------------------------------------------------------------------------
+# 사전 하드차단(공매도) → run_pipeline_fn 자체가 호출되지 않고 정상 결과 없이 에러만 반환
+# --------------------------------------------------------------------------
+def test_pre_hard_block_skips_execution_and_returns_error(tmp_path):
+    conn = _seeded_conn(tmp_path)
+    ran = {"pipeline": False}
+
+    def run_pipeline_fn(s, conn=None):
+        ran["pipeline"] = True
+        return dict(_BT_RESULT)
+
+    steps = [{"op": "run_backtest",
+              "params": {"weights": {"000001": 0.6, "000002": -0.1}}, "out": "bt"}]
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR")
+
+    assert out["blocked"] is True
+    assert "short_positions" in out["error"]
+    assert out["result"] is None
+    assert ran["pipeline"] is False
+
+
+# --------------------------------------------------------------------------
+# 사후 하드차단(생존편향) → 파이프라인은 실행됐지만 결과는 폐기되고 에러만 반환
+# --------------------------------------------------------------------------
+def test_post_hard_block_discards_result_but_pipeline_ran(tmp_path):
+    conn = _seeded_conn(tmp_path)
+    conn.execute("INSERT INTO delisting(stock_code, name, delisting_date) VALUES (?,?,?)",
+                 ("000001", "죽은회사", "2020-01-01"))
+    conn.commit()
+    ran = {"pipeline": False}
+
+    def run_pipeline_fn(s, conn=None):
+        ran["pipeline"] = True
+        return dict(_BT_RESULT)
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
+                                  llm_fn=_json_llm(True, "x"), market="KR")
+
+    assert ran["pipeline"] is True
+    assert out["blocked"] is True
+    assert "survivorship" in out["error"]
+    assert out["result"] is None
+    assert out["warnings"] == []
+
+
+# --------------------------------------------------------------------------
+# 소프트경고: triggered된 것만 첨부되고 정상 결과는 그대로 유지된다
+# --------------------------------------------------------------------------
+def test_soft_warnings_only_triggered_attached_result_preserved(tmp_path):
+    conn = _seeded_conn(tmp_path)
+
+    def llm_fn(prompt):
+        if "데이터마이닝" in prompt or "스누핑" in prompt:
+            return json.dumps({"triggered": True, "message": "사후정당화 의심"})
+        return json.dumps({"triggered": False, "message": ""})
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=llm_fn, market="KR")
+
+    assert out["blocked"] is False
+    assert out["result"]["performance"] == {"cagr": 5.0}
+    assert len(out["warnings"]) == 1
+    assert out["warnings"][0]["sin"] == "snooping"
+
+
+def test_llm_unavailable_skips_soft_but_keeps_result(tmp_path):
+    conn = _seeded_conn(tmp_path)
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR")
+
+    assert out["blocked"] is False
+    assert out["result"] is not None
+    assert out["warnings"] == []
+
+
+# --------------------------------------------------------------------------
+# US 시장: 생존편향 '검증불가' 경고가 소프트경고로 노출된다(하드차단도 통과도 아님)
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# on_progress — 검사 에이전트(하드3종+소프트4종) 각각의 실행/결과를 실시간 통지한다.
+# auditor.py 자체는 건드리지 않는다 — 이미 반환된 verdict 리스트를 순회해 이벤트만 낸다.
+# --------------------------------------------------------------------------
+def test_on_progress_reports_each_hard_and_soft_check_when_passed(tmp_path):
+    """weights를 포함해 사전(공매도) 검사도 실제로 의미 있게 수행되는 fixture로 검증한다
+    (weights가 없으면 pre_audit이 비중을 해석 못해 사전검사 자체를 스킵한다 — 정상 동작)."""
+    conn = _seeded_conn(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    steps = [{"op": "run_backtest",
+              "params": {"weights": {"000001": 0.6, "000002": 0.4}}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    run_backtest_with_audit(
+        steps, conn, "질문", run_pipeline_fn, llm_fn=_json_llm(True, "경고"), market="KR",
+        on_progress=lambda step, summary: events.append((step, summary)),
+    )
+
+    summaries = [s for _, s in events]
+    # 사전(공매도) + 사후 하드 2종 + 소프트 4종 = 최소 7건
+    assert len(events) >= 7
+    assert any("공매도" in s for s in summaries)
+    assert any("생존편향" in s and "통과" in s for s in summaries)
+    assert any("미래참조" in s and "통과" in s for s in summaries)
+    assert sum("스토리텔링" in s for s in summaries) == 1
+    assert sum("데이터스누핑" in s for s in summaries) == 1
+    assert sum("신호감소" in s for s in summaries) == 1
+    assert sum("이상치" in s for s in summaries) == 1
+    # 소프트경고 4종 모두 이번 fixture(triggered=True)에서는 경고 문구를 담아야 한다
+    assert sum("경고" in s for s in summaries) == 4
+
+
+def test_on_progress_reports_pre_block_and_skips_post_checks(tmp_path):
+    """사전 하드차단(공매도) 시 실행 자체가 안 되므로 사후검사 이벤트는 나오지 않는다."""
+    conn = _seeded_conn(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    steps = [{"op": "run_backtest",
+              "params": {"weights": {"000001": 0.6, "000002": -0.1}}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    run_backtest_with_audit(
+        steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR",
+        on_progress=lambda step, summary: events.append((step, summary)),
+    )
+
+    summaries = [s for _, s in events]
+    assert any("공매도" in s and ("차단" in s) for s in summaries)
+    assert not any("생존편향" in s for s in summaries)
+    assert not any("스토리텔링" in s for s in summaries)
+
+
+def test_on_progress_reports_post_hard_block_and_skips_soft(tmp_path):
+    """사후 하드차단(생존편향) 시 소프트경고 검사는 생략되므로 그 이벤트도 나오지 않는다."""
+    conn = _seeded_conn(tmp_path)
+    conn.execute("INSERT INTO delisting(stock_code, name, delisting_date) VALUES (?,?,?)",
+                 ("000001", "죽은회사", "2020-01-01"))
+    conn.commit()
+    events: list[tuple[str, str]] = []
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    run_backtest_with_audit(
+        steps, conn, "질문", run_pipeline_fn, llm_fn=_json_llm(True, "x"), market="KR",
+        on_progress=lambda step, summary: events.append((step, summary)),
+    )
+
+    summaries = [s for _, s in events]
+    assert any("생존편향" in s and "차단" in s for s in summaries)
+    assert not any("스토리텔링" in s for s in summaries)
+
+
+def test_without_on_progress_is_unaffected(tmp_path):
+    """on_progress 생략 시(기본값 None) 기존과 완전히 동일하게 동작 — 회귀 방지."""
+    conn = _seeded_conn(tmp_path)
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
+                                  llm_fn=_json_llm(True, "경고"), market="KR")
+    assert out["blocked"] is False
+    assert len(out["warnings"]) == 4
+
+
+def test_us_market_survivorship_unverifiable_warning_propagates(tmp_path):
+    conn = _seeded_conn(tmp_path)
+    us_result = {
+        "dates": ["2025-09-30", "2025-12-31"], "navs": [1.0, 1.1], "benchmark": None,
+        "performance": {"cagr": 5.0},
+        "holdings": [{"date": "2025-12-31", "codes": ["AAPL"]}],
+    }
+    steps = [{"op": "run_backtest", "params": {"market": "US"}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(us_result)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="US")
+
+    assert out["blocked"] is False
+    sins = {w["sin"] for w in out["warnings"]}
+    assert "survivorship" in sins

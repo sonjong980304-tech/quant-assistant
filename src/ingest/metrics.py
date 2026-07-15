@@ -1,0 +1,244 @@
+"""파생 지표 계산 (financials + prices → metrics).
+
+밸류
+- PER = 시총 / 당기순이익(TTM) · PBR = 시총 / 자본총계
+- PSR = 시총 / 매출(TTM) · PCR = 시총 / 영업현금흐름(TTM)
+- EV/EBITDA = (시총+부채-현금) / (영업이익+감가상각, TTM) · PEG = PER / 순이익성장률
+수익성
+- ROE = 순이익(TTM)/자본 · ROA = 순이익(TTM)/총자산 · 영업이익률 · 순이익률 · GP/A = 매출총이익(TTM)/총자산
+안정성
+- 부채비율 = 부채/자본 · 유동비율 = 유동자산/유동부채 · 이자보상배율 = 영업이익(TTM)/이자비용(TTM)
+성장(YoY 분기)
+- 매출/영업이익/순이익 성장률 = (당분기 - 전년동기)/|전년동기|
+기타
+- 배당수익률 = 배당금/시총 · 모멘텀 = 최근 6개월 주가 상승률
+
+광범위 계정(매출총이익/현금흐름/유동자산·부채/이자비용/배당)이 아직 없으면 해당
+지표는 NULL로 두고, 광범위 수집 후 재계산 시 자동으로 채워진다.
+"""
+from __future__ import annotations
+
+import sqlite3
+from datetime import date, timedelta
+
+from ..version import effective_price_date, effective_quarter, shift_quarter
+
+_PCT = 100.0
+
+
+def _fin(conn, code, quarter, key):
+    row = conn.execute(
+        "SELECT amount FROM financials WHERE stock_code=? AND quarter=? AND account_key=?",
+        (code, quarter, key),
+    ).fetchone()
+    return row["amount"] if row and row["amount"] is not None else None
+
+
+def _sum_ttm(conn, code, quarter, key):
+    """최근 4분기 합(TTM).
+
+    SoT [METRIC]: TTM은 '실제 최근 4개 분기 합'만 사용한다.
+    SoT [DATA]: 날짜/일부값으로 분기를 추정하지 않는다.
+    → 4분기 중 하나라도 누락되면 추정(평균×4)하지 않고 None을 반환한다.
+    """
+    vals = [_fin(conn, code, shift_quarter(quarter, -i), key) for i in range(4)]
+    if any(v is None for v in vals):
+        return None
+    return sum(vals)
+
+
+def controlling_equity(conn, code, quarter):
+    """지배주주지분(지배기업소유주지분). 미수집/이상값이면 자본총계로 폴백.
+
+    SoT [METRIC]: ROE/PBR 분모는 '지배주주지분'을 쓴다(자본총계 아님).
+    단독재무 등 비지배지분이 없는 기업은 지배주주지분=자본총계이므로 폴백이 안전하다.
+
+    sanity 폴백(임시 방어 — 근본 해결은 normalize.py 수정 후 재수집):
+      · 결측
+      · 자본총계 초과(논리상 불가 → 수집 오류, 예: 이큐셀 85경)
+      · 자본총계의 20% 미만(보고서별 표기 흔들림으로 비정상적으로 작게 수집, 예: 삼성 47조)
+    → 위 경우 자본총계로 폴백한다.
+    """
+    v = _fin(conn, code, quarter, "controlling_equity")
+    total = _fin(conn, code, quarter, "total_equity")
+    if total is not None and total > 0:
+        if v is None or v > total * 1.05 or v < total * 0.20:
+            return total
+    elif v is None:
+        return total
+    return v
+
+
+def avg_controlling_equity(conn, code, quarter):
+    """ROE 분모용 자기자본 평균 = (4분기 전 기말 + 최근 기말 지배주주지분)/2.
+
+    SoT [METRIC]: ROE 분자(TTM, 4분기)와 분모(자본 평균)의 기간을 일치시킨다.
+    4분기 전 값이 없으면(신규상장 등) 최근 기말 단독값으로 폴백한다.
+    """
+    cur = controlling_equity(conn, code, quarter)
+    prev = controlling_equity(conn, code, shift_quarter(quarter, -4))
+    if cur is None:
+        return None
+    if prev is None:
+        return cur
+    return (cur + prev) / 2.0
+
+
+def _yoy(conn, code, quarter, key):
+    """전년동기 대비 성장률(%). 분기 단독값 기준."""
+    cur = _fin(conn, code, quarter, key)
+    prev = _fin(conn, code, shift_quarter(quarter, -4), key)
+    if cur is None or prev is None or prev == 0:
+        return None
+    return (cur - prev) / abs(prev) * _PCT
+
+
+def _momentum(conn, code, price_date, months=6):
+    """최근 months개월 주가 상승률(%). 과거 종가가 없으면 None."""
+    cur = conn.execute(
+        "SELECT close FROM prices WHERE stock_code=? AND date=?", (code, price_date)
+    ).fetchone()
+    if not cur or not cur["close"]:
+        return None
+    target = (date.fromisoformat(price_date) - timedelta(days=months * 30)).isoformat()
+    prev = conn.execute(
+        "SELECT close FROM prices WHERE stock_code=? AND date<=? ORDER BY date DESC LIMIT 1",
+        (code, target),
+    ).fetchone()
+    if not prev or not prev["close"]:
+        return None
+    return (cur["close"] / prev["close"] - 1) * _PCT
+
+
+def _div(a, b, pct=False):
+    if a is None or b is None or b == 0:
+        return None
+    v = a / b
+    return v * _PCT if pct else v
+
+
+def compute_metrics(conn: sqlite3.Connection, d=None) -> int:
+    """metrics 테이블 전체 지표 재계산. 반환: 갱신 종목 수."""
+    quarter = effective_quarter(conn, d)
+    pdc = effective_price_date(conn, d)
+    price_date = f"{pdc[:4]}-{pdc[4:6]}-{pdc[6:]}"
+
+    companies = conn.execute("SELECT stock_code, name FROM company").fetchall()
+    n = 0
+    for crow in companies:
+        code = crow["stock_code"]
+        name = crow["name"] or ""
+        cap_row = conn.execute(
+            "SELECT market_cap, close FROM prices WHERE stock_code=? AND date=?",
+            (code, price_date),
+        ).fetchone()
+        cap = cap_row["market_cap"] if cap_row else None
+
+        # 시점값(BS)
+        equity = _fin(conn, code, quarter, "total_equity")        # 부채비율 분모(자본총계)
+        book = controlling_equity(conn, code, quarter)            # PBR 분모(지배주주지분)
+        avg_eq = avg_controlling_equity(conn, code, quarter)      # ROE 분모(4분기 평균 지배주주지분)
+        liab = _fin(conn, code, quarter, "total_liabilities")
+        assets = _fin(conn, code, quarter, "total_assets")
+        cur_assets = _fin(conn, code, quarter, "current_assets")
+        cur_liab = _fin(conn, code, quarter, "current_liabilities")
+        cash = _fin(conn, code, quarter, "cash")  # (광범위에서 추가 시)
+
+        # TTM(손익/현금흐름)
+        rev_ttm = _sum_ttm(conn, code, quarter, "revenue")
+        op_ttm = _sum_ttm(conn, code, quarter, "operating_profit")
+        ni_ttm = _sum_ttm(conn, code, quarter, "net_income")               # 연결 전체 (ROA용)
+        # PER·ROE 분자는 '지배주주 귀속 순이익'. 미수집 시 연결 순이익으로 폴백.
+        ctrl_ni_ttm = _sum_ttm(conn, code, quarter, "controlling_net_income")
+        if ctrl_ni_ttm is None:
+            ctrl_ni_ttm = ni_ttm
+        # 마진(영업이익률/순이익률)은 해당 분기 단독 기준 (TTM 아님) — 특정 분기 질의에 정확히 답하기 위함
+        rev_q = _fin(conn, code, quarter, "revenue")
+        op_q = _fin(conn, code, quarter, "operating_profit")
+        ni_q = _fin(conn, code, quarter, "net_income")
+        gp_ttm = _sum_ttm(conn, code, quarter, "gross_profit")
+        ocf_ttm = _sum_ttm(conn, code, quarter, "operating_cashflow")
+        dep_ttm = _sum_ttm(conn, code, quarter, "depreciation")
+        int_ttm = _sum_ttm(conn, code, quarter, "interest_expense")
+        div_ttm = _sum_ttm(conn, code, quarter, "dividend")
+
+        # 성장률(YoY 분기)
+        rev_g = _yoy(conn, code, quarter, "revenue")
+        op_g = _yoy(conn, code, quarter, "operating_profit")
+        ni_g = _yoy(conn, code, quarter, "net_income")
+
+        # ⑤ 이상치/오류 가드 (질의 경로를 백테스트 경로와 동일 기준으로 정렬)
+        # - 스팩(기업인수목적회사): 현금성 자산 덩어리라 PER/ROE/PBR 무의미 → 가치·수익성 지표 제외
+        is_spac = ("스팩" in name) or ("기업인수목적" in name)
+        # - 순이익이 자기자본 대비 비현실적으로 거대(Q4 차분 폭발/원본 오류)면 순이익 기반 지표 무효화
+        if ni_ttm is not None and equity and equity > 0 and abs(ni_ttm) > equity * 20:
+            ni_ttm = None
+        if ctrl_ni_ttm is not None and equity and equity > 0 and abs(ctrl_ni_ttm) > equity * 20:
+            ctrl_ni_ttm = None
+        # - 시총이 자기자본의 100배 초과(PBR>100) → 상장주식수/주가 데이터 오류 의심
+        #   (예: 서린바이오 시총 40조 = 종가×주식수 91억주, 자본 853억 → PBR 469배).
+        #   시총 기반 지표(PER·PBR·PSR·시총)를 무효화한다.
+        if cap is not None and equity and equity > 0 and cap > equity * 100:
+            cap = None
+
+        # 밸류
+        per = _div(cap, ctrl_ni_ttm) if (not is_spac and ctrl_ni_ttm and ctrl_ni_ttm > 0) else None  # 분자=지배주주순이익
+        pbr = _div(cap, book) if (not is_spac and book and book > 0) else None    # ① 지배주주지분
+        psr = _div(cap, rev_ttm) if (not is_spac and rev_ttm and rev_ttm > 0) else None
+        pcr = _div(cap, ocf_ttm) if (not is_spac and ocf_ttm and ocf_ttm > 0) else None
+        peg = (per / ni_g) if (per is not None and ni_g and ni_g > 0) else None
+        ebitda = (op_ttm + dep_ttm) if (op_ttm is not None and dep_ttm is not None) else None
+        ev = (cap + liab - (cash or 0)) if (cap is not None and liab is not None) else None
+        ev_ebitda = _div(ev, ebitda) if (ebitda and ebitda > 0) else None
+
+        # 수익성
+        # ② ROE = 지배주주순이익(TTM) ÷ 4분기 평균 지배주주지분. 분자·분모 모두 지배주주 귀속으로 대응.
+        #    양수이고 자본 평균 미만(<100%)일 때만 인정(일회성 폭발 제외).
+        roe = _div(ctrl_ni_ttm, avg_eq, pct=True) if (
+            not is_spac and ctrl_ni_ttm and avg_eq and avg_eq > 0 and ctrl_ni_ttm < avg_eq
+        ) else None
+        # ROA = 연결 전체 순이익 ÷ 총자산(전체) — 분자·분모 모두 연결 전체로 대응
+        roa = _div(ni_ttm, assets, pct=True) if (not is_spac and ni_ttm and assets and assets > 0) else None
+        # ③ 영업이익률=단일분기. op<rev(마진<100%)일 때만 — 지주사·지분법이익 폭발 제외
+        opm = _div(op_q, rev_q, pct=True) if (rev_q and rev_q > 0 and op_q is not None and op_q < rev_q) else None
+        npm = _div(ni_q, rev_q, pct=True) if (rev_q and rev_q > 0 and ni_q is not None) else None
+        gp_a = _div(gp_ttm, assets, pct=True) if (assets and assets > 0) else None
+
+        # 안정성
+        debt_ratio = _div(liab, equity, pct=True) if (equity and equity > 0) else None
+        current_ratio = _div(cur_assets, cur_liab, pct=True) if (cur_liab and cur_liab > 0) else None
+        interest_cov = _div(op_ttm, int_ttm) if (int_ttm and int_ttm > 0) else None
+
+        # 기타
+        div_yield = _div(div_ttm, cap, pct=True) if (cap and cap > 0 and div_ttm) else None
+        momentum = _momentum(conn, code, price_date)
+
+        conn.execute(
+            """INSERT INTO metrics
+                 (stock_code, quarter, price_date, market_cap, per, pbr, psr, pcr, ev_ebitda, peg,
+                  roe, roa, operating_margin, net_margin, gp_a,
+                  debt_ratio, current_ratio, interest_coverage,
+                  revenue_growth, op_growth, ni_growth, dividend_yield, momentum)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(stock_code, quarter, price_date) DO UPDATE SET
+                 market_cap=excluded.market_cap, per=excluded.per, pbr=excluded.pbr,
+                 psr=excluded.psr, pcr=excluded.pcr, ev_ebitda=excluded.ev_ebitda, peg=excluded.peg,
+                 roe=excluded.roe, roa=excluded.roa, operating_margin=excluded.operating_margin,
+                 net_margin=excluded.net_margin, gp_a=excluded.gp_a,
+                 debt_ratio=excluded.debt_ratio, current_ratio=excluded.current_ratio,
+                 interest_coverage=excluded.interest_coverage,
+                 revenue_growth=excluded.revenue_growth, op_growth=excluded.op_growth,
+                 ni_growth=excluded.ni_growth, dividend_yield=excluded.dividend_yield,
+                 momentum=excluded.momentum""",
+            (code, quarter, price_date, _r(cap), _r(per), _r(pbr), _r(psr), _r(pcr),
+             _r(ev_ebitda), _r(peg), _r(roe), _r(roa), _r(opm), _r(npm), _r(gp_a),
+             _r(debt_ratio), _r(current_ratio), _r(interest_cov),
+             _r(rev_g), _r(op_g), _r(ni_g), _r(div_yield), _r(momentum)),
+        )
+        n += 1
+    conn.commit()
+    return n
+
+
+def _r(v, nd=2):
+    return round(v, nd) if v is not None else None

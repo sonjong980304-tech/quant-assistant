@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.updatefinancials</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/update_financials.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+    <!-- 매일 07:30 1회. 공시 없는 날은 새 (종목,분기) 0건으로 즉시 종료(비용 0).
+         공시시즌(5/15, 8/14, 11/14, 익년 3/31 전후)에 새 분기를 자동 포착.
+         2026-07-14: 경로가 레거시(/Users/gyuyeong/dart-text2sql-wiki, /projects/ 누락)를
+         가리켜 매일 exit 512로 실패하던 것을 현재 프로젝트 경로+공유venv로 수정. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>7</integer>
+        <key>Minute</key><integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/update_financials.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/update_financials.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.sectorbackfill</string>
+
+    <!-- KRX 정보데이터시스템 업종분류(company.sector)를 월 1회 재동기화.
+         2026-07-14: scripts/backfill_sector_krx.py가 수동 1회성 스크립트로만 존재해
+         KRX 쪽에서 업종 재분류가 있어도 반영이 안 되던 것을 launchd로 자동화.
+         DART 회사개황(KSIC)은 더 이상 sector를 건드리지 않으므로(src/ingest/dart.py 수정 완료)
+         이 job이 sector의 유일한 최종 갱신 경로다. 매월 1일 08:10, updatefinancials(07:30)·
+         macroindicators(07:40) 이후. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/backfill_sector_krx.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key><integer>1</integer>
+        <key>Hour</key><integer>8</integer>
+        <key>Minute</key><integer>10</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/sector_backfill.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/sector_backfill.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

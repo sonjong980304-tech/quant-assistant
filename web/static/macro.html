@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>매크로 신호 · Quant Assistant</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1f2430; --line:#2a2f3c;
+    --text:#e6e9ef; --muted:#8b93a7; --accent:#5b8cff; --accent2:#3ad29f;
+    --warn:#f0a020; --bad:#ff6b6b; --chip:#262c3a;
+    --green:#3ad29f; --yellow:#f0a020; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Apple SD Gothic Neo",sans-serif;font-size:14px;line-height:1.5}
+  header{padding:18px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.2px}
+  header .home{margin-left:auto;color:var(--muted);font-size:13px;text-decoration:none;
+    background:var(--panel2);border:1px solid var(--line);padding:7px 14px;border-radius:9px;transition:background .12s}
+  header .home:hover{background:var(--chip);color:var(--text)}
+  main{padding:24px 28px;max-width:1000px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
+  .muted{color:var(--muted)}
+  .spinner{display:inline-block;width:15px;height:15px;border:2px solid var(--line);border-top-color:var(--accent);
+    border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ===== 신호등 ===== */
+  .signal-hero{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+  .light{width:96px;height:96px;border-radius:50%;flex:0 0 auto;position:relative;
+    background:var(--panel2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center}
+  .light .dot{width:64px;height:64px;border-radius:50%;background:var(--muted)}
+  .light.green .dot{background:var(--green);box-shadow:0 0 26px 4px rgba(58,210,159,.5)}
+  .light.yellow .dot{background:var(--yellow);box-shadow:0 0 26px 4px rgba(240,160,32,.5)}
+  .light.red .dot{background:var(--red);box-shadow:0 0 26px 4px rgba(255,107,107,.5)}
+  .signal-txt .big{font-size:30px;font-weight:750;letter-spacing:-.5px}
+  .signal-txt .big.green{color:var(--green)} .signal-txt .big.yellow{color:var(--yellow)} .signal-txt .big.red{color:var(--red)}
+  .signal-txt .sub{color:var(--muted);font-size:13px;margin-top:2px}
+
+  /* ===== 지표 카드 ===== */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+  .metric{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .metric .l{color:var(--muted);font-size:12.5px}
+  .metric .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;margin:4px 0 2px}
+  .badge{display:inline-block;padding:3px 11px;border-radius:20px;font-size:12px;font-weight:600;
+    background:var(--chip);color:var(--text)}
+  .note-ref{color:var(--muted);font-size:11.5px;margin-top:8px}
+
+  /* ===== 고지 ===== */
+  .disclaimer{border-left:3px solid var(--warn);background:rgba(240,160,32,.06)}
+  .disclaimer b{color:var(--warn)}
+  .disclaimer ul{margin:8px 0 0;padding-left:18px;color:var(--muted)}
+  .disclaimer li{margin:3px 0}
+
+  .asof{color:var(--muted);font-size:12.5px}
+  .spark-wrap{margin-top:8px}
+  footer{text-align:center;color:var(--muted);font-size:11px;margin:24px 0 8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🚦 매크로 신호 <span class="muted" style="font-weight:400">장단기금리차 레짐</span></h1>
+  <a class="home" href="/">← 홈으로</a>
+</header>
+
+<main>
+  <!-- 신호등 -->
+  <div class="card">
+    <div class="signal-hero">
+      <div class="light" id="light"><div class="dot"></div></div>
+      <div class="signal-txt">
+        <div class="big" id="overall">로딩…</div>
+        <div class="sub" id="overallSub"><span class="spinner"></span> /api/macro/signal 조회 중</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div class="asof" id="asof"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 지표 3종 -->
+  <div class="card">
+    <b>지표 현재값</b> <span class="muted" style="font-size:12.5px">· 종합신호는 오직 금리차 레짐으로만 결정됩니다(CNN·VIX는 참고 표시)</span>
+    <div class="grid" style="margin-top:12px">
+      <div class="metric">
+        <div class="l">장단기금리차 (미 10Y-2Y)</div>
+        <div class="v" id="spreadV">–</div>
+        <span class="badge" id="spreadB">–</span>
+        <div class="note-ref">≥0.5%p 정상 · 0~0.5 평탄화 · &lt;0 역전 (0.5 완충구간은 표준 아닌 자체 기준)</div>
+      </div>
+      <div class="metric">
+        <div class="l">CNN 공포탐욕지수 (0~100)</div>
+        <div class="v" id="cnnV">–</div>
+        <span class="badge" id="cnnB">–</span>
+        <div class="note-ref">참고 표시 전용 · 신호 계산에 미반영</div>
+      </div>
+      <div class="metric">
+        <div class="l">VIX 변동성지수</div>
+        <div class="v" id="vixV">–</div>
+        <span class="badge" id="vixB">–</span>
+        <div class="note-ref">참고 표시 전용 · 신호 계산에 미반영</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 스파크라인(금리차 추이) -->
+  <div class="card">
+    <b>최근 추이</b> <span class="muted" style="font-size:12.5px">· 장단기금리차(%p)</span>
+    <div class="spark-wrap" id="spark"><span class="muted" style="font-size:12.5px">이력 로딩…</span></div>
+  </div>
+
+  <!-- 고지 -->
+  <div class="card disclaimer">
+    <b>⚠ 참고용 신호입니다 — 투자 판단이 아닙니다</b>
+    <ul>
+      <li>이 신호는 규칙기반 참고 정보이며, 매수·매도 등 어떤 투자 판단이나 자동 주문도 트리거하지 않습니다.</li>
+      <li>데이터는 <b>일 단위(T+1)</b>이며 장중 실시간 시세가 아닙니다(FRED·CNN 모두 전일 기준 값).</li>
+      <li>종합신호(GREEN/YELLOW/RED)는 미국 장단기금리차 레짐 하나로만 계산되며, CNN·VIX는 참고 표시입니다.</li>
+    </ul>
+  </div>
+
+  <footer>made by 규영 · 순수 규칙기반(LLM 미사용)</footer>
+</main>
+
+<script>
+// ngrok 무료 경고 페이지 우회(index.html과 동일): 모든 fetch에 헤더 주입
+(function(){const _f=window.fetch;window.fetch=(u,o)=>{o=o||{};o.headers=Object.assign({},o.headers,{'ngrok-skip-browser-warning':'true'});return _f(u,o);};})();
+
+const COLOR = {GREEN:'green', YELLOW:'yellow', RED:'red'};
+function fmtNum(v, digits){ return (v==null)?'–':Number(v).toLocaleString(undefined,{maximumFractionDigits:digits}); }
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+async function loadSignal(){
+  try{
+    const s = await (await fetch('/api/macro/signal')).json();
+    const cls = COLOR[s.overall] || '';
+    document.getElementById('light').className = 'light ' + cls;
+    const ov = document.getElementById('overall');
+    ov.textContent = s.available ? (s.overall || '데이터없음') : '데이터 없음';
+    ov.className = 'big ' + cls;
+    document.getElementById('overallSub').textContent =
+      s.available ? ('금리차 레짐: ' + esc(s.spread.regime || '–')) : '아직 수집된 신호가 없습니다.';
+    document.getElementById('asof').textContent = s.as_of ? ('데이터 기준일 ' + esc(s.as_of)) : '';
+
+    document.getElementById('spreadV').textContent = s.spread.value==null ? '–' : fmtNum(s.spread.value,2) + '%p';
+    document.getElementById('spreadB').textContent = s.spread.regime || '–';
+    document.getElementById('cnnV').textContent = fmtNum(s.cnn.value,0);
+    document.getElementById('cnnB').textContent = s.cnn.band || '–';
+    document.getElementById('vixV').textContent = fmtNum(s.vix.value,2);
+    document.getElementById('vixB').textContent = s.vix.band || '–';
+  }catch(e){
+    document.getElementById('overall').textContent = '조회 실패';
+    document.getElementById('overallSub').textContent = String(e);
+  }
+}
+
+async function loadHistory(){
+  const el = document.getElementById('spark');
+  try{
+    const h = await (await fetch('/api/macro/history?days=30')).json();
+    const pts = (h.series||[]).filter(p=>p.spread!=null);
+    if(pts.length < 2){ el.innerHTML = '<span class="muted" style="font-size:12.5px">추이를 그릴 데이터가 아직 부족합니다(수집이 며칠 쌓이면 표시됩니다).</span>'; return; }
+    const vals = pts.map(p=>p.spread);
+    const w=920, ht=260, padL=52, padR=16, padT=16, padB=30;
+    const plotW=w-padL-padR, plotH=ht-padT-padB;
+    // 세로축 하단은 항상 0%p 고정 — 역전(마이너스) 여부가 한눈에 보이는 기준선이 늘 바닥에
+    // 있어야 한다. 값이 전부 0 이상이면 바닥=0, 마이너스로 내려가면 그만큼 바닥을 아래로
+    // 넓혀 0선이 축 중간~위쪽으로 올라간 형태가 되게 한다. 위쪽은 여유(15%)를 둬 변화폭이
+    // 좁아도(예: 0.28~0.38%p) 눌려 보이지 않게 한다.
+    const rawMin=Math.min(...vals), rawMax=Math.max(...vals);
+    const span=(rawMax-rawMin)||Math.abs(rawMax)*0.1||1;
+    const padV=span*0.15;
+    const max=rawMax+padV;
+    const min=rawMin<0 ? (rawMin-padV) : 0;
+    const X=i=>padL+i*plotW/(pts.length-1);
+    const Y=v=>padT+plotH-(v-min)/(max-min)*plotH;
+    const path=vals.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+
+    // Y축 눈금 4개(최소~최대 균등 분할) + 0선(역전 경계, 범위 안에 있을 때만)
+    const TICKS=4;
+    let yAxis='';
+    for(let t=0;t<=TICKS;t++){
+      const v=min+(max-min)*t/TICKS;
+      const y=Y(v).toFixed(1);
+      yAxis+=`<line x1="${padL}" y1="${y}" x2="${w-padR}" y2="${y}" stroke="#2a2f3c" stroke-width="1"/>`;
+      yAxis+=`<text x="${padL-8}" y="${(+y+3.5).toFixed(1)}" fill="#8b93a7" font-size="11" text-anchor="end">${v.toFixed(2)}%p</text>`;
+    }
+    let zeroLine='';
+    if(min<0 && max>0){
+      const zy=Y(0).toFixed(1);
+      zeroLine=`<line x1="${padL}" y1="${zy}" x2="${w-padR}" y2="${zy}" stroke="#ff6b6b" stroke-dasharray="4" opacity=".65"/>`;
+    }
+
+    // X축 눈금 — 데이터가 며칠이 쌓이든 항상 최대 6개로만 골라(균등 간격) 라벨끼리
+    // 겹치지 않게 한다. 양끝 라벨은 그래프 경계 밖으로 삐져나가지 않도록 anchor를
+    // start/end로 바꾸고(가운데 라벨만 middle), 나머지도 서로 밀어내지 않을 만큼만 남긴다.
+    const N=pts.length;
+    const xTickCount=Math.min(6,N);
+    let xAxis='';
+    for(let t=0;t<xTickCount;t++){
+      const i=xTickCount===1?0:Math.round(t*(N-1)/(xTickCount-1));
+      const x=X(i).toFixed(1);
+      const anchor = t===0 ? 'start' : (t===xTickCount-1 ? 'end' : 'middle');
+      xAxis+=`<line x1="${x}" y1="${padT}" x2="${x}" y2="${padT+plotH}" stroke="#2a2f3c" stroke-width="1"/>`;
+      xAxis+=`<text x="${x}" y="${(padT+plotH+18).toFixed(1)}" fill="#8b93a7" font-size="11" text-anchor="${anchor}">${esc(pts[i].as_of.slice(5))}</text>`;
+    }
+
+    // 0선(역전 경계) 설명은 그려질 때만, 그래프 안쪽 우상단 빈 공간에 둔다 — 카드 제목에
+    // 이미 "장단기금리차(%p)" 단위가 표시돼 있으므로 여기서 단위를 다시 적지 않는다
+    // (X축 날짜 라벨과 같은 줄에 겹쳐 보이던 문제의 원인이었다).
+    const zeroLabel = (min<0 && max>0)
+      ? `<text x="${w-padR}" y="${padT+12}" fill="#ff6b6b" font-size="11" text-anchor="end" opacity=".85">- - 0(역전 경계)</text>`
+      : '';
+
+    el.innerHTML = `<svg viewBox="0 0 ${w} ${ht}" style="width:100%;height:auto;margin-top:6px">
+      ${yAxis}
+      ${xAxis}
+      ${zeroLine}
+      <path d="${path}" fill="none" stroke="#5b8cff" stroke-width="2.5"/>
+      ${zeroLabel}
+    </svg>`;
+  }catch(e){
+    el.innerHTML = '<span class="muted" style="font-size:12.5px">추이 조회 실패</span>';
+  }
+}
+
+loadSignal();
+loadHistory();
+</script>
+</body>
+</html>

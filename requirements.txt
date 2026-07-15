@@ -1,0 +1,47 @@
+# --- Core ---
+langgraph>=0.2.0
+langchain-core>=0.3.0
+python-dotenv>=1.0.0
+
+# --- Data ingestion ---
+pykrx>=1.0.45
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# --- US 데이터 플레인 (티커/섹터=NASDAQ 스크리너 API, 주가/재무제표=yfinance) ---
+# 티커/섹터는 원래 investing.com Playwright 스크래핑이었으나 2026-07-12 게스트+
+# 무료로그인 모두 2페이지 이상이 InvestingPro 유료게이트로 막힘을 확정해 NASDAQ 공식
+# 스크리너 API(api.nasdaq.com/api/screener/stocks)로 전환. 인증 불필요, plain requests로
+# 접근 가능(위 requests 패키지 재사용) — Playwright/BeautifulSoup 의존성 제거됨.
+yfinance>=0.2.40
+
+# --- 파마프렌치 팩터 온디맨드 조회(Ken French Data Library, 캐시 없음) ---
+pandas_datareader>=0.10.0
+
+# --- 매크로 지표 에이전트: CNN Fear&Greed Index 크롤링 ---
+# 이 프로젝트 최초 Selenium 사용. CNN Fear&Greed Index 페이지가 JS 동적 렌더링이라
+# 정적 HTML 크롤링(requests)으로는 값을 읽을 수 없어 예외적으로 필요하다.
+# .omc/specs/brainstorming-macro-indicator-agent.md 참고.
+selenium>=4.0.0
+
+# --- SQL/Python 조합형 프리미티브 파이프라인 ---
+# optimize_weights(max_sharpe/min_variance/risk_parity)가 감싸는 포트폴리오 최적화 라이브러리.
+Riskfolio-Lib>=7.3.0
+# 백테스트 NAV 차트 PNG 생성(Agg 백엔드, 헤드리스).
+matplotlib>=3.7.0
+# compute_technical_indicator(SMA/EMA/RSI/MACD/볼린저밴드)가 감싸는 기술지표 라이브러리.
+# C 라이브러리(brew install ta-lib) 선설치 필요, 파이썬 바인딩은 PyPI 패키지명 "TA-Lib".
+TA-Lib>=0.7.0
+
+# --- LLM providers ---
+openai>=1.30.0
+# ollama: 별도 데몬 설치 필요 (https://ollama.com) — HTTP API 사용
+
+# --- LangSmith (에이전트별 토큰/비용 트레이싱, LANGCHAIN_TRACING_V2=true일 때만 사용) ---
+# langgraph가 간접 의존성으로 끌어오지만, src/llm.py가 직접 import하므로 명시.
+langsmith>=0.3.0
+
+# --- Web (2단계) ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0

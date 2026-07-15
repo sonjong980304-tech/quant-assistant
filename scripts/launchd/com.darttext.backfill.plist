@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.darttext.backfill</string>
+
+  <!-- full 백필 자동 재개. resume=True(financials 유무 기반)라 이미 받은 종목은 건너뛰고,
+       DART 일일한도(020) 도달 시 자동 중단 → 다음 실행이 자정 리셋 후 이어서 적재.
+       이미 실행 중이면(pgrep) 중복 실행하지 않는다. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd /Users/gyuyeong/dart-text2sql-wiki &amp;&amp; pgrep -f backfill_full.py >/dev/null &amp;&amp; exit 0; /usr/bin/caffeinate -s /usr/bin/python3 scripts/backfill_full.py >> /tmp/backfill_full.log 2>&amp;1</string>
+  </array>
+
+  <!-- 맥이 특정 시각에 꺼져 있을 수 있으므로 새벽/오전/오후 3개 시간대에 시도.
+       자정 리셋 후 첫 실행이 한도를 쓰고, 이후 실행은 020으로 즉시 종료(무해). -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/tmp/backfill_launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/backfill_launchd.err</string>
+</dict>
+</plist>

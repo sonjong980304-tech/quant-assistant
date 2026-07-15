@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+.embeddings_cache/
+
+# OMC 작업상태(세션 로그·노트패드·플랜) — 대화 내용이 포함될 수 있어 저장소에 올리지 않는다.
+.omc/

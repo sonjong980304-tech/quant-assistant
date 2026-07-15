@@ -1,0 +1,213 @@
+"""계층형 총괄 그래프(src/agents/graph.py) 테스트 (TDD, HA-11).
+
+HA-10의 순수 함수(answer_with_verification 등)를 LangGraph StateGraph 노드로 감싼다.
+여기서는 (1) 그래프 컴파일, (2) .stream() 노드 이벤트 방출(순서), (3) 이벤트 스키마
+(단계명+한줄요약만, SQL 전문 등 상세 없음)을 검증한다.
+
+- supervisor_node(state, conn, llm_fn) -> dict:
+  answer_with_verification를 호출해 상태를 갱신하는 단일 총괄 노드(라우팅+검증+재시도 포함).
+- build_hierarchical_graph(conn, llm_fn=None) -> CompiledGraph:
+  START→supervisor→END 로 컴파일한다.
+- run_streaming / collect_stream:
+  .invoke()가 아니라 .stream()으로 실행해 노드 완료 이벤트를 방출/수집한다.
+"""
+from __future__ import annotations
+
+import src.agents.graph as graph_mod
+from src.agents.graph import (
+    HierarchicalState,
+    build_hierarchical_graph,
+    collect_stream,
+    run_streaming,
+    supervisor_node,
+)
+
+
+# 라우팅/검증/종합 3종 프롬프트를 프롬프트 내용으로 구분해 응답하는 mock LLM.
+def _multi_domain_fake_llm(prompt: str) -> str:
+    if "도메인 키워드만" in prompt:          # route_question 프롬프트
+        return "kr, us"
+    if "valid" in prompt:                    # verify_answer 프롬프트(JSON 예시에 valid 포함)
+        return '{"valid": true, "reason": "부합"}'
+    return "삼성전자와 애플 종합 결론"        # synthesize_conclusion 프롬프트
+
+
+def _seed_valid_domains(monkeypatch) -> None:
+    import src.agents.supervisor as sup
+
+    monkeypatch.setattr(
+        sup, "answer_kr_question",
+        lambda question, conn, llm_fn=None: {"stock_code": "005930", "financial": {"value": 12.5}},
+    )
+    monkeypatch.setattr(
+        sup, "answer_us_question",
+        lambda question, conn, llm_fn=None: {"ok": True, "stock_code": "AAPL", "financial": {"value": 30.0}},
+    )
+
+
+# ── HierarchicalState — 최소 상태 필드 존재(TypedDict, total=False) ────────────
+
+def test_hierarchical_state_declares_min_fields():
+    keys = set(HierarchicalState.__annotations__)
+    for field in ("question", "routes", "domain_results", "conclusion", "uncertain", "attempts", "events"):
+        assert field in keys
+
+
+# ── build_hierarchical_graph — StateGraph 컴파일(AC5 뒷받침) ──────────────────
+
+def test_build_hierarchical_graph_compiles():
+    graph = build_hierarchical_graph(conn=None, llm_fn=None)
+    assert hasattr(graph, "stream")   # .stream() 지원(컴파일된 그래프)
+    assert hasattr(graph, "invoke")
+
+
+def test_build_hierarchical_graph_registers_supervisor_node():
+    graph = build_hierarchical_graph(conn=None, llm_fn=None)
+    node_names = set(graph.get_graph().nodes)
+    assert "supervisor" in node_names
+
+
+# ── supervisor_node — answer_with_verification 결과로 상태 갱신 ───────────────
+
+def test_supervisor_node_wraps_answer_with_verification(monkeypatch):
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {
+            "uncertain": False,
+            "conclusion": "종합결론",
+            "domain_results": {"kr": {"financial": {"value": 12.5}}},
+            "attempts": 1,
+            "routes": ["kr"],
+        }
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "삼성전자 PER"}, conn=None, llm_fn=None)
+
+    assert out["routes"] == ["kr"]
+    assert out["conclusion"] == "종합결론"
+    assert out["uncertain"] is False
+    assert out["attempts"] == 1
+    assert out["domain_results"] == {"kr": {"financial": {"value": 12.5}}}
+
+
+def test_supervisor_node_passes_through_chart_fields(monkeypatch):
+    """answer_with_verification가 chart_base64/chart_title를 주면 노드가 그대로 통과시킨다."""
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {
+            "uncertain": False,
+            "conclusion": "종합결론",
+            "domain_results": {"backtest": {"result": {"navs": [1.0, 1.1]}}},
+            "attempts": 1,
+            "routes": ["backtest"],
+            "chart_base64": "ZmFrZS1wbmc=",
+            "chart_title": "백테스트 결과",
+        }
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "전략 그래프 그려줘"}, conn=None, llm_fn=None)
+
+    assert out["chart_base64"] == "ZmFrZS1wbmc="
+    assert out["chart_title"] == "백테스트 결과"
+
+
+def test_hierarchical_state_declares_chart_fields():
+    keys = set(HierarchicalState.__annotations__)
+    assert "chart_base64" in keys and "chart_title" in keys
+
+
+def test_supervisor_node_reads_conn_and_llm_from_state(monkeypatch):
+    """conn/llm_fn을 명시 인자로 안 넘기면 state에서 읽는다(직접 노드 등록도 지원)."""
+    captured: dict = {}
+
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        captured["conn"] = conn
+        captured["llm_fn"] = llm_fn
+        return {"uncertain": True, "reason": "x", "attempts": 3, "routes": ["kr"], "domain_results": {}}
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    sentinel_conn = object()
+    sentinel_llm = lambda p: "kr"
+    supervisor_node({"question": "q", "conn": sentinel_conn, "llm_fn": sentinel_llm})
+
+    assert captured["conn"] is sentinel_conn
+    assert captured["llm_fn"] is sentinel_llm
+
+
+# ── 이벤트 스키마 — 단계명+한줄요약만, SQL 전문 등 상세 없음 ──────────────────
+
+def test_event_has_only_step_and_summary_no_detail(monkeypatch):
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {
+            "uncertain": False,
+            "conclusion": "이건 매우 긴 종합결론 본문입니다.",
+            "domain_results": {"kr": {"sql": "SELECT * FROM metrics WHERE per < 10 ORDER BY per",
+                                       "rows": [{"per": 8.0}], "financial": {"value": 12.5}}},
+            "attempts": 2,
+            "routes": ["kr"],
+        }
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "삼성전자 PER"}, conn=None, llm_fn=None)
+
+    events = out["events"]
+    assert isinstance(events, list) and len(events) == 1
+    ev = events[0]
+    # 이벤트는 정확히 step/summary 두 키만 가진다.
+    assert set(ev.keys()) == {"step", "summary"}
+    assert ev["step"] == "supervisor"
+    assert isinstance(ev["summary"], str)
+    # SQL 전문/원본 rows/결론 본문 같은 상세가 요약에 새면 안 된다.
+    assert "SELECT" not in ev["summary"]
+    assert "sql" not in ev["summary"].lower()
+    assert "종합결론 본문" not in ev["summary"]
+    # 요약은 라우팅/검증 상태만 담는다(한 줄).
+    assert "\n" not in ev["summary"]
+    assert "검증 통과" in ev["summary"]
+    assert "2회" in ev["summary"]
+
+
+def test_event_summary_reports_uncertain_on_failure(monkeypatch):
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {"uncertain": True, "reason": "3회 실패", "attempts": 3,
+                "routes": ["kr", "us"], "domain_results": {}}
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "q"}, conn=None, llm_fn=None)
+    summary = out["events"][0]["summary"]
+    assert "한국" in summary and "미국" in summary   # 도메인 라벨
+    assert "불확실" in summary or "실패" in summary
+    assert "3회" in summary
+
+
+# ── .stream() 통합 — 노드 완료 이벤트가 순서대로 방출됨(mock LLM 주입) ─────────
+
+def test_run_streaming_emits_supervisor_event(monkeypatch):
+    """HA-12 확장: 라우팅→도메인별(kr/us)→검증 단계별로 여러 이벤트가 실시간 순서대로
+    방출된다(기존 "노드 완료 후 요약 1줄"에서 "진행 중 여러 번 통지"로 바뀜)."""
+    _seed_valid_domains(monkeypatch)
+    events = list(run_streaming("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm))
+
+    steps_order = [e["step"] for e in events]
+    assert len(events) >= 4                     # 라우팅1 + 도메인(kr,us) 시작/완료 4건 이상
+    assert steps_order[0] == "supervisor"        # 라우팅이 가장 먼저
+    assert "한국" in events[0]["summary"] and "미국" in events[0]["summary"]
+    assert "kr" in steps_order and "us" in steps_order
+    assert steps_order[-1] == "verify"           # 검증 결과가 마지막
+    assert "통과" in events[-1]["summary"]
+
+
+def test_collect_stream_matches_run_streaming(monkeypatch):
+    _seed_valid_domains(monkeypatch)
+    collected = collect_stream("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm)
+    assert isinstance(collected, list)
+    assert collected and collected[0]["step"] == "supervisor"
+    # 리스트 버전과 이터레이터 버전이 동일 이벤트를 낸다.
+    streamed = list(run_streaming("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm))
+    assert collected == streamed
+
+
+def test_run_streaming_uses_heuristic_route_without_llm(monkeypatch):
+    """llm_fn 없이도(결정론) 노드 이벤트가 방출된다 — kr 휴리스틱 라우팅."""
+    _seed_valid_domains(monkeypatch)
+    events = collect_stream("삼성전자 PER 알려줘", conn=None, llm_fn=None)
+    assert events and events[0]["step"] == "supervisor"
+    assert "한국" in events[0]["summary"]

@@ -1,0 +1,97 @@
+{
+  "data": {
+    "asOf": null,
+    "headers": {
+      "symbol": "Symbol",
+      "name": "Name",
+      "lastsale": "Last Sale",
+      "netchange": "Net Change",
+      "pctchange": "% Change",
+      "marketCap": "Market Cap",
+      "country": "Country",
+      "ipoyear": "IPO Year",
+      "volume": "Volume",
+      "sector": "Sector",
+      "industry": "Industry",
+      "url": "Url"
+    },
+    "rows": [
+      {
+        "symbol": "AACB",
+        "name": "Artius II Acquisition Inc. Class A Ordinary Shares",
+        "lastsale": "$10.51",
+        "netchange": "0.00",
+        "pctchange": "0.00%",
+        "volume": "10461",
+        "marketCap": "0.00",
+        "country": "United States",
+        "ipoyear": "2025",
+        "industry": "",
+        "sector": "",
+        "url": "/market-activity/stocks/aacb"
+      },
+      {
+        "symbol": "AACBR",
+        "name": "Artius II Acquisition Inc. Rights",
+        "lastsale": "$0.18",
+        "netchange": "0.00",
+        "pctchange": "0.00%",
+        "volume": "18",
+        "marketCap": "0.00",
+        "country": "United States",
+        "ipoyear": "2025",
+        "industry": "",
+        "sector": "",
+        "url": "/market-activity/stocks/aacbr"
+      },
+      {
+        "symbol": "AACG",
+        "name": "ATA Creativity Global American Depositary Shares",
+        "lastsale": "$0.98",
+        "netchange": "0.02",
+        "pctchange": "2.083%",
+        "volume": "1058",
+        "marketCap": "42169397.00",
+        "country": "China",
+        "ipoyear": "2008",
+        "industry": "Other Consumer Services",
+        "sector": "Real Estate",
+        "url": "/market-activity/stocks/aacg"
+      },
+      {
+        "symbol": "AACI",
+        "name": "Armada Acquisition Corp. III Class A Ordinary Share",
+        "lastsale": "$9.97",
+        "netchange": "-0.01",
+        "pctchange": "-0.10%",
+        "volume": "1280",
+        "marketCap": "0.00",
+        "country": "United States",
+        "ipoyear": "2026",
+        "industry": "Blank Checks",
+        "sector": "Finance",
+        "url": "/market-activity/stocks/aaci"
+      },
+      {
+        "symbol": "AACIU",
+        "name": "Armada Acquisition Corp. III Units",
+        "lastsale": "$10.08",
+        "netchange": "0.00",
+        "pctchange": "0.00%",
+        "volume": "27",
+        "marketCap": "0.00",
+        "country": "United States",
+        "ipoyear": "2026",
+        "industry": "Blank Checks",
+        "sector": "Finance",
+        "url": "/market-activity/stocks/aaciu"
+      }
+    ]
+  },
+  "message": null,
+  "status": {
+    "rCode": 200,
+    "bCodeMessage": null,
+    "developerMessage": null
+  }
+}

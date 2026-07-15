@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.backfillshares</string>
+
+    <!-- caffeinate로 실행 중 잠자기 방지. backfill_shares는 '아직 shares_outstanding이
+         없는 (종목,분기)'만 처리하는 resume 방식이라, 한도 소진으로 중단되거나 며칠 놓쳐도
+         다음 실행 때 이어받는다(이미 받은 분기는 스킵). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/usr/bin/python3</string>
+        <string>/Users/gyuyeong/dart-text2sql-wiki/scripts/backfill_shares.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki</string>
+
+    <!-- 매일 새벽 3시 + 낮 13시 2회 시도. DART 일일 한도(2만/일)를 소진하면 그날은
+         QUOTA_EXCEEDED로 종료되고, 다음 실행이 남은 (종목,분기)부터 이어받는다.
+         맥이 특정 시각에 꺼져 있어도 다른 시각에 잡히게 2회로 둔다. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki/data/logs/backfill_shares.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/dart-text2sql-wiki/data/logs/backfill_shares.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/Library/Python/3.9/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

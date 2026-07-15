@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quant Assistant</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1f2430; --line:#2a2f3c;
+    --text:#e6e9ef; --muted:#8b93a7; --accent:#5b8cff; --accent2:#3ad29f;
+    --warn:#f0a020; --bad:#ff6b6b; --chip:#262c3a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Apple SD Gothic Neo",sans-serif;font-size:14px;line-height:1.5}
+  header{padding:18px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.2px}
+  header .env{margin-left:auto;color:var(--muted);font-size:12px;font-family:ui-monospace,monospace}
+  main{padding:24px 28px;max-width:1100px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  input[type=text]{flex:1;min-width:240px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--text);padding:12px 14px;border-radius:9px;font-size:14px;outline:none}
+  input[type=text]:focus{border-color:var(--accent)}
+  textarea#q{flex:1;min-width:240px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--text);padding:12px 14px;border-radius:9px;font-size:15px;outline:none;
+    resize:vertical;min-height:104px;font-family:inherit;line-height:1.55}
+  textarea#q:focus{border-color:var(--accent)}
+  img.qchart{max-width:100%;height:auto;display:block;margin-top:10px;border-radius:8px;border:1px solid var(--line)}
+  button{background:var(--accent);color:#fff;border:0;padding:11px 18px;border-radius:9px;cursor:pointer;font-weight:600;font-size:14px;
+    transition:filter .15s,transform .1s}
+  button:hover{filter:brightness(1.08)} button:active{transform:scale(.98)} button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+  button.sm{padding:6px 12px;font-size:13px}
+  label.chk{display:flex;align-items:center;gap:6px;color:var(--muted);cursor:pointer}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+  .chip{background:var(--chip);padding:5px 11px;border-radius:20px;font-size:12.5px;color:var(--text);cursor:pointer}
+  .chip:hover{background:#30384a}
+  .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:600}
+  .b-hit{background:rgba(58,210,159,.16);color:var(--accent2)}
+  .b-miss{background:rgba(139,147,167,.16);color:var(--muted)}
+  .b-ver{background:rgba(91,140,255,.18);color:var(--accent)}
+  .b-warn{background:rgba(240,160,32,.16);color:var(--warn)}
+  pre.sql{background:#0c0e14;border:1px solid var(--line);border-radius:9px;padding:14px;overflow:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#cfe1ff;white-space:pre-wrap;word-break:break-word}
+  table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .meta{color:var(--muted);font-size:12.5px;margin:8px 0}
+  .kv{display:flex;gap:18px;flex-wrap:wrap;margin:4px 0 0}
+  .kv div{font-size:12.5px;color:var(--muted)} .kv b{color:var(--text);font-weight:600}
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .stat .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums} .stat .l{color:var(--muted);font-size:12px;margin-top:2px}
+  .spinner{display:inline-block;width:15px;height:15px;border:2px solid var(--line);border-top-color:var(--accent);
+    border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .hidden{display:none}
+  .err{color:var(--bad)}
+  .bt-metric{display:inline-flex;align-items:center;gap:5px;margin:4px 12px 4px 0;font-size:13px}
+  .bt-metric select{padding:3px 6px;border-radius:5px;background:var(--panel2);color:var(--text);border:1px solid var(--line);font-size:12px}
+  .bt-metric input[type=number]{width:48px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px}
+  label.lbl{color:var(--muted);font-size:13px;display:inline-flex;align-items:center;gap:6px;margin-right:14px}
+  label.lbl select,label.lbl input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px}
+
+  /* ===== 거시지표 티커 ===== */
+  .macro-bar{display:flex;flex-wrap:wrap;align-items:stretch;background:var(--panel);border-bottom:1px solid var(--line);padding:0 28px}
+  .macro-item{display:flex;align-items:baseline;gap:6px;padding:9px 16px;border-right:1px solid var(--line);white-space:nowrap}
+  .macro-l{color:var(--muted);font-size:11.5px}
+  .macro-v{font-weight:650;font-size:13.5px;font-variant-numeric:tabular-nums}
+  .macro-chg{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .macro-chg.up{color:var(--accent2)} .macro-chg.down{color:var(--bad)}
+  .macro-err{color:var(--muted);font-size:12px;padding:9px 16px}
+  .macro-note{margin-left:auto;align-self:center;padding:9px 16px;color:var(--muted);font-size:11px;white-space:nowrap}
+
+  /* ===== 접이식 패널 (고급설정) ===== */
+  details.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:18px;overflow:hidden}
+  details.panel > summary{list-style:none;cursor:pointer;padding:14px 18px;font-weight:600;
+    display:flex;align-items:center;gap:8px;user-select:none;transition:background .12s}
+  details.panel > summary::-webkit-details-marker{display:none}
+  details.panel > summary::before{content:'▸';color:var(--muted);font-size:11px;transition:transform .15s}
+  details.panel[open] > summary::before{transform:rotate(90deg)}
+  details.panel > summary:hover{background:var(--panel2)}
+  details.panel .panel-body{padding:4px 18px 18px}
+  details.panel .panel-body .card{background:var(--panel2)}
+
+  /* ===== 계층형 에이전트 실시간 트리 (HA-12) ===== */
+  .tree{margin-top:10px}
+  .tree-node{display:flex;align-items:baseline;gap:9px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.03);font-size:13.5px}
+  .tree-branch{color:var(--muted);font-family:ui-monospace,monospace;white-space:pre;flex:0 0 auto}
+  .tree-step{font-weight:650;color:var(--accent);white-space:nowrap;flex:0 0 auto}
+  .tree-sum{color:var(--text)}
+  .tree-done{margin-top:10px;color:var(--accent2);font-weight:600}
+  .tree-fail{margin-top:10px;color:var(--bad);font-weight:600}
+
+  /* ===== 계층형 응답 · 도메인별 원본 데이터 범용 KV 렌더 (HA-13) ===== */
+  table.kvt{width:100%;border-collapse:collapse;margin:2px 0}
+  table.kvt th{width:1%;white-space:nowrap;color:var(--muted);font-weight:600;vertical-align:top;
+    padding:4px 12px 4px 0;border:0;text-align:left;font-family:ui-monospace,monospace;font-size:12.5px}
+  table.kvt td{padding:4px 0;border:0;vertical-align:top}
+  .kvblock{border-left:2px solid var(--line);padding-left:10px;margin:5px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Quant Assistant</h1>
+  <a href="/macro" style="text-decoration:none;background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:8px 14px;border-radius:9px;font-size:13px;font-weight:600">🚦 매크로 →</a>
+  <label class="env" style="display:flex;align-items:center;gap:6px">LLM
+    <select id="modelSel" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12.5px"><option>로딩…</option></select>
+  </label>
+</header>
+<div class="macro-bar" id="macroBar"><div class="macro-err"><span class="spinner"></span> 거시지표 로딩…</div></div>
+
+<main>
+  <!-- ===== 프롬프트 입력창 (질의 · 백테스트 · 팩터질문 통합 진입점) ===== -->
+  <div class="card">
+    <div class="row" style="align-items:flex-start">
+      <textarea id="q" rows="4" placeholder="질문을 입력하세요 (Enter 실행 · Shift+Enter 줄바꿈). 예: 삼성전자 최근 1년 주가 그래프 그려줘"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();runQuery();}"></textarea>
+      <!-- 실행 시 실시간 트리(SSE)가 항상 자동으로 함께 돈다(별도 토글 버튼 없음). -->
+      <button id="runBtn" onclick="runQuery()">실행</button>
+    </div>
+  </div>
+
+  <!-- ===== 고급설정: 백테스트 ===== -->
+  <details class="panel" id="advSettings">
+    <summary>고급설정 · 백테스트</summary>
+    <div class="panel-body">
+      <div class="card">
+        <div class="row" style="gap:18px;flex-wrap:wrap">
+          <label class="lbl">기간 <input type="number" id="bt_sy" value="2024" style="width:80px"> ~ <input type="number" id="bt_ey" value="2026" style="width:80px"></label>
+          <label class="lbl">리밸런싱 <select id="bt_rebal"><option value="monthly">월</option><option value="quarterly" selected>분기</option><option value="semiannual">반기</option><option value="annual">연</option></select></label>
+          <label class="lbl">종목수 <input type="number" id="bt_n" value="10" style="width:60px"></label>
+          <label class="lbl">조합 <select id="bt_combine"><option value="zscore">가중 z-score</option><option value="rank_sum">순위합(마법공식)</option><option value="and">AND 필터</option></select></label>
+        </div>
+      </div>
+      <div class="card">
+        <b>선정 지표</b> <span class="meta">(체크 → 방향 → 가중치)</span>
+        <div id="bt_metrics" style="margin-top:8px"><span class="spinner"></span></div>
+      </div>
+      <div class="card">
+        <b>시장</b> <span class="meta">(미선택 = 전체)</span>
+        <div id="bt_markets" class="chips" style="margin-top:8px">
+          <label class="chip"><input type="checkbox" value="KOSPI" style="margin-right:4px">코스피</label>
+          <label class="chip"><input type="checkbox" value="KOSDAQ" style="margin-right:4px">코스닥</label>
+        </div>
+      </div>
+      <div class="card">
+        <b>산업 필터</b> <span class="meta">(미선택 = 전체)</span>
+        <div id="bt_sectors" class="chips" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
+        <b>거래비용</b> <span class="meta">(% 단위, 리밸런싱 회전율에 반영)</span>
+        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:8px">
+          <label class="lbl">수수료(%) <input type="number" id="bt_fee" value="0.015" step="0.001" style="width:90px"></label>
+          <label class="lbl">매도 거래세(%) <input type="number" id="bt_tax" value="0.18" step="0.01" style="width:90px"></label>
+          <label class="lbl">슬리피지(%) <input type="number" id="bt_slip" value="0.1" step="0.01" style="width:90px"></label>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <div class="row">
+          <input type="text" id="bt_name" value="내 전략" style="flex:0 0 200px">
+          <button id="bt_run" onclick="runBacktest()">백테스트 실행</button>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <div id="treeResult"></div>
+  <div id="qResult"></div>
+  <div id="bt_result"></div>
+  <div style="text-align:center;color:var(--muted);font-size:11px;margin:24px 0 4px">made by 규영</div>
+</main>
+
+<script>
+// ngrok 무료 경고 페이지 우회: 모든 fetch에 헤더 주입 (외부 접속 시 API 응답이 HTML로 오는 문제 방지)
+(function(){const _f=window.fetch;window.fetch=(u,o)=>{o=o||{};o.headers=Object.assign({},o.headers,{'ngrok-skip-browser-warning':'true'});return _f(u,o);};})();
+// 접이식 패널 (열릴 때만 지연 로드)
+document.getElementById('advSettings').addEventListener('toggle', function(){ if(this.open) loadBacktestUI(); });
+
+function badge(hit,labelHit,labelMiss){return hit?`<span class="badge b-hit">${labelHit}</span>`:`<span class="badge b-miss">${labelMiss}</span>`;}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function fmtCell(v){
+  if(v==null) return '<span style="color:#8b93a7">NULL</span>';
+  if(typeof v==='number'){
+    const a=Math.abs(v);
+    // 큰 금액은 조/억 단위 + 천단위 콤마. 조는 소수 2자리, 억은 1자리.
+    if(a>=1e12) return (v/1e12).toLocaleString(undefined,{maximumFractionDigits:2})+'조';
+    if(a>=1e8)  return (v/1e8 ).toLocaleString(undefined,{maximumFractionDigits:1})+'억';
+    return v.toLocaleString(undefined,{maximumFractionDigits:2});
+  }
+  return esc(v);
+}
+
+async function loadModels(){
+  const sel=document.getElementById('modelSel');
+  try{
+    const models=await (await fetch('/api/models')).json();
+    sel.innerHTML=models.map(m=>`<option value="${esc(m.id)}"${m.available?'':' disabled'}>${esc(m.label)}${m.available?'':' · 불가'}</option>`).join('');
+    const firstOk=models.find(m=>m.available);
+    if(firstOk) sel.value=firstOk.id;
+  }catch(e){sel.innerHTML='<option>서버 오프라인</option>';}
+}
+
+// ===== 거시지표 티커 =====
+function macroItem(label,value,chgPct){
+  let chg='';
+  if(chgPct!=null){
+    const cls=chgPct>=0?'up':'down';
+    chg=`<span class="macro-chg ${cls}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
+  }
+  return `<div class="macro-item"><span class="macro-l">${esc(label)}</span><span class="macro-v">${esc(value)}</span>${chg}</div>`;
+}
+async function loadMacro(){
+  const bar=document.getElementById('macroBar');
+  try{
+    const m=await (await fetch('/api/macro')).json();
+    const items=[];
+    if(m.usdkrw && m.usdkrw.rate!=null){
+      items.push(macroItem('원/달러', m.usdkrw.rate.toLocaleString(undefined,{maximumFractionDigits:2})));
+    }else{
+      items.push('<div class="macro-err">원/달러 조회 실패</div>');
+    }
+    (m.indices||[]).forEach(ix=>{
+      if(ix.error){ items.push(`<div class="macro-err">${esc(ix.label)} 조회 실패</div>`); return; }
+      items.push(macroItem(ix.label, ix.close.toLocaleString(undefined,{maximumFractionDigits:2}), ix.change_pct));
+    });
+    items.push(`<span class="macro-note">지수 ${esc(m.note?.quotes||'약 15-20분 지연')}</span>`);
+    bar.innerHTML=items.join('');
+  }catch(e){
+    bar.innerHTML='<div class="macro-err">거시지표 조회 실패</div>';
+  }
+}
+
+async function runQuery(){
+  const q=document.getElementById('q').value.trim(); if(!q)return;
+  const btn=document.getElementById('runBtn'); btn.disabled=true;
+  // 새 질문 제출 시: 이전 SSE 연결을 먼저 닫고(이벤트 섞임 방지) 트리/결론/차트/에러를 완전히 비운다.
+  if(_treeES){ _treeES.close(); _treeES=null; }
+  document.getElementById('treeResult').innerHTML='';
+  document.getElementById('qResult').innerHTML='';
+  startStreamTree(q);   // 실시간 트리(SSE)를 항상 자동 실행 — 별도 토글 없음
+  document.getElementById('qResult').innerHTML='<div class="card"><span class="spinner"></span> 계층형 에이전트 실행 중…</div>';
+  try{
+    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q,model:document.getElementById('modelSel').value})});
+    const s=await r.json();
+    if(!r.ok){throw new Error(s.detail||'오류');}
+    renderQuery(s);
+  }catch(e){
+    document.getElementById('qResult').innerHTML=`<div class="card err">오류: ${esc(e.message)}</div>`;
+  }finally{btn.disabled=false;}
+}
+
+// ===== 계층형 에이전트 실시간 트리 (HA-12) =====
+// 신규 SSE 엔드포인트(GET /api/query/stream)를 EventSource로 구독한다. 총괄→도메인→데이터→검증
+// 노드 진행 이벤트({step,summary})가 도착할 때마다(전체 완료를 안 기다리고) 들여쓰기 트리에
+// 실시간 추가한다. 표시는 백엔드 이벤트 스키마와 정확히 일치(단계명 + 한 줄 요약만) —
+// SQL 전문/원본 rows/결론 본문 같은 상세는 이벤트에 없으므로 여기서도 만들지 않는다.
+let _treeES=null;
+// step → 트리 깊이(들여쓰기). 백엔드가 도메인/데이터/검증 노드를 추가로 방출해도(HA-13 이후)
+// 프론트 분기 없이 자연스럽게 계층이 깊어지도록 매핑한다. 미지의 step은 도메인(1)로 본다.
+const TREE_LABEL={supervisor:'총괄',kr:'한국',us:'미국',macro:'매크로',backtest:'백테스트',
+  data:'데이터요청',verify:'검증',audit:'감사'};
+function treeDepth(step){
+  if(step==='supervisor') return 0;                          // 총괄
+  if(/^(kr|us|macro|backtest)/.test(step)) return 1;         // 도메인
+  if(/(data|price|financial|sql|audit)/.test(step)) return 2; // 데이터요청/감사(하드·소프트 검사)
+  if(/verify|검증/.test(step)) return 2;                     // 검증
+  return 1;
+}
+function treeNode(step,summary){
+  const d=treeDepth(step);
+  const label=TREE_LABEL[step]||step;
+  return `<div class="tree-node" style="padding-left:${d*22}px">`+
+    `<span class="tree-branch">${d?'└─':'●'}</span>`+
+    `<span class="tree-step">${esc(label)}</span>`+
+    `<span class="tree-sum">${esc(summary)}</span></div>`;
+}
+function startStreamTree(q){
+  if(_treeES){ _treeES.close(); _treeES=null; }              // 이전 스트림 정리(중복 실행 방지)
+  const box=document.getElementById('treeResult');
+  box.innerHTML='<div class="card"><b>🌳 계층형 에이전트 · 실시간 진행</b>'+
+    '<div class="tree" id="treeNodes"><div class="meta"><span class="spinner"></span> 총괄 에이전트 시작…</div></div></div>';
+  const nodes=document.getElementById('treeNodes');
+  let got=false;
+  const model=document.getElementById('modelSel').value||'';
+  const url='/api/query/stream?question='+encodeURIComponent(q)+(model?'&model='+encodeURIComponent(model):'');
+  _treeES=new EventSource(url);
+  _treeES.onmessage=(e)=>{                                    // 기본(data:) 프레임 = 진행 이벤트
+    let ev; try{ ev=JSON.parse(e.data); }catch(_){ return; }
+    if(!ev || !ev.step) return;
+    if(!got){ nodes.innerHTML=''; got=true; }                 // 첫 이벤트 도착 시 로딩표시 제거
+    nodes.insertAdjacentHTML('beforeend', treeNode(ev.step, ev.summary||''));
+  };
+  _treeES.addEventListener('done',()=>{                       // 정상 종료 마커 → 닫기(자동 재연결·재실행 방지)
+    if(_treeES){ _treeES.close(); _treeES=null; }
+    if(!got){ nodes.innerHTML='<div class="meta">진행 이벤트가 없었습니다.</div>'; }
+    nodes.insertAdjacentHTML('beforeend','<div class="tree-done">✓ 완료</div>');
+  });
+  _treeES.addEventListener('fail',(e)=>{                      // 서버가 보낸 실패 이벤트
+    if(_treeES){ _treeES.close(); _treeES=null; }
+    let msg=''; try{ msg=(JSON.parse(e.data)||{}).message||''; }catch(_){}
+    nodes.insertAdjacentHTML('beforeend',`<div class="tree-fail">⚠ 실패: ${esc(msg||'스트림 오류')}</div>`);
+  });
+  _treeES.onerror=()=>{                                        // 연결 끊김(EventSource 기본 error) → 닫아 재연결 방지
+    if(_treeES){ _treeES.close(); _treeES=null; }
+    if(!got){ nodes.innerHTML='<div class="meta err">스트림 연결 실패</div>'; }
+  };
+}
+
+// ===== 계층형 총괄 그래프 응답 렌더 (HA-13) =====
+// 응답: {question, routes:[...], domain_results:{도메인:원본dict}, conclusion, uncertain, attempts, reason}
+// (diagCard / evaluation / sql / rows-columns 등 legacy 응답 필드는 신규 아키텍처에 없어 제거됨)
+const DOMAIN_LABELS={kr:'한국주식',us:'미국주식',macro:'매크로',backtest:'백테스트'};
+
+// 도메인마다 dict 구조가 조금씩 달라(과설계 방지) 하나의 범용 재귀 렌더러로
+// 원본 데이터를 가공 없이 그대로 병기한다(AC4). 원시값은 fmtCell(조/억·콤마 포맷)로 표시.
+function renderValue(v){
+  if(v==null) return '<span style="color:#8b93a7">—</span>';
+  if(Array.isArray(v)){
+    if(!v.length) return '<span style="color:#8b93a7">[]</span>';
+    if(v.every(x=>x===null||typeof x!=='object')) return v.map(x=>fmtCell(x)).join(', ');
+    return v.map(x=>`<div class="kvblock">${renderValue(x)}</div>`).join('');
+  }
+  if(typeof v==='object'){
+    const entries=Object.entries(v);
+    if(!entries.length) return '<span style="color:#8b93a7">{}</span>';
+    return `<table class="kvt"><tbody>${entries.map(([k,val])=>
+      `<tr><th>${esc(k)}</th><td>${renderValue(val)}</td></tr>`).join('')}</tbody></table>`;
+  }
+  return fmtCell(v);
+}
+function domainCard(domain,result){
+  const label=DOMAIN_LABELS[domain]||domain;
+  // 재무 source(DART|FnGuide)가 있으면 눈에 띄게 뱃지로 강조(AC4).
+  const src=result&&result.financial&&result.financial.source;
+  const srcBadge=src?`<span class="badge b-ver">재무 출처 ${esc(src)}</span>`:'';
+  const hasErr=result&&(result.error||(Array.isArray(result.errors)&&result.errors.length));
+  return `<div class="card">
+    <b>📦 ${esc(label)} 도메인</b> <span class="meta" style="font-weight:400">· 원본 데이터(가공 없음)</span>
+    <div style="margin:8px 0">${srcBadge}${hasErr?'<span class="badge b-warn">일부 오류</span>':''}</div>
+    ${renderValue(result)}
+  </div>`;
+}
+function renderQuery(s){
+  const routes=s.routes||[];
+  const badges=routes.map(r=>`<span class="badge b-hit">${esc(DOMAIN_LABELS[r]||r)}</span>`).join(' ')
+    || '<span class="badge b-miss">라우팅된 도메인 없음</span>';
+  const uncertainHtml = s.uncertain ?
+    `<div class="card" style="border-left:3px solid var(--warn)">
+      <b>⚠ 불확실성 있음</b>
+      <div class="meta" style="margin-top:6px">3회 재시도 후에도 검증에 실패했습니다. 아래 도메인 원본 데이터는 참고용이며 확실한 결론이 아닙니다.</div>
+      ${s.reason?`<div class="meta" style="margin-top:4px"><b>사유:</b> ${esc(s.reason)}</div>`:''}
+    </div>` : '';
+  const conclusionHtml =
+    `<div class="card"${s.uncertain?'':' style="border-left:3px solid var(--accent2)"'}>
+      <div class="kv">
+        <div>질문 <b>${esc(s.question||'')}</b></div>
+        <div>시도 <b>${esc(s.attempts)}회</b></div>
+      </div>
+      <div style="margin:8px 0">라우팅 ${badges}</div>
+      <b>${s.uncertain?'🔎 종합 (불확실)':'🧭 종합 결론'}</b>
+      <div style="margin-top:6px;white-space:pre-wrap">${esc(s.conclusion||(s.uncertain?'확실한 결론을 제시할 수 없습니다.':''))}</div>
+    </div>`;
+  // 차트 요청("그래프/차트/그려줘" 등)일 때만 백엔드가 chart_base64를 채운다 — 있으면 이미지로 표시.
+  const chartHtml = s.chart_base64 ?
+    `<div class="card"><b>📈 ${esc(s.chart_title||'차트')}</b>
+      <img class="qchart" src="data:image/png;base64,${s.chart_base64}" alt="${esc(s.chart_title||'차트')}"></div>` : '';
+  const domainsHtml = Object.entries(s.domain_results||{})
+    .map(([d,r])=>domainCard(d,r)).join('') || '<div class="card"><div class="meta">도메인 결과가 없습니다.</div></div>';
+  document.getElementById('qResult').innerHTML = uncertainHtml + conclusionHtml + chartHtml + domainsHtml;
+  // 신규 라이브 경로는 legacy Pipeline처럼 질의를 기록(wiki)에 저장하지 않으므로 자동 갱신 호출은 제거함.
+}
+
+// ===== 백테스트 =====
+let BT_LOADED=false;
+async function loadBacktestUI(){
+  if(BT_LOADED) return; BT_LOADED=true;
+  const defs=await (await fetch('/api/metric-defs')).json();
+  const cats={};
+  defs.forEach(d=>{(cats[d.category]=cats[d.category]||[]).push(d);});
+  document.getElementById('bt_metrics').innerHTML=Object.entries(cats).map(([cat,items])=>
+    `<div style="margin:6px 0"><span class="badge b-miss">${esc(cat)}</span> `+
+    items.map(d=>`<label class="bt-metric" title="${esc(d.description)}">
+      <input type="checkbox" value="${d.key}"> ${esc(d.label)}
+      <select class="bt-dir"><option value="low"${d.direction==='low'?' selected':''}>낮을수록</option><option value="high"${d.direction==='high'?' selected':''}>높을수록</option></select>
+      <input type="number" class="bt-w" value="1" step="0.1"></label>`).join('')+`</div>`).join('');
+  const secs=await (await fetch('/api/sectors')).json();
+  document.getElementById('bt_sectors').innerHTML=secs.map(s=>
+    `<label class="chip"><input type="checkbox" value="${esc(s)}" style="margin-right:4px">${esc(s)}</label>`).join('');
+  if(new URLSearchParams(location.search).get('demo')){
+    const set=k=>{const l=[...document.querySelectorAll('#bt_metrics .bt-metric')].find(x=>x.querySelector('input').value===k); if(l)l.querySelector('input').checked=true;};
+    set('per'); set('roe'); runBacktest();
+  }
+}
+async function runBacktest(){
+  const criteria=[...document.querySelectorAll('#bt_metrics .bt-metric')]
+    .filter(l=>l.querySelector('input[type=checkbox]').checked)
+    .map(l=>({key:l.querySelector('input[type=checkbox]').value,
+              direction:l.querySelector('.bt-dir').value,
+              weight:parseFloat(l.querySelector('.bt-w').value)||1}));
+  if(!criteria.length){alert('지표를 1개 이상 선택하세요.');return;}
+  const sectors=[...document.querySelectorAll('#bt_sectors input:checked')].map(i=>i.value);
+  const markets=[...document.querySelectorAll('#bt_markets input:checked')].map(i=>i.value);
+  const pct=id=>{const v=parseFloat(document.getElementById(id).value);return isNaN(v)?null:v/100;};
+  const body={start_year:+document.getElementById('bt_sy').value,end_year:+document.getElementById('bt_ey').value,
+    rebalance:document.getElementById('bt_rebal').value,n:+document.getElementById('bt_n').value,
+    criteria,combine:document.getElementById('bt_combine').value,
+    sectors:sectors.length?sectors:null,markets:markets.length?markets:null,name:document.getElementById('bt_name').value,
+    fee_rate:pct('bt_fee'),tax_rate:pct('bt_tax'),slippage_rate:pct('bt_slip')};
+  const btn=document.getElementById('bt_run');btn.disabled=true;
+  document.getElementById('bt_result').innerHTML='<div class="card"><span class="spinner"></span> 백테스트 중…</div>';
+  try{
+    const r=await fetch('/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||'오류');
+    renderBacktest(d);
+  }catch(e){document.getElementById('bt_result').innerHTML=`<div class="card err">오류: ${esc(e.message)}</div>`;}
+  finally{btn.disabled=false;}
+}
+function renderBacktest(d){
+  const p=d.performance;
+  const stat=(n,l)=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  const cards=stat((p.cagr??'-')+'%','CAGR')+stat((p.total_return??'-')+'%','누적수익')
+    +stat((p.mdd??'-')+'%','MDD')+stat(p.sharpe??'-','샤프')+stat(p.sortino??'-','소르티노')
+    +stat((p.win_rate??'-')+'%','승률')+stat((p.volatility??'-')+'%','변동성')+stat((p.avg_turnover??'-')+'%','평균회전율')
+    +(p.benchmark_return!=null?stat((p.benchmark_return)+'%','시장(동일가중)')
+      +stat((p.excess_return>=0?'+':'')+p.excess_return+'%','초과수익')+stat(p.beta??'-','베타'):'');
+  const hist=(d.holdings||[]).map((h,i)=>{
+    const prevNames=i>0?(d.holdings[i-1].names||[]):[];
+    const prevSet=new Set(prevNames), curSet=new Set(h.names||[]);
+    const added=(h.names||[]).filter(n=>!prevSet.has(n));        // 이번에 편입
+    const removed=prevNames.filter(n=>!curSet.has(n));           // 이번에 편출
+    const chips=(h.names||[]).map(n=>{
+      const isNew=added.includes(n);
+      return `<span class="chip"${isNew?' style="border-color:#3b82f6;color:#7eb0ff"':''}>${esc(n)}${isNew?' ▲':''}</span>`;
+    }).join(' ');
+    const change=i===0?'<span class="meta">최초 편입</span>'
+      :((added.length||removed.length)
+        ?`${added.length?`<span style="color:#4ade80">＋ ${added.map(esc).join(', ')}</span> `:''}`
+          +`${removed.length?`<span style="color:#f87171">－ ${removed.map(esc).join(', ')}</span>`:''}`
+        :'<span class="meta">변동 없음</span>');
+    return `<div style="padding:8px 0;border-bottom:1px solid #222">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+        <b style="font-size:13px">${esc(h.date)}</b><span style="font-size:12px">${change}</span></div>
+      <div class="chips" style="margin-top:6px">${chips}</div></div>`;
+  }).join('');
+  document.getElementById('bt_result').innerHTML=`
+    <div class="card"><b>성과지표</b><div class="stat-grid" style="margin-top:10px">${cards}</div></div>
+    <div class="card"><b>수익 곡선</b>${navChart(d.dates,d.navs,d.benchmark)}</div>
+    <div class="card"><b>분기별 보유종목 · 교체 내역</b> <span class="meta">▲ 신규편입 · ＋편입/－편출</span>
+      <div style="margin-top:8px">${hist||'<span class="meta">보유 종목 없음</span>'}</div></div>`;
+}
+function navChart(dates,navs,bench){
+  if(!navs||navs.length<2) return '<div class="meta">데이터 부족</div>';
+  const w=860,h=240,pad=44;
+  const hasB=bench&&bench.length===navs.length&&bench.every(v=>v!=null);
+  const all=hasB?navs.concat(bench):navs;
+  const min=Math.min(...all),max=Math.max(...all);
+  const X=i=>pad+i*(w-2*pad)/(navs.length-1);
+  const Y=v=>h-pad-(v-min)/((max-min)||1)*(h-2*pad);
+  const path=navs.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const bpath=hasB?bench.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' '):'';
+  const base=Y(navs[0]);
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;margin-top:8px">
+    <line x1="${pad}" y1="${base.toFixed(1)}" x2="${w-pad}" y2="${base.toFixed(1)}" stroke="#2a2f3c" stroke-dasharray="4"/>
+    ${hasB?`<path d="${bpath}" fill="none" stroke="#8b93a7" stroke-width="1.5" stroke-dasharray="5"/>`:''}
+    <path d="${path}" fill="none" stroke="#5b8cff" stroke-width="2"/>
+    <text x="${pad}" y="22" fill="#8b93a7" font-size="12">${esc(dates[0])} → ${esc(dates[dates.length-1])}  ·  최종 NAV ${navs[navs.length-1].toFixed(2)} (×${(navs[navs.length-1]/navs[0]).toFixed(2)})</text>
+    ${hasB?`<text x="${pad}" y="38" fill="#8b93a7" font-size="11">— 전략(파랑)   ┄ 시장 동일가중(회색)</text>`:''}
+  </svg>`;
+}
+
+// 딥링크: ?q=질문 → 자동 질의, #backtest → 해당 패널 펼침, ?demo=1 → 백테스트 데모
+(function initDeepLink(){
+  const hash=location.hash.replace('#','');
+  if(hash==='backtest'){document.getElementById('advSettings').open=true; loadBacktestUI();}
+  if(new URLSearchParams(location.search).get('demo')){document.getElementById('advSettings').open=true; loadBacktestUI();}
+  const q=new URLSearchParams(location.search).get('q');
+  if(q){document.getElementById('q').value=q; runQuery();}
+})();
+
+loadModels();
+loadMacro();
+</script>
+</body>
+</html>
