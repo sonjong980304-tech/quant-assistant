@@ -28,7 +28,6 @@ financials에 account_key='shares_outstanding'으로 채워 넣는다.
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

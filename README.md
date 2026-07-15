@@ -1,5 +1,7 @@
 # Quant Assistant
 
+> 저장소: https://github.com/sonjong980304-tech/dart-text2sql-wiki (비공개)
+
 한국·미국 상장사 재무/주가/매크로 데이터를 SQLite에 적재하고, 자연어 질문에 답하는
 시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.
 
@@ -17,26 +19,77 @@
 
 ## 웹: 계층형 멀티에이전트 아키텍처
 
+질문 하나가 **총괄 에이전트 → (병렬) 도메인 에이전트 4종 → 데이터 에이전트 → 총괄 에이전트의
+정합성 검증** 순서로 흐릅니다. 아래 다이어그램에서 색깔 있는 박스 하나하나가 독립된 에이전트
+(파일)입니다 — GitHub에서 이 파일을 열면 실제 도형으로 렌더링됩니다.
+
+```mermaid
+flowchart TB
+    Q(["💬 사용자 질문"])
+    SUP{{"🧭 총괄 에이전트 — supervisor.py<br/>라우팅 · 정합성 검증 · 재시도(최대 3회)"}}
+
+    Q --> SUP
+
+    subgraph KR_BOX["🇰🇷 한국주식 에이전트 — domain_kr.py"]
+        direction TB
+        KR_FIN["📑 data_financial.py<br/>DART · FnGuide"]
+        KR_PRICE["📈 data_price_kr.py<br/>주가 · 기술지표"]
+    end
+
+    subgraph US_BOX["🇺🇸 미국주식 에이전트 — domain_us.py"]
+        direction TB
+        US_FIN["📑 data_financial.py<br/>(재무 에이전트 공용)"]
+        US_PRICE["📈 data_price_us.py<br/>주가 · 기술지표"]
+    end
+
+    subgraph MACRO_BOX["🌐 매크로 에이전트 — domain_macro.py"]
+        direction TB
+        MACRO_DATA["💱 환율 · 해외지수 · 파마프렌치 팩터"]
+    end
+
+    subgraph BT_BOX["📊 백테스트 에이전트 — domain_backtest.py"]
+        direction TB
+        BT_PIPE["⚙️ pipeline_exec.py<br/>백테스트 엔진"]
+        BT_HARD["🛑 하드차단 3종 (결정론적)<br/>생존편향 · 미래참조 · 공매도"]
+        BT_SOFT["⚠️ 소프트경고 4종 (LLM 판정)<br/>스토리텔링 · 스누핑 · 신호감소 · 이상치"]
+        BT_PIPE --> BT_HARD --> BT_SOFT
+    end
+
+    SUP -->|"라우팅 (복수 도메인 동시 가능)"| KR_BOX
+    SUP -->|라우팅| US_BOX
+    SUP -->|라우팅| MACRO_BOX
+    SUP -->|라우팅| BT_BOX
+
+    KR_BOX --> VERIFY
+    US_BOX --> VERIFY
+    MACRO_BOX --> VERIFY
+    BT_BOX --> VERIFY
+
+    VERIFY{{"🔁 총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증"}}
+    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기"])
+
+    VERIFY -->|"불일치 → 재시도 (최대 3회)"| SUP
+    VERIFY -->|"일치 · 3회 초과 시 uncertain=True로 확정"| RESULT
+
+    classDef q fill:#f1f3f5,stroke:#868e96,color:#212529,font-weight:bold
+    classDef sup fill:#1f2a44,stroke:#0d1424,color:#ffffff,font-weight:bold
+    classDef result fill:#fff9db,stroke:#f08c00,color:#5c3d00,font-weight:bold
+    classDef kr fill:#fff0f0,stroke:#e03131,color:#7d1a1a
+    classDef us fill:#eef3ff,stroke:#3b5bdb,color:#1a2c66
+    classDef macro fill:#eefbf0,stroke:#2f9e44,color:#164a24
+    classDef bt fill:#f6eeff,stroke:#9c36b5,color:#4a1766
+
+    class Q q
+    class SUP,VERIFY sup
+    class RESULT result
+    class KR_BOX,KR_FIN,KR_PRICE kr
+    class US_BOX,US_FIN,US_PRICE us
+    class MACRO_BOX,MACRO_DATA macro
+    class BT_BOX,BT_PIPE,BT_HARD,BT_SOFT bt
 ```
-질문
-  │
-  ▼
-총괄 에이전트 (src/agents/supervisor.py · answer_with_verification)
-  │  라우팅: 한국주식(kr) / 미국주식(us) / 매크로(macro) / 백테스트(backtest)
-  │  복수 도메인 동시 라우팅 가능 (예: "삼성전자 종가랑 원/달러 환율")
-  ▼
-도메인 에이전트 (병렬 dispatch)
-  ├─ domain_kr.py / domain_us.py   → data_financial.py(재무) · data_price_kr.py / data_price_us.py(주가·기술지표)
-  ├─ domain_macro.py               → 환율·해외지수·파마프렌치 팩터 등
-  └─ domain_backtest.py            → 데이터준비(가격 스냅샷) + pipeline_exec.run_pipeline(백테스트 엔진)
-  │                                   + backtest_verification.py(하드차단 3종 + 소프트경고 4종)
-  ▼
-총괄 에이전트가 도메인 결과 ↔ 원 질문 정합성 검증
-  │  불일치 → 최대 3회 재시도(도메인 재-dispatch 포함)
-  │  3회 초과 → uncertain=True 로 그 상태 그대로 반환 (예전 파이프라인으로 자동 전환 안 함)
-  ▼
-종합 결론 + 도메인별 원본 데이터(가공 없음) 병기
-```
+
+> 🛑 하드차단은 규칙 기반이라 항상 같은 결과가 나오고(결정론적), ⚠️ 소프트경고는 LLM이 그때그때
+> 판단해 참고용으로만 결과에 첨부됩니다 — 백테스트를 막지는 않습니다.
 
 전체 그래프는 `src/agents/graph.py`(`run_hierarchical`/`run_streaming`)가 LangGraph
 `StateGraph`로 감싸고, `.stream()`으로 실행해 단계 완료마다 진행 이벤트를 방출합니다
@@ -56,6 +109,46 @@
 - 계산 엔진 자체(`src/backtest/pipeline_exec.py`)는 재발명하지 않고 그대로 재사용합니다 —
   LLM은 파이썬 코드를 직접 생성하지 않고, 사전검증된 프리미티브를 어떤 순서로 조립할지
   JSON으로만 지시합니다(같은 머신에 실거래봇이 상주하므로 임의 코드 실행을 차단).
+
+### 데이터 품질 안전장치
+스크리닝과 백테스트가 공유하는 데이터접근 계층(`src/backtest/data_access.py::metrics_at`,
+`data_access_us.py::metrics_at_us`)에 세 가지 안전장치가 걸려 있습니다. 셋 다 **"판단은
+AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다"** 는 같은 원칙을 따릅니다
+(비싼 판단을 배치로 1회만 하고 런타임은 캐시만 읽음).
+
+- **가격 이상치 종목 제외**(`src/data_quality.py`): 인접 거래일 종가비가 2배 이상(≥2.0)
+  이거나 1/2 이하(≤0.5)인 구간이 이력 어디든 있으면 그 종목을 **통째로** 제외합니다
+  (상승·하락 양방향 대칭). 액면분할/병합이 수정주가로 소급 반영되지 않았거나 원본
+  파싱이 틀어진 종목을 걸러 랭킹 오염을 막습니다. 전체 스캔(수백만 행)은 비싸므로 결과
+  종목코드 집합을 `ingest_meta`에 캐싱하고, 이후엔 캐시만 조회합니다(일일 가격 적재 후
+  배치가 `refresh=True`로 갱신).
+- **US 증권종류 분류**(`security_type`): 워런트/ADR/우선주/유닛/신주인수권 같은 파생·특수
+  증권은 시가총액이 비정상적으로 작아 PER이 비현실적으로 낮게 잡혀 저PER 스크리닝 상위를
+  오염시켰습니다. 회사명 전체 문자열의 의미를 **LLM이 배치로 판단**해
+  `us_company.security_type`에 캐싱하고(`scripts/backfill_us_security_type.py`), 런타임
+  필터(`domain_us.py::_filter_common_stock`)는 이 캐시를 읽어 `common`(일반 보통주)만
+  남깁니다. 아직 분류되지 않은(NULL) 종목만 회사명 키워드 안전망으로 최소한만 걸러냅니다.
+- **US 재무 보고통화 게이팅**(`financial_currency`): 외국기업 ADR은 주가는 달러로
+  거래되지만 실적을 본국통화로 보고하는 경우가 흔합니다(예: SK텔레콤 SKM = KRW). 이때
+  시가총액(달러)을 순이익(원화)으로 나누면 통화 불일치로 PER이 비현실적으로 낮게
+  계산됩니다. yfinance `financialCurrency`를 **배치로 수집**해
+  `us_company.financial_currency`에 캐싱하고(`scripts/backfill_us_financial_currency.py`),
+  `metrics_at_us`가 `USD`가 아닌 종목의 재무 파생 필드를 무효화합니다.
+
+### 재무 지표 스크리닝 필드 (단일 정의처)
+스크리닝 LLM 프롬프트에 노출되는 재무·파생 지표 목록은 **딕셔너리 한 곳**에서 파생됩니다
+— KR은 `src/backtest/data_access.py`의 `METRIC_FIELD_DESCRIPTIONS`, US는
+`data_access_us.py`의 `METRIC_FIELD_DESCRIPTIONS_US`(`{지표키: 한글설명}` 형태). 도메인
+에이전트의 유효 필드 목록(`_KR_SCREEN_FIELDS`/`_US_SCREEN_FIELDS`)과 스크리닝 프롬프트가
+이 딕셔너리에서 자동으로 따라오므로, **새 지표를 추가할 때 이 딕셔너리 한 곳(과
+`metrics_at()`의 반환 dict)만 고치면** 됩니다 — 예전엔 지표를 추가할 때마다 별도 목록에
+손으로 다시 베껴 적는 걸 깜빡해 스크리닝이 새 지표를 못 쓰던 반복 버그가 있었는데, 그
+근본 원인을 없앴습니다. `tests/test_screening_field_descriptions.py`가 이 딕셔너리의 키
+집합과 `metrics_at()` 실제 출력의 재무 필드가 어긋나면 실패하도록 강제합니다.
+
+최근 비율·성장률 지표에 더해 **절대금액 지표**(`operating_profit`·`revenue`·`net_income`,
+해당 분기 값이며 TTM 아님 — KR은 원화, US는 달러)를 추가해 "영업이익이 큰 순", "매출
+상위" 같은 절대값 스크리닝을 지원합니다.
 
 ### 예전 파이프라인 (`src/legacy/`)
 계층형 구조로 재설계하며 예전 6노드 파이프라인(`refine → wiki_check → router → sql_gen

@@ -62,7 +62,3 @@ COMPANIES: list[tuple[str, str, str, str]] = [
 
 def code_to_name() -> dict[str, str]:
     return {c[0]: c[1] for c in COMPANIES}
-
-
-def name_to_code() -> dict[str, str]:
-    return {c[1]: c[0] for c in COMPANIES}

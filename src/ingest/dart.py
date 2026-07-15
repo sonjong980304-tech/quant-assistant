@@ -21,10 +21,9 @@ import requests
 
 from ..config import CONFIG
 from ..db import connect, get_meta, init_db, set_meta
-from ..version import estimate_disclosed_date, recent_quarters, shift_quarter
+from ..version import estimate_disclosed_date, recent_quarters
 from .companies import COMPANIES
 from .ksic import market_from_corp_cls
-from .metrics import compute_metrics
 from .normalize import normalize_account
 from .notify import send_slack_alert
 from .robust import DartQuotaError, log_ingest, request_with_retry
@@ -43,30 +42,6 @@ FLOW_KEYS = {
     "revenue", "cost_of_sales", "gross_profit", "sga", "operating_profit",
     "net_income", "interest_expense", "operating_cashflow", "depreciation", "dividend",
 }
-
-
-def _parse_report(rows: list[dict]) -> tuple[dict, str | None]:
-    """한 보고서 응답을 파싱.
-
-    연결(CFS) 우선, 없으면 별도(OFS). account_key별 첫 매칭만 사용(중복 제거).
-    반환: ({account_key: (amount, account_nm)}, 접수일YYYYMMDD).
-    """
-    data: dict = {}
-    rcept = None
-    for fs in ("CFS", "OFS"):
-        for r in rows:
-            if r.get("fs_div") != fs:
-                continue
-            if rcept is None and r.get("rcept_no"):
-                rcept = str(r["rcept_no"])[:8]
-            key = normalize_account(r.get("account_nm", ""), r.get("account_id"))
-            if not key or key in data:
-                continue
-            amt = _to_amount(r.get("thstrm_amount"))
-            if amt is None:
-                continue
-            data[key] = (amt, r.get("account_nm"))
-    return data, rcept
 
 
 def get_corp_codes(api_key: str) -> dict[str, str]:
@@ -142,12 +117,6 @@ def _to_amount(s: str | None) -> float | None:
         return float(s)
     except ValueError:
         return None
-
-
-def _pick_amount(row: dict) -> float | None:
-    """손익은 당기 3개월(thstrm_add_amount 아님) 우선. 없으면 thstrm_amount."""
-    # 분기 단독 컬럼이 따로 없으면 thstrm_amount 사용
-    return _to_amount(row.get("thstrm_amount"))
 
 
 def fetch_all_accounts(api_key: str, corp_code: str, year, reprt: str, fs_div: str = "CFS") -> list[dict]:

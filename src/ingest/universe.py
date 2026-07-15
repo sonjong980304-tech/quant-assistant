@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 from ..config import CONFIG
 from ..db import connect, init_db
 from ..version import today_str
-from .companies import COMPANIES, code_to_name
+from .companies import COMPANIES
 from .robust import call_with_retry
 
 # (종목코드, 회사명, 시장, 업종)

@@ -13,9 +13,7 @@ from ..db import connect, init_db, set_meta
 from ..version import (
     estimate_available_quarter,
     estimate_disclosed_date,
-    now_iso,
     recent_quarters,
-    shift_quarter,
 )
 from .companies import COMPANIES
 from .metrics import compute_metrics
@@ -57,7 +55,7 @@ def generate_dummy(db_path: str | None = None, today: date | None = None, seed: 
 
             # 분기별 재무 생성
             net_by_q: dict[str, float] = {}
-            equity_latest = liab_latest = 0.0
+            equity_latest = 0.0
             for qi, q in enumerate(quarters):
                 growth = 1.0 + 0.015 * qi + rng.uniform(-0.08, 0.08)
                 revenue = base_rev_q * growth
@@ -67,7 +65,7 @@ def generate_dummy(db_path: str | None = None, today: date | None = None, seed: 
                 liab = equity * debt_ratio_t
                 assets = equity + liab
                 net_by_q[q] = net
-                equity_latest, liab_latest = equity, liab
+                equity_latest = equity
 
                 rows = {
                     "revenue": revenue,
