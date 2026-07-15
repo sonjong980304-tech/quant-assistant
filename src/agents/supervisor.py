@@ -417,7 +417,10 @@ def synthesize_conclusion(
 def _synthesize_prompt(question: str, domain_results: dict) -> str:
     return (
         "아래 여러 도메인 에이전트의 결과를 사용자 질문에 대한 하나의 종합결론으로 요약하세요.\n"
-        "각 도메인 데이터를 왜곡하지 말고, 서로 상충하면 그 사실도 함께 밝히세요.\n\n"
+        "각 도메인 데이터를 왜곡하지 말고, 서로 상충하면 그 사실도 함께 밝히세요.\n"
+        "스크리닝 결과 행에 '_same_company': true가 있으면, 그 행은 바로 앞의 '_same_company':"
+        " false인 행과 동일 회사의 다른 상장 주식 종류(예: Class A/C)입니다 — 서로 다른"
+        " 회사가 아니라 같은 회사임을 종합결론에서 반드시 밝히세요.\n\n"
         f"질문: {question}\n"
         f"도메인 결과: {domain_results}\n종합결론:"
     )

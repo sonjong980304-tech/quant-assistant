@@ -437,6 +437,29 @@ def test_synthesize_conclusion_uses_llm_when_available():
     assert conclusion == "LLM이 생성한 종합결론"
 
 
+def test_synthesize_prompt_explains_same_company_label():
+    """스크리닝 결과의 _same_company 라벨(GOOG/GOOGL 등 형제 티커 표시)이 원본 데이터에
+    그대로 병기되는 것만으로는 사용자에게 의미가 전달되지 않는다 — LLM이 종합결론을 쓸 때
+    이 라벨을 설명하도록 프롬프트에 안내 문구가 있어야 한다."""
+    captured = {}
+
+    def fake_llm(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "결론"
+
+    domain_results = {
+        "us": {"intent": "screening", "result": [
+            {"stock_code": "GOOGL", "name": "Alphabet Inc. Class A Common Stock", "_same_company": False},
+            {"stock_code": "GOOG", "name": "Alphabet Inc. Class C Capital Stock", "_same_company": True},
+        ]},
+    }
+    synthesize_conclusion("미국 영업이익 상위 기업", domain_results, fake_llm)
+    # 필드명이 프롬프트에 있다는 것만으로는 부족하다(그건 domain_results를 그대로 넣기만
+    # 해도 항상 참이 되는 가짜 검증) — LLM이 실제로 무슨 뜻인지 알 수 있는 설명 문구가
+    # 있어야 한다.
+    assert "동일 회사" in captured["prompt"] or "같은 회사" in captured["prompt"]
+
+
 # ── on_progress 진행 콜백 — 실시간 트리 상세화. 라우팅/도메인별/검증 시도별로 즉시
 #    콜백을 호출한다(기존 "노드 완료 후 요약 1줄"과 달리 진행 중에 여러 번 호출됨).
 #    콜백을 안 주면(on_progress=None, 기본값) 기존 모든 테스트처럼 완전히 동일하게 동작한다. ──

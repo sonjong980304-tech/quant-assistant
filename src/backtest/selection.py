@@ -11,10 +11,54 @@ N/A(결측·적자) 종목은 선정 지표가 비면 제외한다.
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 # criteria 예: [{"key": "per", "direction": "low", "weight": 0.5},
 #               {"key": "roe", "direction": "high", "weight": 0.5}]
+
+# 미국 주식은 한 회사가 Class A/B/C 등 복수 클래스로 별도 티커 상장되는 경우가 흔하다
+# (예: "Alphabet Inc. Class A Common Stock" / "Alphabet Inc. Class C Capital Stock").
+# 이 접미어를 제거하면 같은 회사가 같은 그룹 키로 묶인다. 한국 종목명(순수 한글)은 이
+# 접미어가 없어 이름 그대로가 곧 그룹 키가 되므로 기존 동작에 영향이 없다.
+_SHARE_CLASS_SUFFIX_RE = re.compile(
+    r"[,.]?\s*Class\s+[A-Za-z0-9]+\s*"
+    r"(Common Stock|Capital Stock|Common Shares?|Ordinary Shares?)?\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _company_group(row: dict) -> str:
+    """행이 속한 '회사' 그룹 키 (형제 티커 식별용, GOOG/GOOGL 등)."""
+    name = row.get("name") or row["stock_code"]
+    return _SHARE_CLASS_SUFFIX_RE.sub("", name).strip().rstrip(".").strip()
+
+
+def _select_top_n_by_company(ranked: list[dict], n: int) -> list[dict]:
+    """점수순 정렬된 후보를 순회하며 서로 다른 회사 n개를 채울 때까지 포함한다.
+
+    GOOG/GOOGL처럼 한 회사가 복수 티커로 상장된 경우, "상위 n개 기업" 질문에서 형제
+    티커가 서로 다른 기업인 것처럼 중복 집계되는 걸 막는다. 형제 티커를 제거(dedup)하지는
+    않는다 — 이미 그 정렬 구간에 자연스럽게 포함돼 있으면 함께 보여주되 `_same_company`
+    라벨만 붙인다. 개별 종목 조회 경로는 이 함수를 거치지 않으므로 영향 없다.
+    """
+    seen_groups: set[str] = set()
+    distinct = 0
+    out: list[dict] = []
+    for r in ranked:
+        group = _company_group(r)
+        if group in seen_groups:
+            r["_same_company"] = True
+            out.append(r)
+            continue
+        if distinct >= n:
+            break
+        seen_groups.add(group)
+        distinct += 1
+        r["_same_company"] = False
+        out.append(r)
+    return out
 
 
 def _validate_criteria_keys(rows: list[dict], criteria: list[dict]) -> None:
@@ -72,7 +116,7 @@ def select_stocks(
             survivors &= top
         result = [r for r in valid if r["stock_code"] in survivors]
         result.sort(key=lambda r: r[criteria[0]["key"]], reverse=(criteria[0]["direction"] == "high"))
-        return result[:n]
+        return _select_top_n_by_company(result, n)
 
     # rank_sum / zscore : "점수 낮을수록 우수"로 통일
     scores = {r["stock_code"]: 0.0 for r in valid}
@@ -94,4 +138,4 @@ def select_stocks(
     ranked = sorted(valid, key=lambda r: scores[r["stock_code"]])
     for r in ranked:
         r["_score"] = round(scores[r["stock_code"]], 4)
-    return ranked[:n]
+    return _select_top_n_by_company(ranked, n)
