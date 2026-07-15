@@ -86,6 +86,40 @@ def neutralize(rows: list[dict], field: str, by: str = "sector") -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# 3b. winsorize — IQR(사분위범위) 기반 이상치 완화
+# --------------------------------------------------------------------------
+def winsorize(rows: list[dict], field: str, k: float = 1.5) -> list[dict]:
+    """field 값을 [Q1-k·IQR, Q3+k·IQR] 범위 밖이면 경계로 눌러 붙인다(clip, 행 삭제 없음).
+
+    zscore/combine의 z-score 조합은 극단치 하나가 평균·표준편차 자체를 흔들 수 있고,
+    combine의 rank_sum은 순위만 매겨 극단치 크기에 영향받지 않는 대신 "얼마나 튀었는지"
+    정보를 버린다. winsorize는 그 중간 방식으로, 극단치의 크기 정보는 유지하되 일정
+    범위 밖의 값만 경계로 눌러 붙인다. neutralize와 같은 관례로 원본 field는 보존하고
+    '{field}_winsorized'를 새로 추가한다 — 뒤 단계(zscore/combine 등)에 그 필드를
+    넘기면 눌린 값 기준으로 계산된다. None은 그대로 None 유지, 사분위 계산에서 제외.
+    표본이 4개 미만이면 사분위 경계를 안정적으로 낼 수 없어 원본값을 그대로 통과시킨다.
+    k=1.5는 박스플롯 whisker 기준으로 흔히 쓰는 이상치 경계 배수.
+    """
+    import numpy as np
+
+    vals = [r[field] for r in rows if r.get(field) is not None]
+    if len(vals) < 4:
+        return [dict(r, **{f"{field}_winsorized": r.get(field)}) for r in rows]
+
+    q1, q3 = np.percentile(vals, [25, 75])
+    iqr = q3 - q1
+    lower, upper = q1 - k * iqr, q3 + k * iqr
+
+    out = []
+    for r in rows:
+        v = r.get(field)
+        nr = dict(r)
+        nr[f"{field}_winsorized"] = None if v is None else float(min(max(v, lower), upper))
+        out.append(nr)
+    return out
+
+
+# --------------------------------------------------------------------------
 # 4. combine — select_stocks(멀티팩터 가중조합) 래핑
 # --------------------------------------------------------------------------
 def combine(

@@ -19,6 +19,7 @@ from src.backtest.primitives import (
     optimize_weights,
     regress,
     run_backtest_primitive,
+    winsorize,
     zscore,
 )
 
@@ -96,6 +97,61 @@ def test_neutralize_leaves_none_for_missing_field():
             {"stock_code": "2", "sector": "화학", "roe": 10.0}]
     out = neutralize(rows, "roe", by="sector")
     assert {r["stock_code"]: r["roe_neutral"] for r in out}["1"] is None
+
+
+# --------------------------------------------------------------------------
+# winsorize — IQR(사분위범위) 기반 이상치 완화(신규, 순위변환·z-score 외 3번째 방식)
+# --------------------------------------------------------------------------
+def test_winsorize_clips_high_outlier_to_upper_iqr_bound():
+    rows = [
+        {"stock_code": "1", "roe": 10.0}, {"stock_code": "2", "roe": 11.0},
+        {"stock_code": "3", "roe": 12.0}, {"stock_code": "4", "roe": 13.0},
+        {"stock_code": "5", "roe": 100.0},  # 극단치
+    ]
+    out = winsorize(rows, "roe")
+    by_code = {r["stock_code"]: r["roe_winsorized"] for r in out}
+    # Q1=11, Q3=13, IQR=2, upper=13+1.5*2=16 → 100은 16으로 눌림
+    assert by_code["5"] == pytest.approx(16.0)
+    assert by_code["1"] == pytest.approx(10.0)  # 경계 안쪽 값은 그대로
+
+
+def test_winsorize_clips_low_outlier_to_lower_iqr_bound():
+    rows = [
+        {"stock_code": "1", "roe": 1.0},  # 극단치
+        {"stock_code": "2", "roe": 10.0}, {"stock_code": "3", "roe": 11.0},
+        {"stock_code": "4", "roe": 12.0}, {"stock_code": "5", "roe": 13.0},
+    ]
+    out = winsorize(rows, "roe")
+    by_code = {r["stock_code"]: r["roe_winsorized"] for r in out}
+    # Q1=10, Q3=12, IQR=2, lower=10-1.5*2=7 → 1은 7로 눌림
+    assert by_code["1"] == pytest.approx(7.0)
+    assert by_code["5"] == pytest.approx(13.0)
+
+
+def test_winsorize_preserves_original_field_untouched():
+    rows = [{"stock_code": "1", "roe": 10.0}, {"stock_code": "2", "roe": 11.0},
+            {"stock_code": "3", "roe": 12.0}, {"stock_code": "4", "roe": 100.0}]
+    out = winsorize(rows, "roe")
+    by_code = {r["stock_code"]: r["roe"] for r in out}
+    assert by_code["4"] == 100.0  # 원본 field는 그대로, 눌린 값은 별도 필드에만
+
+
+def test_winsorize_leaves_none_as_none_and_excludes_from_quartiles():
+    rows = [{"stock_code": "1", "roe": None}, {"stock_code": "2", "roe": 10.0},
+            {"stock_code": "3", "roe": 11.0}, {"stock_code": "4", "roe": 12.0},
+            {"stock_code": "5", "roe": 13.0}]
+    out = winsorize(rows, "roe")
+    by_code = {r["stock_code"]: r["roe_winsorized"] for r in out}
+    assert by_code["1"] is None
+    assert by_code["2"] == pytest.approx(10.0)  # None 제외하고 사분위 계산되어 경계 안쪽 유지
+
+
+def test_winsorize_passes_through_when_too_few_samples_for_quartiles():
+    rows = [{"stock_code": "1", "roe": 5.0}, {"stock_code": "2", "roe": 1000.0}]
+    out = winsorize(rows, "roe")
+    by_code = {r["stock_code"]: r["roe_winsorized"] for r in out}
+    assert by_code["1"] == 5.0
+    assert by_code["2"] == 1000.0  # 표본 4개 미만이면 경계를 정하지 않고 원본 그대로
 
 
 # --------------------------------------------------------------------------

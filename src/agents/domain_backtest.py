@@ -42,7 +42,7 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
 
 아래 질문을 프리미티브 조립 JSON 파이프라인으로 변환하세요. 파이썬 코드 금지, JSON만 출력.
 
-[사용 가능한 프리미티브 12종 — 이 외의 함수는 존재하지 않습니다]
+[사용 가능한 프리미티브 13종 — 이 외의 함수는 존재하지 않습니다]
 1. get_cross_section(asof) : 특정 시점의 전종목 횡단면 지표 스냅샷(list of rows) 반환.
    각 row 필드: stock_code,name,sector,market,quarter,close,market_cap,per,pbr,psr,
    roe,roa,operating_margin,net_margin,debt_ratio,revenue_growth,op_growth,ni_growth,return_12m.
@@ -132,6 +132,13 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
     performance, holdings, dates, navs, constraints_met}}...], best}} 이며, 제약을 만족하는 후보가 하나도
     없어도 에러가 아니라 rank_by 기준 가장 근접한 시도를 constraints_met=false로 정직하게 돌려줍니다.
     conn은 실행기가 자동 주입.
+13. winsorize(rows, field, k) : field 값 중 [Q1-k·IQR, Q3+k·IQR] 범위 밖의 극단치만 경계로
+    눌러 붙입니다(행 삭제 없음, k 미지정시 1.5). combine/zscore의 극단치 제어를 강화하고
+    싶을 때, combine/zscore 이전 단계에서 먼저 씁니다. 원본 field는 그대로 두고
+    '{{field}}_winsorized'를 새로 추가하므로, 다음 단계(zscore/combine)의 key는 반드시
+    '{{field}}_winsorized'로 지정해야 눌린 값이 실제로 쓰입니다. "이상치를 눌러서/극단치를
+    완화해서/윈저라이즈해서" 같은 표현이 질문에 있을 때만 씁니다(명시 없으면 안 씀 — combine의
+    기본 zscore/rank_sum으로 충분).
 
 [JSON 형식]
 - {{"pipeline": [{{"op": "이름", "params": {{...}}, "out": "결과이름"}}, ...]}}
@@ -148,6 +155,12 @@ A: {{"pipeline": [
   {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},
   {{"op": "compute_technical_indicator", "params": {{"rows": {{"$ref": "xs"}}, "asof": "{today}", "indicators": [{{"name": "rsi"}}]}}, "out": "xs_ti"}},
   {{"op": "combine", "params": {{"rows": {{"$ref": "xs_ti"}}, "criteria": [{{"key": "rsi_14", "direction": "low", "weight": 0.5}}, {{"key": "per", "direction": "low", "weight": 0.5}}], "method": "zscore", "n": 10}}, "out": "picked"}}
+]}}
+Q: ROE 극단치를 눌러서(윈저라이즈) 완화한 뒤 ROE 높은 20개 골라줘
+A: {{"pipeline": [
+  {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},
+  {{"op": "winsorize", "params": {{"rows": {{"$ref": "xs"}}, "field": "roe"}}, "out": "xs_w"}},
+  {{"op": "combine", "params": {{"rows": {{"$ref": "xs_w"}}, "criteria": [{{"key": "roe_winsorized", "direction": "high", "weight": 1.0}}], "method": "zscore", "n": 20}}, "out": "picked"}}
 ]}}
 Q: 2024년부터 2026년까지 매 분기 리밸런싱했을 때 MDD -10% 이내이면서 샤프가 가장 높은 전략 찾아줘
 A: {{"pipeline": [

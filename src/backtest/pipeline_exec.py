@@ -32,6 +32,7 @@ from .primitives import (
     regress,
     run_backtest_primitive,
     search_strategy,
+    winsorize,
     zscore,
 )
 from .signal_engine import run_signal_backtest, search_signal_strategy
@@ -46,6 +47,7 @@ PRIMITIVE_OPS = {
     "get_cross_section": get_cross_section,
     "zscore": zscore,
     "neutralize": neutralize,
+    "winsorize": winsorize,
     "combine": combine,
     "regress": regress,
     "optimize_weights": optimize_weights,

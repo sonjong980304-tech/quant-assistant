@@ -241,6 +241,7 @@ def test_generate_backtest_steps_prompt_includes_question_and_primitives():
     assert "run_backtest" in captured["prompt"]
     assert "search_strategy" in captured["prompt"]
     assert "get_cross_section" in captured["prompt"]
+    assert "winsorize" in captured["prompt"]  # 신규 이상치 완화 프리미티브도 LLM에 노출돼야 함
 
 
 # ── answer_backtest_question: steps 비어있고 llm_fn 있으면 자동 생성해 감사배선에 넘긴다 ──

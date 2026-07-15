@@ -24,14 +24,21 @@ from src.backtest.pipeline_exec import (
 # --------------------------------------------------------------------------
 # 고정 dict 디스패치 (getattr 부재)
 # --------------------------------------------------------------------------
-def test_dispatch_table_is_fixed_dict_with_twelve_primitives():
+def test_dispatch_table_is_fixed_dict_with_thirteen_primitives():
     assert set(PRIMITIVE_OPS.keys()) == {
-        "get_cross_section", "zscore", "neutralize", "combine", "regress", "optimize_weights",
-        "run_backtest", "run_signal_backtest", "compute_ic", "compute_technical_indicator",
-        "search_strategy", "search_signal_strategy",
+        "get_cross_section", "zscore", "neutralize", "winsorize", "combine", "regress",
+        "optimize_weights", "run_backtest", "run_signal_backtest", "compute_ic",
+        "compute_technical_indicator", "search_strategy", "search_signal_strategy",
     }
     # 값이 실제 호출 가능한 함수여야 한다
     assert all(callable(v) for v in PRIMITIVE_OPS.values())
+
+
+def test_winsorize_op_is_not_registered_as_conn_needing():
+    from src.backtest.pipeline_exec import _NEEDS_CONN
+
+    # winsorize는 rows(순수 데이터)만 받는 함수라 conn 자동주입 대상이 아니다
+    assert "winsorize" not in _NEEDS_CONN
 
 
 def test_run_signal_backtest_op_is_registered_as_conn_needing():
@@ -155,3 +162,27 @@ def test_run_pipeline_with_real_regress_primitive():
     res = run_pipeline(steps)
     assert "slope" in res and "se_slope" in res and "k_ratio" in res
     assert res["slope"] == pytest.approx(1.0, abs=0.2)
+
+
+def test_run_pipeline_chains_winsorize_into_combine():
+    """LLM이 실제로 만들 법한 조립: winsorize로 극단치를 누른 뒤 그 필드로 combine."""
+    rows = [
+        {"stock_code": "1", "roe": 10.0, "per": 8.0},
+        {"stock_code": "2", "roe": 11.0, "per": 9.0},
+        {"stock_code": "3", "roe": 12.0, "per": 10.0},
+        {"stock_code": "4", "roe": 13.0, "per": 11.0},
+        {"stock_code": "5", "roe": 500.0, "per": 12.0},  # roe 극단치
+    ]
+    steps = [
+        {"op": "winsorize", "params": {"rows": rows, "field": "roe"}, "out": "w"},
+        {"op": "combine", "params": {
+            "rows": {"$ref": "w"},
+            "criteria": [{"key": "roe_winsorized", "direction": "high", "weight": 1.0}],
+            "method": "zscore", "n": 5,
+        }, "out": "picked"},
+    ]
+    res = run_pipeline(steps)
+    assert len(res) == 5
+    assert res[0]["stock_code"] == "5"  # 눌린 뒤에도 여전히 roe 최상위는 5번
+    assert res[0]["roe"] == 500.0  # 원본 roe는 보존
+    assert res[0]["roe_winsorized"] < 500.0  # 계산엔 눌린 값이 쓰였다

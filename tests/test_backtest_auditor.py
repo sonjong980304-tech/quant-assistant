@@ -165,6 +165,21 @@ def test_inspect_snooping_prompt_includes_question():
     assert "PER 낮은 종목 3년 백테스트" in seen[0]  # 사용자 원본 질문이 프롬프트에 포함(AC11)
 
 
+def test_inspect_outlier_prompt_reflects_actual_available_methods():
+    """이상치검사 프롬프트가 실제 코드 상태와 어긋나면 안 된다(son-checker형 회귀 방지).
+
+    combine(method='rank_sum')과 winsorize 프리미티브가 이미 존재하므로, "z-score만
+    지원하며 순위변환·IQR 윈저화는 없다"는 낡은 문구 대신 실제로 어떤 방식이 있고 무엇을
+    확인해야 하는지가 프롬프트에 담겨야 한다.
+    """
+    seen = []
+    auditor.inspect_outlier(_RESULT, lambda p: (seen.append(p) or "{}"))
+    prompt = seen[0]
+    assert "z-score 정규화만 지원하며 순위변환" not in prompt  # 더 이상 사실이 아닌 낡은 주장
+    assert "rank_sum" in prompt
+    assert "winsorize" in prompt
+
+
 def test_inspectors_use_distinct_prompts():
     seen = []
     recorder = lambda p: (seen.append(p) or "{}")

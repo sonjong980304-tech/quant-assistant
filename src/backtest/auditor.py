@@ -199,11 +199,14 @@ def inspect_signal_decay(result: dict, llm_fn: Callable) -> dict:
 
 
 def inspect_outlier(result: dict, llm_fn: Callable) -> dict:
-    """⑥ 이상치제어: 팩터 정규화(현재 zscore만 지원)로 이상치가 성과를 왜곡하지 않았는지."""
+    """⑥ 이상치제어: 팩터 정규화·이상치 완화 방식이 이 결과의 성과를 왜곡하지 않았는지."""
     prompt = (
         f"{_SOFT_SYSTEM}\n\n[검사: 이상치 제어]\n"
         "멀티팩터 결합 전 각 팩터를 표준화했는지, 소수 극단치(이상치)가 성과를 좌우하지 않는지"
-        " 판단하라. 현재 파이프라인은 z-score 정규화만 지원하며 순위변환·IQR 윈저화는 없다.\n"
+        " 판단하라. 현재 파이프라인은 combine(method=)으로 zscore(값 자체를 표준화, 극단치에"
+        " 가장 취약)/rank_sum(순위만 사용, 극단치 크기에 영향받지 않음)을 지원하고, 사전에"
+        " winsorize(IQR 기준 상하단을 벗어난 값만 경계로 눌러 붙임)로 극단치를 먼저 완화할 수도"
+        " 있다. 이 결과가 어떤 조합을 썼는지 알 수 없다면 그 불확실성 자체를 경고로 남겨라.\n"
         f"성과: {result.get('performance')}\n"
         f"보유종목: {result.get('holdings')}"
     )
