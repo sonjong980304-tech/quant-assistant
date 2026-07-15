@@ -33,6 +33,7 @@ _REQUEST_DELAY_SEC도 investing.com Selenium 스크래핑 전용). 이 스크립
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -103,16 +104,28 @@ def backfill_financial_currency(
                 })
                 continue
 
+            try:
+                conn.execute(
+                    "UPDATE us_company SET financial_currency = ? WHERE stock_code = ?",
+                    (currency, code),
+                )
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                # 다른 launchd 배치가 같은 market.db에 동시에 쓰는 중이면 여기서 잠길 수
+                # 있다 — 이 한 종목만 실패 처리하고(다음 실행에 재시도) 나머지는 계속
+                # 진행한다(fetch 실패와 동일한 종목별 격리 원칙).
+                failed_codes.append(code)
+                log_ingest({
+                    "source": "us_financial_currency", "stock_code": code,
+                    "status": "fail", "error": f"DB 쓰기 실패: {exc}",
+                })
+                continue
+
             currencies[currency] = currencies.get(currency, 0) + 1
             if currency == "USD":
                 usd += 1
             else:
                 non_usd += 1
-            conn.execute(
-                "UPDATE us_company SET financial_currency = ? WHERE stock_code = ?",
-                (currency, code),
-            )
-            conn.commit()
 
         return {
             "total_targets": len(codes),
