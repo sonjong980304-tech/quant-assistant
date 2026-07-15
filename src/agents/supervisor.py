@@ -32,6 +32,7 @@ llm_fn 규약: 이 프로젝트의 도메인 에이전트들과 동일하게 `Ca
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from typing import Callable
@@ -351,6 +352,33 @@ def verify_answer(
     return _parse_verdict(raw)
 
 
+# 프롬프트에 넣을 리스트 하나당 앞부분으로 남길 개수. 스크리닝 rows는 최대 1000행,
+# 백테스트 시계열(dates/navs 등)도 길 수 있어 통째로 넣으면 프롬프트가 폭발한다.
+_PROMPT_LIST_HEAD = 5
+
+
+def _truncate_for_prompt(value, head: int = _PROMPT_LIST_HEAD):
+    """LLM 프롬프트에 넣기 전 긴 리스트를 앞부분 몇 개 + 총 개수 요약으로 축약한다.
+
+    dict/list 구조는 그대로 보존하되 head개를 넘는 리스트만 줄인다(재귀). 원본
+    domain_results는 건드리지 않고 새 구조를 반환한다 — answer_with_verification이
+    사용자에게 그대로 병기하는 원본 데이터("가공 없음" 원칙)와는 별개로, 이건 LLM에게
+    검증/요약을 요청하는 프롬프트 텍스트 안의 데이터만 줄이는 용도다.
+    """
+    if isinstance(value, dict):
+        return {k: _truncate_for_prompt(v, head) for k, v in value.items()}
+    if isinstance(value, list):
+        if len(value) <= head:
+            return [_truncate_for_prompt(v, head) for v in value]
+        head_items = [_truncate_for_prompt(v, head) for v in value[:head]]
+        return head_items + [f"...(총 {len(value)}개 중 {head}개만 표시, 나머지 생략)"]
+    return value
+
+
+def _domain_results_json_for_prompt(domain_results: dict) -> str:
+    return json.dumps(_truncate_for_prompt(domain_results), ensure_ascii=False, default=str)
+
+
 def _verify_prompt(question: str, domain_results: dict) -> str:
     today = date.today().isoformat()
     return (
@@ -366,9 +394,12 @@ def _verify_prompt(question: str, domain_results: dict) -> str:
         "해석·검증했으므로 그 구체적 업종명 선택 자체는 재심사하지 마세요(예: 질문이 '반도체'이고 "
         "결과가 KRX 분류상 '전기·전자'여도 그 자체만으로 valid=false를 주지 마세요). 업종명 외의 "
         "나머지 조건(지표/방향/개수/기간 등)이 질문과 맞는지만 판정하세요.\n"
+        "도메인 결과의 리스트가 '...(총 N개 중 M개만 표시, 나머지 생략)'로 축약돼 있으면, "
+        "그건 프롬프트 길이 때문이지 실제 결과가 부족해서가 아닙니다 — 그 자체로 valid=false를 "
+        "주지 마세요.\n"
         'JSON으로만 답하세요: {"valid": true/false, "reason": "간단한 이유"}\n\n'
         f"질문: {question}\n"
-        f"도메인 결과: {domain_results}\n답:"
+        f"도메인 결과: {_domain_results_json_for_prompt(domain_results)}\n답:"
     )
 
 
@@ -422,7 +453,7 @@ def _synthesize_prompt(question: str, domain_results: dict) -> str:
         " false인 행과 동일 회사의 다른 상장 주식 종류(예: Class A/C)입니다 — 서로 다른"
         " 회사가 아니라 같은 회사임을 종합결론에서 반드시 밝히세요.\n\n"
         f"질문: {question}\n"
-        f"도메인 결과: {domain_results}\n종합결론:"
+        f"도메인 결과: {_domain_results_json_for_prompt(domain_results)}\n종합결론:"
     )
 
 

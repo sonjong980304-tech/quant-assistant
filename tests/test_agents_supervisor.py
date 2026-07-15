@@ -309,6 +309,61 @@ def test_verify_prompt_includes_todays_date_for_freshness_judgment():
     assert date.today().isoformat() in seen_prompts[0]
 
 
+# ── 검증/종합 프롬프트 비대화 방지 — 스크리닝 rows가 최대 1000행이라 통째로 프롬프트에
+#    넣으면 텍스트가 폭발한다. 앞부분만 남기고 나머지는 개수 요약으로 축약해야 한다 ──────
+
+def _big_screening_rows(n: int = 1000) -> list[dict]:
+    return [{"stock_code": f"{i:06d}", "name": f"종목{i}", "per": 10.0} for i in range(n)]
+
+
+def test_verify_prompt_truncates_long_screening_rows():
+    seen_prompts = []
+
+    def spy_llm(prompt: str) -> str:
+        seen_prompts.append(prompt)
+        return "일치"
+
+    domain_results = {"kr": {"intent": "screening", "result": _big_screening_rows()}}
+    verify_answer("코스피 저PER 1000개", domain_results, spy_llm)
+
+    prompt = seen_prompts[0]
+    assert "000999" not in prompt  # 뒷부분 행은 생략돼야 함
+    assert "1000" in prompt  # 총 개수는 요약으로 남아야 함
+    assert len(prompt) < 5000  # 1000행 전체(수만 자)보다 훨씬 짧아야 함
+
+
+def test_synthesize_prompt_truncates_long_screening_rows():
+    captured = {}
+
+    def fake_llm(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "결론"
+
+    domain_results = {"kr": {"intent": "screening", "result": _big_screening_rows()}}
+    synthesize_conclusion("코스피 저PER 1000개", domain_results, fake_llm)
+
+    prompt = captured["prompt"]
+    assert "000999" not in prompt
+    assert len(prompt) < 5000
+
+
+def test_verify_prompt_uses_json_serialization_not_python_repr():
+    """dict를 파이썬 repr(작은따옴표)이 아니라 표준 JSON(큰따옴표)으로 직렬화해야 한다."""
+    seen_prompts = []
+
+    def spy_llm(prompt: str) -> str:
+        seen_prompts.append(prompt)
+        return "일치"
+
+    verify_answer(
+        "삼성전자 PER",
+        {"kr": {"stock_code": "005930", "financial": {"value": 12.5}}},
+        spy_llm,
+    )
+    assert seen_prompts
+    assert '"stock_code": "005930"' in seen_prompts[0]
+
+
 # ── AC3: answer_with_verification — 정확히 3회 재시도 후 uncertain(무한루프 없음) ──
 
 def test_answer_with_verification_retries_exactly_three_times_then_uncertain():
