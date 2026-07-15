@@ -18,6 +18,7 @@ from src.agents.domain_kr import (
     answer_kr_question,
     classify_intent,
     find_stock_code,
+    find_stock_codes,
 )
 from src.db import connect, connect_readonly, init_db
 
@@ -41,6 +42,46 @@ def _seed(tmp_path, name: str = "삼성전자", code: str = "005930") -> str:
             "INSERT INTO prices(stock_code, date, close, market_cap, open, high, low, volume) "
             "VALUES(?,?,?,?,?,?,?,?)",
             (code, "2026-07-11", 71000.0, 4.1e14, 70000.0, 71500.0, 69800.0, 1.2e7),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return str(db)
+
+
+def _seed_two_companies(tmp_path) -> str:
+    """"삼성전자와 SK하이닉스 종가/PER 알려줘" 같은 다중종목 질문 재현용 2개사 시드."""
+    db = tmp_path / "domain_kr_multi.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)",
+            ("005930", "삼성전자", "KOSPI", "전기·전자"),
+        )
+        conn.execute(
+            "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)",
+            ("000660", "SK하이닉스", "KOSPI", "반도체"),
+        )
+        conn.execute(
+            "INSERT INTO metrics(stock_code, quarter, price_date, market_cap, per) "
+            "VALUES(?,?,?,?,?)",
+            ("005930", "2025Q1", "2026-07-15", 4.1e14, 12.5),
+        )
+        conn.execute(
+            "INSERT INTO metrics(stock_code, quarter, price_date, market_cap, per) "
+            "VALUES(?,?,?,?,?)",
+            ("000660", "2025Q1", "2026-07-15", 1.5e14, 20.0),
+        )
+        conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap, open, high, low, volume) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("005930", "2026-07-15", 71000.0, 4.1e14, 70000.0, 71500.0, 69800.0, 1.2e7),
+        )
+        conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap, open, high, low, volume) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("000660", "2026-07-15", 210000.0, 1.5e14, 205000.0, 212000.0, 204000.0, 3.0e6),
         )
         conn.commit()
     finally:
@@ -728,3 +769,144 @@ def test_answer_kr_question_no_price_history_for_plain_price_question(tmp_path):
 
     assert result.get("price_history") is None
     assert called == []  # 차트/기간 의도가 없으면 히스토리 조회 자체를 하지 않는다
+
+
+# ── find_stock_codes(복수): 한 질문에 여러 종목이 함께 언급된 경우 ──────────────────
+# 실서버 재현 버그: "삼성전자와 SK하이닉스 종가 알려줘"처럼 두 종목을 한 번에 물으면
+# find_stock_code(단수)는 하나만 찾아 검증기가 "대상이 안 맞음"으로 계속 재시도만 하다
+# 실패했다(재시도해도 단수 함수는 결정론적으로 같은 종목만 반환하므로 절대 안 고쳐짐).
+
+def test_find_stock_codes_finds_multiple_companies_named_in_question(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "삼성전자와 SK하이닉스 종가 알려줘")
+    finally:
+        conn.close()
+    assert set(codes) == {"005930", "000660"}
+
+
+def test_find_stock_codes_returns_single_code_for_single_stock_question(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "삼성전자 PER 알려줘")
+    finally:
+        conn.close()
+    assert codes == ["005930"]
+
+
+def test_find_stock_codes_returns_empty_list_when_no_match(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "존재하지않는회사 실적 알려줘")
+    finally:
+        conn.close()
+    assert codes == []
+
+
+def test_find_stock_codes_dedupes_overlapping_substring_names(tmp_path):
+    """"SK"와 "SK하이닉스" 둘 다 부분 포함 매치돼도 더 구체적인(긴) 이름 하나로만 남는다
+    (find_stock_code 단수의 우선순위 규칙과 동일 원칙)."""
+    db = tmp_path / "overlap.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)",
+            ("034730", "SK", "KOSPI", "지주"),
+        )
+        conn.execute(
+            "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)",
+            ("000660", "SK하이닉스", "KOSPI", "반도체"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    ro_conn = connect_readonly(str(db))
+    try:
+        codes = find_stock_codes(ro_conn, "SK하이닉스 주가 알려줘")
+    finally:
+        ro_conn.close()
+    assert codes == ["000660"]  # "SK"는 겹쳐서 걸러짐
+
+
+def test_find_stock_codes_includes_explicit_six_digit_codes(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "005930 000660 종가 비교")
+    finally:
+        conn.close()
+    assert set(codes) == {"005930", "000660"}
+
+
+# ── answer_kr_question: 다중종목(named multi-entity) 경로 ───────────────────────
+
+def test_answer_kr_question_multi_entity_price_question_returns_entities_for_each_stock(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자와 SK하이닉스 종가 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["stock_code"] is None  # 단일 종목으로 특정할 수 없음(다중종목 경로)
+    assert set(result["stock_codes"]) == {"005930", "000660"}
+    assert len(result["entities"]) == 2
+    by_code = {e["stock_code"]: e for e in result["entities"]}
+    assert by_code["005930"]["price"][0]["close"] == 71000.0
+    assert by_code["000660"]["price"][0]["close"] == 210000.0
+    assert result["errors"] == []
+
+
+def test_answer_kr_question_multi_entity_financial_question_returns_entities_for_each_stock(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자와 SK하이닉스 PER 비교해줘", conn)
+    finally:
+        conn.close()
+
+    by_code = {e["stock_code"]: e for e in result["entities"]}
+    assert by_code["005930"]["financial"]["value"] == 12.5
+    assert by_code["000660"]["financial"]["value"] == 20.0
+
+
+def test_answer_kr_question_multi_entity_calls_data_agent_once_per_stock_code(tmp_path, monkeypatch):
+    import src.agents.domain_kr as mod
+
+    db = _seed_two_companies(tmp_path)
+    calls: list[str] = []
+    real_snapshot = mod.get_price_snapshot_kr
+
+    def spy_snapshot(conn, stock_codes, **kwargs):
+        calls.append(stock_codes)
+        return real_snapshot(conn, stock_codes, **kwargs)
+
+    monkeypatch.setattr(mod, "get_price_snapshot_kr", spy_snapshot)
+
+    conn = connect_readonly(db)
+    try:
+        answer_kr_question("삼성전자와 SK하이닉스 종가 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert set(calls) == {"005930", "000660"}
+    assert len(calls) == 2  # 종목 하나당 정확히 1회
+
+
+def test_answer_kr_question_single_entity_question_has_no_entities_key(tmp_path):
+    """회귀 방지: 종목이 하나뿐이면 기존 단일종목 응답 형태 그대로(entities 키 없음)."""
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 PER 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert "entities" not in result
+    assert result["stock_code"] == "005930"
+    assert result["financial"]["value"] == 12.5

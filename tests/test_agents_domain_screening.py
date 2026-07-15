@@ -287,8 +287,11 @@ def test_answer_kr_question_non_screening_does_not_use_screening_path(monkeypatc
         kr, "answer_kr_screening",
         lambda *a, **k: called.append(1) or {"intent": "screening"},
     )
-    # 종목을 못 찾게 하고(빈 DB 없이) find_stock_code 를 종목없음으로 스텁
+    # 종목을 못 찾게 하고(빈 DB 없이) find_stock_code/find_stock_codes 를 종목없음으로 스텁
+    # (다중종목 경로가 먼저 find_stock_codes 로 개수를 확인하므로 이것도 함께 스텁해야
+    # conn=None 인 이 테스트에서 실제 DB 조회가 시도되지 않는다)
     monkeypatch.setattr(kr, "find_stock_code", lambda *a, **k: None)
+    monkeypatch.setattr(kr, "find_stock_codes", lambda *a, **k: [])
     result = kr.answer_kr_question("삼성전자 PER 알려줘", conn=None)
     assert called == []  # 스크리닝 경로 미사용
     assert result["intent"] != "screening"

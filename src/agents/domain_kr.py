@@ -104,6 +104,51 @@ def find_stock_code(
     return result["rows"][0]["stock_code"]
 
 
+def find_stock_codes(
+    conn,
+    question: str,
+    execute_sql_fn: Callable | None = None,
+) -> list[str]:
+    """질문 텍스트에 언급된 모든 종목(복수)을 종목코드 리스트로 찾는다.
+
+    "삼성전자와 SK하이닉스 종가 알려줘"처럼 한 질문이 이름으로 여러 종목을 지목하는
+    경우를 위한 것이다(find_stock_code 단수는 회사명 매치가 여러 건이어도 가장 긴
+    이름 하나만 골라 반환하므로, 이런 질문에서는 나머지 종목이 통째로 누락된다).
+
+    1) 질문에 등장하는 모든 6자리 종목코드를 먼저 모은다(순서 보존, 중복 제거).
+    2) company 테이블에서 질문에 이름이 부분 포함되는 모든 행을 이름 길이 내림차순으로
+       조회한다. 이미 선택한(더 긴) 이름의 부분 문자열인 후보(예: "SK하이닉스"를 이미
+       선택했다면 그 안에 포함된 "SK")는 건너뛴다 — find_stock_code의 "가장 구체적인
+       이름 우선" 원칙을 "하나만 고르기"가 아니라 "겹치는 후보만 제거하기"로 확장한 것.
+    3) 위 두 결과를 종목코드 기준으로 중복 제거해 합친다.
+
+    매치가 없으면 빈 리스트. SQL은 execute_sql(HA-1 실행기)로만 실행한다.
+    """
+    execute_sql_fn = execute_sql_fn or execute_sql
+    text = question or ""
+
+    codes: list[str] = list(dict.fromkeys(_STOCK_CODE_RE.findall(text)))
+
+    if text.strip():
+        escaped = _escape_sql_literal(text)
+        sql = (
+            f"SELECT stock_code, name FROM company WHERE '{escaped}' LIKE '%' || name || '%' "
+            "AND name IS NOT NULL AND name != '' ORDER BY LENGTH(name) DESC"
+        )
+        result = execute_sql_fn(sql, conn)
+        if result.get("ok"):
+            accepted_names: list[str] = []
+            for row in result["rows"]:
+                name = row["name"]
+                if any(name in accepted for accepted in accepted_names):
+                    continue
+                accepted_names.append(name)
+                if row["stock_code"] not in codes:
+                    codes.append(row["stock_code"])
+
+    return codes
+
+
 # ── 스크리닝(다중종목 랭킹) 경로 (HA-15) ─────────────────────────────────────
 # 실사용 핵심 기능 회귀 복구: "PER 낮은 5개사" 처럼 여러 종목을 조건으로 순위 매겨 뽑는
 # 질문은 단일종목 조회(find_stock_code) 경로로는 답할 수 없다. 이미 검증된 백테스트
@@ -835,6 +880,77 @@ def _call_with_retry(fn: Callable[[], Any]) -> tuple[Any, str | None]:
             return None, f"{type(exc).__name__}: {exc}"
 
 
+def _answer_kr_multi_entity_question(
+    question: str,
+    conn,
+    stock_codes: list[str],
+    llm_fn: Callable[[str], str] | None,
+    resolve_metric_fn: Callable,
+    price_snapshot_fn: Callable,
+    execute_sql_fn: Callable,
+    indicators: list[dict] | None,
+    computed_metric_fn: Callable,
+) -> dict:
+    """한 질문이 이름으로 지목한 여러 종목(예: "삼성전자와 SK하이닉스 종가") 각각에 답한다.
+
+    find_stock_codes가 서로 다른 종목을 2개 이상 찾았을 때만 이 경로로 온다 — "PER 낮은
+    5개사"처럼 조건으로 종목을 "고르는" 스크리닝과 다르다(그건 answer_kr_screening이
+    이미 먼저 가로챈다). intent/metric/period는 질문 전체에서 한 번만 판단해 모든 종목에
+    동일하게 적용한다(같은 질문 안에서 종목마다 다른 지표를 묻는 경우는 범위 밖).
+    """
+    base_question = _strip_retry_feedback(question)
+    period = _parse_period(base_question)
+    intent = classify_intent(question, llm_fn=llm_fn)
+    metric = _extract_metric(question) if intent in ("financial", "both") else None
+
+    entities: list[dict] = []
+    for code in stock_codes:
+        entity: dict = {"stock_code": code, "financial": None, "price": None, "errors": []}
+
+        if intent in ("financial", "both"):
+            if metric is None:
+                entity["errors"].append("재무 지표를 인식하지 못함")
+            elif metric in _COMPUTED_ONLY_FIELDS:
+                financial, err = _call_with_retry(
+                    lambda c=code: computed_metric_fn(conn, c, metric, execute_sql_fn=execute_sql_fn)
+                )
+                if err:
+                    entity["errors"].append(f"계산 지표 조회 실패: {err}")
+                else:
+                    entity["financial"] = financial
+            else:
+                period_kwargs = {"period": period} if period is not None else {}
+                financial, err = _call_with_retry(
+                    lambda c=code: resolve_metric_fn(conn, c, metric, llm_fn=llm_fn, **period_kwargs)
+                )
+                if err:
+                    entity["errors"].append(f"재무데이터 조회 실패: {err}")
+                else:
+                    entity["financial"] = financial
+
+        if intent in ("price", "both"):
+            price, err = _call_with_retry(
+                lambda c=code: price_snapshot_fn(conn, c, indicators=indicators)
+            )
+            if err:
+                entity["errors"].append(f"주가데이터 조회 실패: {err}")
+            else:
+                entity["price"] = price
+
+        entities.append(entity)
+
+    return {
+        "stock_code": None,
+        "stock_codes": stock_codes,
+        "question": question,
+        "intent": intent,
+        "financial": None,
+        "price": None,
+        "entities": entities,
+        "errors": [],
+    }
+
+
 def answer_kr_question(
     question: str,
     conn,
@@ -894,6 +1010,19 @@ def answer_kr_question(
         "price": None,
         "errors": [],
     }
+
+    # 다중종목(named multi-entity) 경로: 질문이 이름으로 2개 이상의 서로 다른 종목을
+    # 지목하면(예: "삼성전자와 SK하이닉스 종가") 단일종목 경로(find_stock_code, 하나만
+    # 고름)로는 나머지 종목이 통째로 누락된다. find_stock_codes로 먼저 개수를 확인하고,
+    # 2개 이상이면 종목별 개별 조회 경로로 분기한다(0/1개는 기존 단일종목 경로 그대로).
+    multi_codes = find_stock_codes(conn, question, execute_sql_fn=execute_sql_fn)
+    if len(multi_codes) >= 2:
+        return _answer_kr_multi_entity_question(
+            question, conn, multi_codes, llm_fn=llm_fn,
+            resolve_metric_fn=resolve_metric_fn, price_snapshot_fn=price_snapshot_fn,
+            execute_sql_fn=execute_sql_fn, indicators=indicators,
+            computed_metric_fn=computed_metric_fn,
+        )
 
     stock_code = find_stock_code(conn, question, execute_sql_fn=execute_sql_fn)
     result["stock_code"] = stock_code
