@@ -560,6 +560,28 @@ def _resolve_screening_asof(
     return result["rows"][0].get("d")
 
 
+def _normalize_override_spec(raw: dict) -> dict | None:
+    """사용자가 편집해 재실행으로 넘긴 spec을 정규화한다(휴먼인더루프).
+
+    _parse_screening_json과 동일한 정규화(_normalize_criteria/_coerce_top_n)를 거치므로,
+    LLM이 생성했든 사용자가 직접 편집했든 이후 처리는 완전히 같은 경로를 탄다 — 검증을
+    우회하는 별도 경로가 아니다. criteria가 없거나 형식이 어긋나면 None(→ 호출부가 기존과
+    동일한 "스크리닝 조건 해석 실패"로 처리).
+    """
+    if not isinstance(raw, dict):
+        return None
+    criteria = _normalize_criteria(raw.get("criteria") or [])
+    if criteria is None:
+        return None
+    return {
+        "criteria": criteria,
+        "top_n": _coerce_top_n(raw.get("top_n")),
+        "sectors": raw.get("sectors") or None,
+        "markets": raw.get("markets") or None,
+        "exchanges": raw.get("exchanges") or None,
+    }
+
+
 def _run_screening(
     question: str,
     conn,
@@ -571,6 +593,8 @@ def _run_screening(
     asof: str | None,
     execute_sql_fn: Callable | None,
     domain: str = "KR",
+    override_spec: dict | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """스크리닝 공용 실행부(KR/US 대칭). 스펙추출 → asof해석 → 크로스섹션 → combine → rows 반환.
 
@@ -581,6 +605,16 @@ def _run_screening(
     domain 은 시장 필터 스코프를 가른다 — KR 은 spec["markets"](코스피/코스닥), US 는
     spec["exchanges"](나스닥/뉴욕). 두 경우 모두 rows 의 'market' 필드로 필터링된다
     (metrics_at_us 가 exchange 값을 'market' 에 담으므로 combine 의 markets= 인자를 그대로 재사용).
+
+    override_spec(휴먼인더루프 재실행용): 주어지면 LLM/휴리스틱 추출(_extract_screening_spec)을
+    완전히 건너뛰고 이 값을 그대로 spec으로 쓴다 — 사용자가 실시간 트리에서 본 조건 JSON을
+    직접 고쳐 재실행할 때, LLM을 다시 부르지 않고 고친 값 그대로 실행하기 위함이다. 이렇게
+    받은 spec도 뒤 이은 업종검증/combine(존재하지 않는 지표명 거부 등)은 그대로 다 통과해야
+    한다 — 안전장치를 우회하는 별도 경로가 아니라 "스펙의 출처만 다른" 같은 실행 경로다.
+
+    on_progress(step, summary, detail=None)를 주면 spec이 확정되는 즉시(LLM 추출이든
+    override든) 1건 통지한다 — detail에 확정된 spec 전체를 실어, 실시간 트리에서 "AI가
+    이렇게 이해했다"를 사용자가 바로 확인/편집할 수 있게 한다(HA-12 확장).
     """
     result: dict = {
         "question": question, "intent": "screening",
@@ -603,9 +637,12 @@ def _run_screening(
     # 실제 존재하는 업종 목록(질문 해석 시 LLM에게 알려주고, 매칭 실패를 사후 검증하는 데도 쓴다).
     valid_sectors = sorted({r["sector"] for r in rows if r.get("sector")})
 
-    spec, err = _extract_screening_spec(
-        question, llm_fn, fields, sectors=tuple(valid_sectors), domain=domain
-    )
+    if override_spec is not None:
+        spec, err = _normalize_override_spec(override_spec), None
+    else:
+        spec, err = _extract_screening_spec(
+            question, llm_fn, fields, sectors=tuple(valid_sectors), domain=domain
+        )
     if spec is None:
         result["errors"].append(f"스크리닝 조건 해석 실패: {err}")
         return result
@@ -614,6 +651,12 @@ def _run_screening(
     result["sectors"] = spec["sectors"]
     result["markets"] = spec.get("markets")
     result["exchanges"] = spec.get("exchanges")
+
+    if on_progress:
+        on_progress(
+            "code", f"{domain} 스크리닝 조건 생성 완료",
+            detail={"kind": "screening_spec", "domain": domain.lower(), "spec": spec},
+        )
 
     requested_sectors = spec["sectors"]
     if isinstance(requested_sectors, str):
@@ -653,6 +696,8 @@ def answer_kr_screening(
     combine_fn: Callable | None = None,
     asof: str | None = None,
     execute_sql_fn: Callable | None = None,
+    override_spec: dict | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """한국주식 스크리닝: 조건에 맞는 종목을 순위 매겨 상위 N개를 반환한다(다중종목 경로).
 
@@ -662,7 +707,8 @@ def answer_kr_screening(
     아니라 errors 에 사유로 남긴다.
 
     cross_section_fn/combine_fn 은 테스트 주입용(기본=get_cross_section/combine). asof 미지정 시
-    prices 테이블의 최신 거래일을 쓴다.
+    prices 테이블의 최신 거래일을 쓴다. override_spec/on_progress는 _run_screening 참고
+    (휴먼인더루프 재실행 / 실시간 조건 JSON 통지).
     """
     cross_section_fn = cross_section_fn or (lambda c, a: get_cross_section(c, a))
     combine_fn = combine_fn or combine
@@ -670,6 +716,7 @@ def answer_kr_screening(
         question, conn, llm_fn, cross_section_fn, combine_fn,
         price_table="prices", fields=_KR_SCREEN_FIELDS,
         asof=asof, execute_sql_fn=execute_sql_fn,
+        override_spec=override_spec, on_progress=on_progress,
     )
 
 
@@ -992,6 +1039,7 @@ def answer_kr_question(
     indicators: list[dict] | None = None,
     computed_metric_fn: Callable | None = None,
     price_history_fn: Callable | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """한국주식 도메인 에이전트 진입점.
 
@@ -1031,7 +1079,8 @@ def answer_kr_question(
     if is_screening_question(question, llm_fn=llm_fn):
         screening_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
         return answer_kr_screening(
-            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof
+            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof,
+            on_progress=on_progress,
         )
 
     result: dict = {

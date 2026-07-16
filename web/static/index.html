@@ -43,6 +43,16 @@
   .b-warn{background:rgba(240,160,32,.16);color:var(--warn)}
   pre.sql{background:#0c0e14;border:1px solid var(--line);border-radius:9px;padding:14px;overflow:auto;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#cfe1ff;white-space:pre-wrap;word-break:break-word}
+  .code-block{margin:6px 0 4px 22px}
+  .code-details summary{cursor:pointer;color:var(--muted);font-size:12.5px;display:flex;align-items:center;gap:8px;list-style:none}
+  .code-details summary::-webkit-details-marker{display:none}
+  .code-details summary::before{content:'▸';display:inline-block;transition:transform .12s}
+  .code-details[open] summary::before{transform:rotate(90deg)}
+  .code-editor{width:100%;min-height:120px;background:#0c0e14;border:1px solid var(--accent);border-radius:9px;
+    padding:14px;color:#cfe1ff;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
+    resize:vertical;margin-top:6px;outline:none}
+  .code-actions{display:flex;gap:8px;margin-top:8px}
+  .rerun-status{margin-top:6px}
   table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13.5px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
   th{color:var(--muted);font-weight:600}
@@ -240,6 +250,7 @@ async function runQuery(){
   if(_treeES){ _treeES.close(); _treeES=null; }
   document.getElementById('treeResult').innerHTML='';
   document.getElementById('qResult').innerHTML='';
+  _lastQueryResult=null;                                       // 이전 질문의 재실행 캐시 폐기
   startStreamTree(q);   // 실시간 트리(SSE)를 항상 자동 실행 — 별도 토글 없음
   document.getElementById('qResult').innerHTML='<div class="card"><span class="spinner"></span> 계층형 에이전트 실행 중…</div>';
   try{
@@ -247,6 +258,7 @@ async function runQuery(){
       body:JSON.stringify({question:q,model:document.getElementById('modelSel').value})});
     const s=await r.json();
     if(!r.ok){throw new Error(s.detail||'오류');}
+    _lastQueryResult=s;                                        // 재실행(HA-12 확장)이 참조할 최신 응답
     renderQuery(s);
   }catch(e){
     document.getElementById('qResult').innerHTML=`<div class="card err">오류: ${esc(e.message)}</div>`;
@@ -262,21 +274,102 @@ let _treeES=null;
 // step → 트리 깊이(들여쓰기). 백엔드가 도메인/데이터/검증 노드를 추가로 방출해도(HA-13 이후)
 // 프론트 분기 없이 자연스럽게 계층이 깊어지도록 매핑한다. 미지의 step은 도메인(1)로 본다.
 const TREE_LABEL={supervisor:'총괄',kr:'한국',us:'미국',macro:'매크로',backtest:'백테스트',
-  data:'데이터요청',verify:'검증',audit:'감사'};
+  data:'데이터요청',verify:'검증',audit:'감사',code:'생성 코드'};
 function treeDepth(step){
   if(step==='supervisor') return 0;                          // 총괄
   if(/^(kr|us|macro|backtest)/.test(step)) return 1;         // 도메인
-  if(/(data|price|financial|sql|audit)/.test(step)) return 2; // 데이터요청/감사(하드·소프트 검사)
+  if(/(data|price|financial|sql|audit|code)/.test(step)) return 2; // 데이터요청/감사/생성코드
   if(/verify|검증/.test(step)) return 2;                     // 검증
   return 1;
 }
-function treeNode(step,summary){
+function treeNode(step,summary,detail,question){
   const d=treeDepth(step);
   const label=TREE_LABEL[step]||step;
+  const codeHtml=detail?codeBlockHtml(detail,question):'';
   return `<div class="tree-node" style="padding-left:${d*22}px">`+
     `<span class="tree-branch">${d?'└─':'●'}</span>`+
     `<span class="tree-step">${esc(label)}</span>`+
-    `<span class="tree-sum">${esc(summary)}</span></div>`;
+    `<span class="tree-sum">${esc(summary)}</span>`+codeHtml+`</div>`;
+}
+
+// ===== 실시간 코드(스크리닝 조건 JSON / 백테스트 파이프라인) 블록: 표시·편집·재실행 =====
+// AI가 생성한 조건/파이프라인을 실시간으로 펼쳐 보여주고(검증 가능하게), 사용자가 직접
+// 고쳐 재실행(POST /api/query/rerun)하면 LLM을 다시 부르지 않고 그 값 그대로 실행한다
+// (휴먼인더루프). 최종 답변이 나오면(done 이벤트) 모든 블록을 접어 화면을 정리한다.
+let _codeBlockSeq=0;
+const _codeBlocks={};                                        // id → {kind, domain, question}
+let _lastQueryResult=null;                                   // 재실행 결과를 반영할 최종 응답 캐시
+
+function codeBlockHtml(detail,question){
+  const id=_codeBlockSeq++;
+  const kind=detail.kind;                                    // 'screening_spec' | 'backtest_pipeline'
+  const payload=kind==='backtest_pipeline'?detail.steps:detail.spec;
+  _codeBlocks[id]={kind, domain:detail.domain||null, question:question||''};
+  const json=JSON.stringify(payload,null,2);
+  const label=kind==='backtest_pipeline'?'백테스트 실행계획':'스크리닝 조건';
+  return `<div class="code-block" id="cb-${id}">
+    <details open class="code-details">
+      <summary>${esc(label)} <button type="button" class="sm ghost" onclick="event.stopPropagation();editCodeBlock(${id})">✏️ 편집</button></summary>
+      <pre class="sql">${esc(json)}</pre>
+      <textarea class="code-editor hidden">${esc(json)}</textarea>
+      <div class="code-actions hidden">
+        <button type="button" class="sm" onclick="rerunCodeBlock(${id})">▶ 재실행</button>
+        <button type="button" class="sm ghost" onclick="cancelEditCodeBlock(${id})">취소</button>
+      </div>
+      <div class="rerun-status meta"></div>
+    </details>
+  </div>`;
+}
+function editCodeBlock(id){
+  const box=document.getElementById('cb-'+id); if(!box) return;
+  box.querySelector('.sql').classList.add('hidden');
+  box.querySelector('.code-editor').classList.remove('hidden');
+  box.querySelector('.code-actions').classList.remove('hidden');
+  box.querySelector('summary button').classList.add('hidden');
+}
+function cancelEditCodeBlock(id){
+  const box=document.getElementById('cb-'+id); if(!box) return;
+  box.querySelector('.sql').classList.remove('hidden');
+  box.querySelector('.code-editor').classList.add('hidden');
+  box.querySelector('.code-actions').classList.add('hidden');
+  box.querySelector('summary button').classList.remove('hidden');
+}
+async function rerunCodeBlock(id){
+  const info=_codeBlocks[id]; if(!info) return;
+  const box=document.getElementById('cb-'+id);
+  const editor=box.querySelector('.code-editor');
+  const statusEl=box.querySelector('.rerun-status');
+  let payload;
+  try{ payload=JSON.parse(editor.value); }
+  catch(e){ statusEl.innerHTML=`<span class="err">JSON 형식 오류: ${esc(e.message)}</span>`; return; }
+
+  const body={kind: kind_of(info), question: info.question,
+    model: document.getElementById('modelSel').value||null};
+  if(info.kind==='backtest_pipeline'){ body.steps=payload; body.market='KR'; }
+  else { body.domain=info.domain; body.spec=payload; }
+
+  statusEl.innerHTML='<span class="spinner"></span> 재실행 중…';
+  try{
+    const r=await fetch('/api/query/rerun',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const s=await r.json();
+    if(!r.ok) throw new Error(s.detail||'재실행 실패');
+    box.querySelector('.sql').textContent=JSON.stringify(payload,null,2);
+    statusEl.innerHTML='<span class="badge b-hit">✓ 재실행됨 — 아래 도메인 결과에 반영</span>';
+    cancelEditCodeBlock(id);
+    applyRerunResult(info,s);
+  }catch(e){
+    statusEl.innerHTML=`<span class="err">재실행 실패: ${esc(e.message)}</span>`;
+  }
+}
+function kind_of(info){ return info.kind==='backtest_pipeline'?'backtest':'screening'; }
+// 재실행 결과를 최종 답변 카드(도메인별 원본 데이터)에 그 자리에서 반영한다 — 전체 질의를
+// 다시 돌리지 않고, 방금 고친 도메인 하나만 최신 결과로 교체해 다시 그린다.
+function applyRerunResult(info,result){
+  if(!_lastQueryResult) return;
+  const domain=info.kind==='backtest_pipeline'?'backtest':info.domain;
+  _lastQueryResult.domain_results=_lastQueryResult.domain_results||{};
+  _lastQueryResult.domain_results[domain]=result;
+  renderQuery(_lastQueryResult);
 }
 function startStreamTree(q){
   if(_treeES){ _treeES.close(); _treeES=null; }              // 이전 스트림 정리(중복 실행 방지)
@@ -292,12 +385,14 @@ function startStreamTree(q){
     let ev; try{ ev=JSON.parse(e.data); }catch(_){ return; }
     if(!ev || !ev.step) return;
     if(!got){ nodes.innerHTML=''; got=true; }                 // 첫 이벤트 도착 시 로딩표시 제거
-    nodes.insertAdjacentHTML('beforeend', treeNode(ev.step, ev.summary||''));
+    nodes.insertAdjacentHTML('beforeend', treeNode(ev.step, ev.summary||'', ev.detail, q));
   };
   _treeES.addEventListener('done',()=>{                       // 정상 종료 마커 → 닫기(자동 재연결·재실행 방지)
     if(_treeES){ _treeES.close(); _treeES=null; }
     if(!got){ nodes.innerHTML='<div class="meta">진행 이벤트가 없었습니다.</div>'; }
     nodes.insertAdjacentHTML('beforeend','<div class="tree-done">✓ 완료</div>');
+    // 완료 후엔 코드 블록을 접어 화면을 정리한다(편집·재실행은 계속 가능 — 펼치면 그대로 있음).
+    nodes.querySelectorAll('details.code-details[open]').forEach(d=>d.removeAttribute('open'));
   });
   _treeES.addEventListener('fail',(e)=>{                      // 서버가 보낸 실패 이벤트
     if(_treeES){ _treeES.close(); _treeES=null; }

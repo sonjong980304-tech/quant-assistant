@@ -151,6 +151,31 @@ def test_dispatch_domains_passes_on_progress_to_backtest_domain(monkeypatch):
     assert captured["on_progress"] is sentinel
 
 
+def test_dispatch_domains_passes_on_progress_to_kr_and_us_domains(monkeypatch):
+    """스크리닝 조건 JSON을 실시간으로 노출하려면 kr/us 도메인 호출에도 on_progress가
+    backtest와 동일하게 전달돼야 한다(기존엔 backtest만 전달되고 있었음)."""
+    import src.agents.supervisor as sup
+
+    captured: dict = {}
+
+    def spy_kr(question, conn, llm_fn=None, on_progress=None):
+        captured["kr"] = on_progress
+        return {"stock_code": "005930"}
+
+    def spy_us(question, conn, llm_fn=None, on_progress=None):
+        captured["us"] = on_progress
+        return {"ok": True}
+
+    monkeypatch.setattr(sup, "answer_kr_question", spy_kr)
+    monkeypatch.setattr(sup, "answer_us_question", spy_us)
+
+    sentinel = lambda step, summary, detail=None: None
+    dispatch_domains(["kr", "us"], "삼성전자 vs 애플", conn=None, llm_fn=None, on_progress=sentinel)
+
+    assert captured["kr"] is sentinel
+    assert captured["us"] is sentinel
+
+
 def test_dispatch_domains_absorbs_domain_exception(monkeypatch):
     """도메인 함수가 예외를 던져도 dispatch가 전파하지 않고 error를 기록한다."""
     import src.agents.supervisor as sup
@@ -568,7 +593,7 @@ def test_dispatch_domains_calls_on_progress_for_start_and_complete(monkeypatch):
 
     monkeypatch.setattr(
         sup, "answer_kr_question",
-        lambda question, conn, llm_fn=None: {"stock_code": "005930", "financial": {"value": 12.5}},
+        lambda question, conn, llm_fn=None, on_progress=None: {"stock_code": "005930", "financial": {"value": 12.5}},
     )
     events: list[tuple[str, str]] = []
 

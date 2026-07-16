@@ -357,6 +357,8 @@ def answer_us_screening(
     asof: str | None = None,
     execute_sql_fn: Callable | None = None,
     security_filter_fn: Callable | None = None,
+    override_spec: dict | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """미국주식 스크리닝: 조건에 맞는 종목을 순위 매겨 상위 N개를 반환한다(다중종목 경로).
 
@@ -382,6 +384,7 @@ def answer_us_screening(
         question, conn, llm_fn, filtered_cross_section_fn, combine_fn,
         price_table="us_prices", fields=_US_SCREEN_FIELDS,
         asof=asof, execute_sql_fn=execute_sql_fn, domain="US",
+        override_spec=override_spec, on_progress=on_progress,
     )
 
 
@@ -393,6 +396,7 @@ def answer_us_question(
     financial_fn: Callable | None = None,
     price_history_fn: Callable | None = None,
     execute_sql_fn: Callable | None = None,
+    on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """미국주식 질문에 답한다 — 티커 해석 → 재무/주가 위임 → 결과 종합.
 
@@ -419,7 +423,8 @@ def answer_us_question(
     if is_screening_question(question, llm_fn=llm_fn):
         screening_asof = _resolve_screening_asof(period, conn, "us_prices", execute_sql_fn)
         return answer_us_screening(
-            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof
+            question, conn, llm_fn=llm_fn, execute_sql_fn=execute_sql_fn, asof=screening_asof,
+            on_progress=on_progress,
         )
 
     ticker = resolve_ticker_us(question, conn, llm_fn=llm_fn)

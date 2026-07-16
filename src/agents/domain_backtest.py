@@ -319,7 +319,10 @@ def answer_backtest_question(
             on_progress("audit", "실행계획 생성 중…")
         steps = generate_steps_fn(question, llm_fn)
         if on_progress:
-            on_progress("audit", f"실행계획 생성 완료({len(steps)}단계)")
+            on_progress(
+                "audit", f"실행계획 생성 완료({len(steps)}단계)",
+                detail={"kind": "backtest_pipeline", "steps": steps},
+            )
 
     # 0.5) 사전검증: run_pipeline이 실제로 실행하기 전에 구조적 오류(알 수 없는 연산/
     #      미정의 참조)를 잡는다. 통과하지 못하면 데이터 준비/감사배선 모두 건너뛰고

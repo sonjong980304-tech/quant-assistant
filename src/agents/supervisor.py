@@ -256,17 +256,17 @@ def dispatch_domains(
         label = _DOMAIN_LABELS_KO.get(domain, domain)
         if on_progress:
             on_progress(domain, f"{label} 도메인 조회 중…")
+        domain_kwargs = {"on_progress": on_progress} if on_progress else {}
         try:
             if domain == "kr":
-                results["kr"] = answer_kr_question(question, conn, llm_fn=llm_fn)
+                results["kr"] = answer_kr_question(question, conn, llm_fn=llm_fn, **domain_kwargs)
             elif domain == "us":
-                results["us"] = answer_us_question(question, conn, llm_fn=llm_fn)
+                results["us"] = answer_us_question(question, conn, llm_fn=llm_fn, **domain_kwargs)
             elif domain == "macro":
                 results["macro"] = answer_macro_question(question, conn)
             elif domain == "backtest":
-                bt_kwargs = {"on_progress": on_progress} if on_progress else {}
                 results["backtest"] = answer_backtest_question(
-                    question, steps or [], conn, llm_fn=llm_fn, **bt_kwargs
+                    question, steps or [], conn, llm_fn=llm_fn, **domain_kwargs
                 )
             if on_progress:
                 on_progress(domain, f"{label} 도메인 완료")

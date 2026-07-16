@@ -166,8 +166,11 @@ def run_streaming(
     """
     event_queue: "queue.Queue[Optional[dict]]" = queue.Queue()
 
-    def on_progress(step: str, summary: str) -> None:
-        event_queue.put({"step": step, "summary": summary})
+    def on_progress(step: str, summary: str, detail: Optional[Dict[str, Any]] = None) -> None:
+        event: Dict[str, Any] = {"step": step, "summary": summary}
+        if detail is not None:
+            event["detail"] = detail
+        event_queue.put(event)
 
     error_box: Dict[str, BaseException] = {}
 

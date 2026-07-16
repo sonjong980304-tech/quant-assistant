@@ -273,6 +273,30 @@ def test_answer_backtest_question_auto_generates_steps_when_empty(tmp_path):
     assert out["result"]["performance"]["cagr"] == 5.0
 
 
+def test_answer_backtest_question_on_progress_includes_pipeline_detail(tmp_path):
+    """자동 생성된 파이프라인 JSON이 on_progress의 detail로도 실려야 실시간 트리에서
+    실제 op/params를 보여줄 수 있다(요약 한 줄 "N단계"만으로는 검증 불가능)."""
+    conn = _writable_conn(tmp_path)
+    generated = [{"op": "run_backtest", "params": {"n": 5}, "out": "bt"}]
+    events: list = []
+
+    def spy_audit(steps, c, question, run_pipeline_fn, llm_fn=None, market="KR", on_progress=None):
+        return {"blocked": False, "error": None, "result": dict(_BT_RESULT), "hard": [], "warnings": []}
+
+    answer_backtest_question(
+        "저PER 벨류 백테스트 알려줘", [], conn,
+        llm_fn=_pipeline_llm(generated),
+        run_audit_fn=spy_audit,
+        on_progress=lambda step, summary, detail=None: events.append((step, summary, detail)),
+    )
+
+    detail_events = [e for e in events if e[2] is not None]
+    assert len(detail_events) == 1
+    step, summary, detail = detail_events[0]
+    assert detail["kind"] == "backtest_pipeline"
+    assert detail["steps"] == generated
+
+
 def test_answer_backtest_question_skips_generation_when_steps_already_given(tmp_path):
     """steps가 이미 채워져 있으면(기존 호출부 회귀 방지) 자동 생성을 시도하지 않는다."""
     conn = _writable_conn(tmp_path)
@@ -360,7 +384,7 @@ def test_on_progress_reports_step_generation_when_steps_auto_generated(tmp_path)
         llm_fn=lambda p: "무시됨",
         generate_steps_fn=lambda question, llm_fn, today=None: generated,
         run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
-        on_progress=lambda step, summary: events.append((step, summary)),
+        on_progress=lambda step, summary, detail=None: events.append((step, summary)),
     )
 
     summaries = [s for _, s in events]

@@ -198,3 +198,95 @@ def test_api_query_route_still_bound():
     assert paths["/api/query"].__name__ == "api_query"
     # 스트리밍 경로(HA-12)는 그대로 공존한다.
     assert paths["/api/query/stream"].__name__ == "api_query_stream"
+
+
+# ── POST /api/query/rerun — 휴먼인더루프: 사용자가 편집한 조건JSON/파이프라인을
+#    LLM 생성 단계 없이 그대로 실행한다(실시간 트리에서 본 코드를 고쳐 재실행). ────────
+def test_api_query_rerun_route_bound():
+    paths = {getattr(rt, "path", None): getattr(rt, "endpoint", None) for rt in webapp.app.routes}
+    assert paths["/api/query/rerun"].__name__ == "api_query_rerun"
+
+
+def test_api_query_rerun_screening_uses_override_spec(client, monkeypatch):
+    captured: dict = {}
+
+    def spy_kr_screening(question, conn, llm_fn=None, override_spec=None, asof=None, **kw):
+        captured.update(question=question, override_spec=override_spec, asof=asof)
+        return {"intent": "screening", "result": [{"stock_code": "005930"}], "errors": []}
+
+    monkeypatch.setattr(webapp, "answer_kr_screening", spy_kr_screening)
+    r = client.post("/api/query/rerun", json={
+        "kind": "screening", "domain": "kr", "question": "PBR 낮은 3개",
+        "spec": {"criteria": [{"key": "pbr", "direction": "low"}], "top_n": 3},
+        "asof": "2025-12-30",
+    })
+    assert r.status_code == 200
+    assert captured["question"] == "PBR 낮은 3개"
+    assert captured["override_spec"] == {"criteria": [{"key": "pbr", "direction": "low"}], "top_n": 3}
+    assert captured["asof"] == "2025-12-30"
+    assert r.json()["result"] == [{"stock_code": "005930"}]
+
+
+def test_api_query_rerun_screening_us_domain_routes_to_us_screening(client, monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(
+        webapp, "answer_us_screening",
+        lambda question, conn, llm_fn=None, override_spec=None, asof=None, **kw:
+            captured.update(called=True) or {"intent": "screening", "result": [], "errors": []},
+    )
+    r = client.post("/api/query/rerun", json={
+        "kind": "screening", "domain": "us", "question": "PER 낮은 3개",
+        "spec": {"criteria": [{"key": "per", "direction": "low"}], "top_n": 3},
+    })
+    assert r.status_code == 200
+    assert captured.get("called") is True
+
+
+def test_api_query_rerun_backtest_uses_edited_steps(client, monkeypatch):
+    captured: dict = {}
+
+    def spy_backtest(question, steps, conn, llm_fn=None, market="KR", **kw):
+        captured.update(question=question, steps=steps, market=market)
+        return {"blocked": False, "error": None, "result": {"cagr": 5.0}, "hard": [], "warnings": []}
+
+    monkeypatch.setattr(webapp, "answer_backtest_question", spy_backtest)
+    edited_steps = [{"op": "run_backtest", "params": {"n": 5}, "out": "bt"}]
+    r = client.post("/api/query/rerun", json={
+        "kind": "backtest", "question": "저PER 백테스트", "steps": edited_steps, "market": "KR",
+    })
+    assert r.status_code == 200
+    assert captured["steps"] == edited_steps
+    assert captured["market"] == "KR"
+    assert r.json()["result"]["cagr"] == 5.0
+
+
+def test_api_query_rerun_unknown_kind_returns_400(client):
+    r = client.post("/api/query/rerun", json={"kind": "이상함", "question": "q"})
+    assert r.status_code == 400
+
+
+def test_api_query_rerun_screening_missing_spec_returns_400(client):
+    r = client.post("/api/query/rerun", json={"kind": "screening", "domain": "kr", "question": "q"})
+    assert r.status_code == 400
+
+
+def test_api_query_rerun_backtest_missing_steps_returns_400(client):
+    r = client.post("/api/query/rerun", json={"kind": "backtest", "question": "q"})
+    assert r.status_code == 400
+
+
+def test_api_query_rerun_closes_conn(client, monkeypatch):
+    holder: dict = {}
+
+    def capturing_connect(*a, **k):
+        c = _dummy_conn()
+        holder["conn"] = c
+        return c
+
+    monkeypatch.setattr(webapp, "connect_readonly", capturing_connect)
+    monkeypatch.setattr(webapp, "answer_backtest_question",
+                         lambda *a, **k: {"blocked": False, "result": {}})
+    client.post("/api/query/rerun", json={
+        "kind": "backtest", "question": "q", "steps": [{"op": "x"}],
+    })
+    assert holder["conn"].closed is True

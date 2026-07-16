@@ -40,6 +40,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.agents.domain_backtest import answer_backtest_question
+from src.agents.domain_kr import answer_kr_screening
+from src.agents.domain_us import answer_us_screening
 from src.agents.graph import run_hierarchical, run_streaming
 from src.config import CONFIG
 from src.db import connect, connect_readonly
@@ -59,6 +62,24 @@ STATIC_DIR = Path(__file__).parent / "static"
 class QueryReq(BaseModel):
     question: str
     model: Optional[str] = None
+
+
+class RerunReq(BaseModel):
+    """휴먼인더루프 재실행 요청 — 실시간 트리에서 본 조건JSON/파이프라인을 사용자가
+    편집한 뒤 그대로 재실행한다(LLM 생성 단계는 건너뛴다).
+
+    kind="screening": domain(kr|us) + spec(criteria/top_n/sectors/markets 등, 편집된 값)
+      + asof(선택, 기간 재지정).
+    kind="backtest": steps(편집된 파이프라인 JSON) + market(KR|US).
+    """
+    kind: str
+    question: str
+    model: Optional[str] = None
+    domain: Optional[str] = None
+    spec: Optional[dict] = None
+    asof: Optional[str] = None
+    steps: Optional[list] = None
+    market: str = "KR"
 
 
 # 선택 가능한 LLM 후보 (OpenAI + 로컬 Ollama)
@@ -136,6 +157,48 @@ def api_query(req: QueryReq):
     finally:
         conn.close()
     return {**result, "answered_by": "hierarchical"}
+
+
+@app.post("/api/query/rerun")
+def api_query_rerun(req: RerunReq):
+    """휴먼인더루프 재실행: 사용자가 편집한 조건JSON(스크리닝) 또는 파이프라인(백테스트)을
+    LLM 생성 단계 없이 그대로 실행한다.
+
+    실시간 트리(GET /api/query/stream)가 detail로 노출한 "AI가 만든 코드"를 사용자가
+    직접 고쳐 이 엔드포인트로 재실행 버튼을 누르면, override_spec/steps로 그대로 넘어와
+    LLM을 다시 부르지 않고 결정론적 실행기만 탄다 — 안전장치(존재하지 않는 지표명 거부,
+    감사 배선의 하드/소프트 검사 등)는 정상 질의 경로와 완전히 동일하게 적용된다.
+    """
+    if not req.question.strip():
+        raise HTTPException(400, "질문이 비어 있습니다.")
+    if req.kind == "screening":
+        if req.domain not in ("kr", "us"):
+            raise HTTPException(400, "domain은 'kr' 또는 'us'여야 합니다.")
+        if not isinstance(req.spec, dict):
+            raise HTTPException(400, "재실행할 spec(조건 JSON)이 필요합니다.")
+    elif req.kind == "backtest":
+        if not isinstance(req.steps, list):
+            raise HTTPException(400, "재실행할 steps(파이프라인 JSON)가 필요합니다.")
+    else:
+        raise HTTPException(400, f"알 수 없는 kind: {req.kind!r} (screening|backtest만 가능)")
+
+    conn = connect_readonly()
+    try:
+        llm_fn = _build_llm_fn(req.model)
+        if req.kind == "screening":
+            screen_fn = answer_kr_screening if req.domain == "kr" else answer_us_screening
+            result = screen_fn(
+                req.question, conn, llm_fn=llm_fn, override_spec=req.spec, asof=req.asof,
+            )
+        else:
+            result = answer_backtest_question(
+                req.question, req.steps, conn, llm_fn=llm_fn, market=req.market,
+            )
+    except Exception as exc:  # noqa: BLE001 — 원인을 감추지 않고 그대로 500으로 노출
+        raise HTTPException(500, f"재실행 실패: {type(exc).__name__}: {exc}") from exc
+    finally:
+        conn.close()
+    return result
 
 
 # ---------------------------------------------------------------------------

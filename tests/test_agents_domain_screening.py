@@ -334,6 +334,84 @@ def test_answer_kr_question_screening_without_period_leaves_asof_unresolved(monk
     assert captured.get("asof") is None
 
 
+# ── 스크리닝 조건(criteria) JSON 실시간 통지 + 편집·재실행(override_spec) 지원 ────────
+def test_answer_kr_screening_calls_on_progress_with_spec_detail():
+    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 2})
+    events = []
+    answer_kr_screening(
+        "PER 낮은 2개", conn=None, llm_fn=llm, cross_section_fn=_fake_rows, asof="2026-07-14",
+        on_progress=lambda step, summary, detail=None: events.append((step, summary, detail)),
+    )
+    assert len(events) == 1
+    step, summary, detail = events[0]
+    assert detail["kind"] == "screening_spec"
+    assert detail["domain"] == "kr"
+    assert detail["spec"]["criteria"] == [{"key": "per", "direction": "low"}]
+
+
+def test_answer_us_screening_calls_on_progress_with_spec_detail():
+    llm = _json_llm({"criteria": [{"key": "per", "direction": "high"}], "top_n": 2})
+    events = []
+    answer_us_screening(
+        "PER 높은 2개", conn=None, llm_fn=llm, cross_section_fn=_fake_rows, asof="2026-07-14",
+        on_progress=lambda step, summary, detail=None: events.append((step, summary, detail)),
+    )
+    assert len(events) == 1
+    assert events[0][2]["domain"] == "us"
+
+
+def test_answer_kr_screening_override_spec_skips_llm_entirely():
+    """재실행(human-in-the-loop): 사용자가 편집한 spec을 주면 LLM 추출 단계를 완전히 건너뛴다."""
+    def boom(_prompt):
+        raise AssertionError("override_spec이 있으면 LLM을 호출하면 안 된다")
+
+    result = answer_kr_screening(
+        "무시될 질문", conn=None, llm_fn=boom, cross_section_fn=_fake_rows, asof="2026-07-14",
+        override_spec={"criteria": [{"key": "per", "direction": "low"}], "top_n": 2,
+                        "sectors": None, "markets": None},
+    )
+    assert result["errors"] == []
+    assert result["result"] is not None
+    assert result["criteria"] == [{"key": "per", "direction": "low"}]
+
+
+def test_answer_kr_screening_override_spec_still_validates_hallucinated_field():
+    """편집 재실행도 기존 안전장치(존재하지 않는 지표명 거부)를 그대로 통과해야 한다."""
+    result = answer_kr_screening(
+        "무시될 질문", conn=None, llm_fn=None, cross_section_fn=_fake_rows, asof="2026-07-14",
+        override_spec={"criteria": [{"key": "존재하지않는필드", "direction": "low"}], "top_n": 2,
+                        "sectors": None, "markets": None},
+    )
+    assert result["result"] is None
+    assert result["errors"]
+
+
+def test_answer_kr_question_screening_threads_on_progress_to_screening(monkeypatch):
+    captured = {}
+
+    def spy_screening(question, conn, **kwargs):
+        captured.update(kwargs)
+        return {"intent": "screening", "result": [], "errors": []}
+
+    monkeypatch.setattr(kr, "answer_kr_screening", spy_screening)
+    sentinel = lambda *a, **k: None
+    kr.answer_kr_question("PER 낮은 3개", conn=None, on_progress=sentinel)
+    assert captured.get("on_progress") is sentinel
+
+
+def test_answer_us_question_screening_threads_on_progress_to_screening(monkeypatch):
+    captured = {}
+
+    def spy_screening(question, conn, **kwargs):
+        captured.update(kwargs)
+        return {"intent": "screening", "result": [], "errors": []}
+
+    monkeypatch.setattr(us, "answer_us_screening", spy_screening)
+    sentinel = lambda *a, **k: None
+    us.answer_us_question("PER 낮은 5개 회사", conn=None, on_progress=sentinel)
+    assert captured.get("on_progress") is sentinel
+
+
 def test_answer_us_question_screening_with_year_resolves_asof_from_period(monkeypatch):
     captured = {}
     monkeypatch.setattr(

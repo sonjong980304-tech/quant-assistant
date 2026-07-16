@@ -37,11 +37,11 @@ def _seed_valid_domains(monkeypatch) -> None:
 
     monkeypatch.setattr(
         sup, "answer_kr_question",
-        lambda question, conn, llm_fn=None: {"stock_code": "005930", "financial": {"value": 12.5}},
+        lambda question, conn, llm_fn=None, on_progress=None: {"stock_code": "005930", "financial": {"value": 12.5}},
     )
     monkeypatch.setattr(
         sup, "answer_us_question",
-        lambda question, conn, llm_fn=None: {"ok": True, "stock_code": "AAPL", "financial": {"value": 30.0}},
+        lambda question, conn, llm_fn=None, on_progress=None: {"ok": True, "stock_code": "AAPL", "financial": {"value": 30.0}},
     )
 
 
@@ -203,6 +203,36 @@ def test_collect_stream_matches_run_streaming(monkeypatch):
     # 리스트 버전과 이터레이터 버전이 동일 이벤트를 낸다.
     streamed = list(run_streaming("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm))
     assert collected == streamed
+
+
+# ── on_progress(step, summary, detail=None) — 실시간 코드(SQL/파이프라인 JSON) 노출(HA-12 확장) ──
+def test_run_streaming_forwards_detail_field_when_provided(monkeypatch):
+    """도메인 에이전트가 on_progress를 detail 인자와 함께 호출하면, SSE로 나가는 이벤트
+    dict에도 그 detail이 그대로 실려야 한다(생성된 조건 JSON/파이프라인을 프론트가 즉시 표시)."""
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        if on_progress:
+            on_progress("code", "조건 생성 완료", detail={"kind": "screening_spec", "spec": {"criteria": []}})
+        return {"uncertain": False, "conclusion": "ok", "domain_results": {}, "attempts": 1, "routes": ["kr"]}
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    events = list(run_streaming("q", conn=None, llm_fn=None))
+
+    detail_events = [e for e in events if e.get("step") == "code"]
+    assert len(detail_events) == 1
+    assert detail_events[0]["detail"] == {"kind": "screening_spec", "spec": {"criteria": []}}
+
+
+def test_run_streaming_omits_detail_key_when_not_provided(monkeypatch):
+    """detail 없이 on_progress(step, summary)만 호출하면 기존과 동일하게 detail 키 자체가 없어야
+    한다(기존 소비자가 이벤트에 없는 키를 신경 쓸 필요 없게, payload도 불필요하게 커지지 않게)."""
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        if on_progress:
+            on_progress("kr", "한국 도메인 조회 중…")
+        return {"uncertain": False, "conclusion": "ok", "domain_results": {}, "attempts": 1, "routes": ["kr"]}
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    events = list(run_streaming("q", conn=None, llm_fn=None))
+    assert all("detail" not in e for e in events)
 
 
 def test_run_streaming_uses_heuristic_route_without_llm(monkeypatch):
