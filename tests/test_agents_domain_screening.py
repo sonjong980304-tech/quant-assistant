@@ -737,3 +737,54 @@ def test_screening_prompt_includes_all_stocks_guidance_with_new_cap():
     prompt = kr._screening_prompt("코스피 전체 종목 PBR 낮은 순", kr._KR_SCREEN_FIELDS, (), domain="KR")
     assert "전체" in prompt
     assert "4000" in prompt
+
+
+# ── sector_neutral 배선: spec의 sector_neutral을 combine_fn에 그대로 전달 ──────
+def test_answer_kr_screening_passes_sector_neutral_true_to_combine():
+    llm = _json_llm({
+        "criteria": [{"key": "per", "direction": "low"}], "top_n": 2, "sector_neutral": True,
+    })
+    captured = {}
+
+    def fake_combine(rows, criteria, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    answer_kr_screening(
+        "섹터 중립화해서 PER 낮은 2개", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
+    )
+    assert captured.get("sector_neutral") is True
+
+
+def test_answer_kr_screening_defaults_sector_neutral_false_to_combine():
+    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 2})
+    captured = {}
+
+    def fake_combine(rows, criteria, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    answer_kr_screening(
+        "PER 낮은 2개", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
+    )
+    assert captured.get("sector_neutral") is False
+
+
+def test_answer_us_screening_passes_sector_neutral_true_to_combine():
+    """공용 _run_screening을 타므로 US 경로도 대칭으로 sector_neutral을 전달한다."""
+    llm = _json_llm({
+        "criteria": [{"key": "per", "direction": "high"}], "top_n": 2, "sector_neutral": True,
+    })
+    captured = {}
+
+    def fake_combine(rows, criteria, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    answer_us_screening(
+        "섹터 중립화해서 PER 높은 2개", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
+    )
+    assert captured.get("sector_neutral") is True

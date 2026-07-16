@@ -126,6 +126,7 @@ METRIC_FIELD_DESCRIPTIONS_US: dict[str, str] = {
     "operating_profit": "영업이익(달러 절대값, 해당분기, TTM 아님)",
     "revenue": "매출액(달러 절대값, 해당분기, TTM 아님)",
     "net_income": "순이익(달러 절대값, 해당분기, TTM 아님)",
+    "market_cap": "시가총액(달러 절대값, 종가×상장주식수, 해당 기준시점)",
 }
 
 

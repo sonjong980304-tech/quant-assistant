@@ -45,6 +45,10 @@ class Turn:
     sql: str | None = None
     code: str | None = None
     error: str | None = None
+    # 정형 도메인(backtest/kr/us/macro)의 원본 결과(domain_results). free_exec(자유코드)를
+    # 안 썼어도 신규 턴이 성공하면 항상 채운다 — 저장된 파이프라인으로만 성공한 경우에도
+    # "새 SQL/코드 없음"이 아니라 실제 근거 데이터를 오른쪽 패널에 그대로 병기하기 위함이다.
+    domain_evidence: dict | None = None
 
 
 @dataclass
@@ -241,6 +245,7 @@ def _run_new_turn(
             question=question, status="success", answer=result.get("conclusion"),
             data=_extract_tabular_data(domain_results),
             sql=free_exec.get("sql"), code=free_exec.get("code"),
+            domain_evidence=domain_results or None,
         )
         if on_progress:
             on_progress("완료")
@@ -312,6 +317,7 @@ def get_history(session: ConversationSession) -> list[dict]:
             "error": turn.error,
             "sql": turn.sql,
             "code": turn.code,
+            "domain_evidence": turn.domain_evidence,
             "csv_available": turn.status == "success" and _to_dataframe(_turn_csv_source(turn)) is not None,
         }
         for turn in session.turns

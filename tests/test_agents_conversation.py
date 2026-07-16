@@ -128,6 +128,60 @@ def test_run_turn_exposes_sql_code_when_verified_fn_used_internal_fallback():
 
 
 # --------------------------------------------------------------------------
+# 구조화 도메인 근거 노출 — 신규 턴이 성공하면 free_exec(자유코드) 여부와 무관하게
+# 항상 domain_evidence(원본 domain_results)를 담는다. 정형 도메인(backtest/kr/us/macro)이
+# 저장된 파이프라인으로 성공한 경우에도 "새로 실행한 SQL/코드가 없다"가 아니라 실제
+# 근거 데이터를 보여주기 위함이다(오른쪽 패널 렌더링 근거, AC4 원본 그대로 병기).
+# --------------------------------------------------------------------------
+def test_run_turn_new_turn_exposes_domain_evidence_without_fallback():
+    """저장된 함수(정형 도메인)로만 성공한 신규 턴 — free_exec가 없어도 domain_evidence가 채워진다."""
+    domain_results = {"backtest": {"result": {"cagr": 0.12, "mdd": -0.2}}}
+
+    def fake_verified(question, conn, llm_fn, **kwargs):
+        return {"uncertain": False, "conclusion": "백테스트 결과입니다", "domain_results": domain_results}
+
+    session = _fresh_session()
+    turn = run_turn(session, "5일/20일 이동평균 백테스트", conn=None, llm_fn="fake_llm", verified_fn=fake_verified)
+
+    assert turn.domain_evidence == domain_results  # 자유코드(free_exec) 없이도 근거가 채워짐
+    assert turn.sql is None and turn.code is None   # free_exec 전용 필드는 그대로 비어 있음
+
+
+def test_run_turn_fallback_turn_also_fills_domain_evidence():
+    """자유코드 폴백으로 성공한 턴 — sql/code(free_exec)와 domain_evidence를 모두 담는다(중복 아님, 병기)."""
+    domain_results = {"free_exec": {"fallback_used": True, "sql": "SELECT *", "code": "result = 1", "result": 1}}
+
+    def fake_verified(question, conn, llm_fn, **kwargs):
+        return {"uncertain": False, "conclusion": "계산 결과", "domain_results": domain_results, "used_fallback": True}
+
+    session = _fresh_session()
+    turn = run_turn(session, "복잡한 질문", conn=None, llm_fn="fake_llm", verified_fn=fake_verified)
+
+    assert turn.sql == "SELECT *"
+    assert turn.domain_evidence == domain_results
+
+
+def test_run_turn_failed_turn_has_no_domain_evidence():
+    def fake_verified(question, conn, llm_fn, **kwargs):
+        return {"uncertain": True, "reason": "질문을 이해하지 못했습니다", "domain_results": {}}
+
+    session = _fresh_session()
+    turn = run_turn(session, "이상한 질문", conn=None, llm_fn="fake_llm", verified_fn=fake_verified)
+
+    assert turn.domain_evidence is None
+
+
+def test_get_history_includes_domain_evidence():
+    session = _fresh_session()
+    ev = {"kr": {"result": [{"code": "005930", "pbr": 1.2}]}}
+    session.turns = [Turn(question="q", status="success", answer="답", domain_evidence=ev)]
+
+    history = get_history(session)
+
+    assert history[0]["domain_evidence"] == ev
+
+
+# --------------------------------------------------------------------------
 # MT-2 — 이어가기 턴(데이터 있음) → Python 가공만, SQL 재조회 없음, 요약정보만 프롬프트에
 # --------------------------------------------------------------------------
 def test_run_turn_does_not_call_sql_when_session_has_data():

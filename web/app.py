@@ -239,6 +239,7 @@ def api_chat(req: ChatReq):
         "error": turn.error,
         "sql": turn.sql,
         "code": turn.code,
+        "domain_evidence": turn.domain_evidence,
     }
 
 
@@ -299,7 +300,7 @@ def _chat_event_stream(session_id: Optional[str], question: str, model: Optional
             llm_fn = _build_llm_fn(model)
             turn = run_turn(session, question, conn, llm_fn, on_progress=lambda msg: q.put({"step": msg}))
             q.put({"_done": True, "status": turn.status, "answer": turn.answer, "error": turn.error,
-                   "sql": turn.sql, "code": turn.code})
+                   "sql": turn.sql, "code": turn.code, "domain_evidence": turn.domain_evidence})
         except Exception as exc:  # noqa: BLE001 — 스트림 도중 실패를 클라이언트에 명시적으로 알림
             q.put({"_fail": True, "message": str(exc)})
         finally:

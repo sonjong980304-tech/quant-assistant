@@ -14,6 +14,7 @@ import pytest
 
 from src.agents.domain_kr import (
     _parse_period,
+    _parse_recent_return_months,
     _strip_retry_feedback,
     answer_kr_question,
     classify_intent,
@@ -1080,3 +1081,88 @@ def test_answer_kr_question_recognizes_gpa_single_stock(tmp_path):
 
     assert "재무 지표를 인식하지 못함" not in result["errors"]
     assert result["financial"]["value"] == 21.0
+
+
+# ── _parse_recent_return_months: "최근 N개월/N년 수익률" → 개월수 ─────────────────
+# 실서버 재현 버그: "삼성전자 최근 3개월 수익률"이 12가 아닌 임의 개월수라 인식 실패 →
+# free_exec LLM 코드생성으로 폴백해 8년 전 데이터로 틀린 답을 냄. 이 파서가 개월수를 뽑아
+# 결정론 함수(price_return_over_months)로 라우팅되게 한다. "직전 12개월 수익률"/"모멘텀"
+# (기존 _COMPUTED 경로)은 여기서 매치하지 않아 기존 경로가 그대로 유지된다(회귀).
+
+def test_parse_recent_return_months_recent_three_months():
+    assert _parse_recent_return_months("삼성전자 최근 3개월 수익률") == 3
+
+
+def test_parse_recent_return_months_recent_twelve_months():
+    assert _parse_recent_return_months("SK하이닉스 최근 12개월 수익률") == 12
+
+
+def test_parse_recent_return_months_one_year_is_twelve():
+    assert _parse_recent_return_months("1년 수익률 알려줘") == 12
+
+
+def test_parse_recent_return_months_two_years_span_is_twenty_four():
+    assert _parse_recent_return_months("2년간 수익률") == 24
+
+
+def test_parse_recent_return_months_none_for_unrelated_question():
+    assert _parse_recent_return_months("삼성전자 PER 알려줘") is None
+
+
+def test_parse_recent_return_months_none_for_legacy_return_12m_phrasing():
+    # 회귀: "직전 12개월 수익률"/"모멘텀"은 기존 _COMPUTED 경로가 처리해야 하므로 여기선 None.
+    assert _parse_recent_return_months("삼성전자 직전 12개월 수익률") is None
+    assert _parse_recent_return_months("삼성전자 모멘텀 알려줘") is None
+
+
+def test_parse_recent_return_months_none_for_calendar_year_phrasing():
+    # "2024년 수익률"/"25년 수익률"은 캘린더 연도(기간)이지 "N년 전"이 아니다 → None(오탐 방지).
+    assert _parse_recent_return_months("삼성전자 2024년 수익률") is None
+    assert _parse_recent_return_months("삼성전자 25년 수익률") is None
+
+
+def test_answer_kr_question_routes_recent_months_return_to_price_return_fn(tmp_path):
+    """'삼성전자 최근 3개월 수익률' → 주입한 price_return_fn이 (code, asof, months)로 호출되고
+    그 결과가 result['financial']에 그대로 담긴다. intent는 financial, price는 None."""
+    db = _seed(tmp_path)  # prices 최신 거래일 = 2026-07-11
+    calls: list[tuple] = []
+
+    def fake_price_return(conn, code, asof, months):
+        calls.append((code, asof, months))
+        return {"stock_code": code, "months": months, "return_pct": 12.34,
+                "start_date": "2026-04-11", "end_date": asof}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 최근 3개월 수익률", conn, price_return_fn=fake_price_return
+        )
+    finally:
+        conn.close()
+
+    assert calls == [("005930", "2026-07-11", 3)]
+    assert result["intent"] == "financial"
+    assert result["financial"]["return_pct"] == pytest.approx(12.34)
+    assert result["financial"]["months"] == 3
+    assert result["price"] is None
+    assert result["errors"] == []
+
+
+def test_answer_kr_question_recent_months_failure_reported_without_raising(tmp_path):
+    """price_return_fn이 계속 실패해도 예외가 전파되지 않고 errors에 사유가 담긴다(가까운 계층 재시도)."""
+    db = _seed(tmp_path)
+
+    def boom(conn, code, asof, months):
+        raise RuntimeError("boom")
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 최근 6개월 수익률", conn, price_return_fn=boom
+        )
+    finally:
+        conn.close()
+
+    assert result["intent"] == "financial"
+    assert result["financial"] is None
+    assert any("boom" in e for e in result["errors"])

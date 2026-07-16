@@ -26,7 +26,7 @@ from typing import Any, Callable
 from src.agents.data_financial import METRIC_SOURCE_MAP, resolve_metric
 from src.agents.data_price_kr import get_price_history_kr, get_price_snapshot_kr
 from src.agents.exec_runtime import execute_sql
-from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS
+from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS, price_return_over_months
 from src.backtest.data_access_us import METRIC_FIELD_DESCRIPTIONS_US
 from src.backtest.primitives import combine, get_cross_section
 from src.llm import extract_json
@@ -199,6 +199,9 @@ _SCREEN_METRIC_ALIASES: dict[str, str] = {
     "투하자본수익률": "roc", "roc": "roc",
     "이익수익률": "earnings_yield", "ey": "earnings_yield",
     "매출총이익률": "gp_a", "gpa": "gp_a", "gp/a": "gp_a",
+    # "시가총액 상위 N개" 스크리닝이 LLM 없이(휴리스틱 폴백) 동작할 때도 인식되게 한다
+    # (실서버 재현 버그: market_cap이 METRIC_FIELD_DESCRIPTIONS에 없어 "총자산"으로 잘못 매핑됨).
+    "시가총액": "market_cap", "시총": "market_cap",
 }
 _SCREEN_METRIC_ORDER: list[str] = sorted(_SCREEN_METRIC_ALIASES, key=len, reverse=True)
 
@@ -360,11 +363,14 @@ def _screening_prompt(
         "다음 질문은 여러 종목을 특정 지표로 순위 매겨 상위 N개를 뽑는 스크리닝 요청입니다.\n"
         "질문에서 조건만 추출해 JSON으로만 답하세요(설명/코드/SQL 금지).\n"
         '형식: {"criteria":[{"key":"<지표>","direction":"low|high"}],'
-        f'"top_n":<정수>,"sectors":null,"{market_key}":null}}\n'
+        f'"top_n":<정수>,"sectors":null,"{market_key}":null,"sector_neutral":false}}\n'
         f"사용 가능한 지표(key: 설명):\n{fields_block}\n"
         "direction: 낮을수록/저평가 우수면 low, 높을수록 우수면 high.\n"
         "top_n: 질문에 개수가 명시돼 있으면 그 숫자를, 명시돼 있지 않으면 10을, "
         "'전체'/'모든 종목'/'모두'처럼 개수 제한 없이 전부를 요구하면 4000을 쓰세요.\n"
+        "sector_neutral: 질문이 '섹터 중립화'/'업종 중립'/'섹터별로 정규화'/'섹터 편중을 없애고' "
+        "처럼 섹터(업종) 간 비교 왜곡을 제거해 달라고 명시적으로 요구하면 true로, 그렇지 않으면 "
+        "false로 설정하세요.\n"
         f"{scope_line}"
         f"{market_rule}"
         f"{sector_hint}\n"
@@ -424,6 +430,7 @@ def _parse_screening_json(raw: str, domain: str = "KR") -> dict | None:
         "sectors": data.get("sectors") or None,
         "markets": None,
         "exchanges": None,
+        "sector_neutral": _coerce_sector_neutral(data.get("sector_neutral")),
     }
     if domain == "US":
         spec["exchanges"] = data.get("exchanges") or None
@@ -440,6 +447,38 @@ def _coerce_top_n(value, default: int = 10) -> int:
     # 하드 상한은 pipeline_exec.MAX_SIZE(전체 종목 안전 상한)와 동일하게 맞춘다 —
     # "전체 종목" 요청이 top_n=4000까지는 잘리지 않고 그대로 통과해야 하기 때문.
     return max(1, min(4000, n))
+
+
+# ── 섹터 중립화(sector_neutral) 감지 ────────────────────────────────────────
+# "섹터 중립화"/"업종 중립"류 표현을 결정론적으로 감지하는 키워드(휴리스틱 폴백용). 주경로는
+# LLM이 프롬프트 지시문을 읽고 판단하지만, LLM 없을 때/파싱 실패 시 이 키워드로 폴백한다.
+_SECTOR_NEUTRAL_PHRASES: tuple[str, ...] = (
+    "섹터중립", "섹터 중립", "업종중립", "업종 중립",
+    "섹터별 정규화", "섹터별로 정규화", "업종별 정규화", "업종별로 정규화",
+    "섹터 편중", "업종 편중", "섹터 쏠림", "업종 쏠림",
+    "sector neutral", "sector-neutral",
+)
+
+
+def _coerce_sector_neutral(value) -> bool:
+    """sector_neutral 값을 안전하게 bool로 변환한다(누락/오타/이상값은 False).
+
+    LLM JSON은 보통 실제 bool(true/false)을 주지만, 문자열 "true"/"1"/"yes"나 숫자 1도
+    관대하게 True로 수용한다. 그 외("maybe"/None/빈값 등)는 모두 False로 안전하게 처리한다.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "y")
+    return False
+
+
+def _detect_sector_neutral_keyword(question: str) -> bool:
+    """질문 텍스트에 섹터 중립화 요구 표현이 있으면 True(결정론 휴리스틱 폴백용)."""
+    q = (question or "").lower()
+    return any(p in q for p in _SECTOR_NEUTRAL_PHRASES)
 
 
 def _heuristic_screening_spec(question: str, domain: str = "KR") -> dict | None:
@@ -491,6 +530,7 @@ def _heuristic_screening_spec(question: str, domain: str = "KR") -> dict | None:
         "sectors": None,
         "markets": markets,
         "exchanges": exchanges,
+        "sector_neutral": _detect_sector_neutral_keyword(q),
     }
 
 
@@ -594,6 +634,7 @@ def _normalize_override_spec(raw: dict) -> dict | None:
         "sectors": raw.get("sectors") or None,
         "markets": raw.get("markets") or None,
         "exchanges": raw.get("exchanges") or None,
+        "sector_neutral": _coerce_sector_neutral(raw.get("sector_neutral")),
     }
 
 
@@ -634,7 +675,7 @@ def _run_screening(
     result: dict = {
         "question": question, "intent": "screening",
         "criteria": None, "top_n": None, "sectors": None, "markets": None, "exchanges": None,
-        "asof": None, "result": None, "errors": [],
+        "sector_neutral": False, "asof": None, "result": None, "errors": [],
     }
 
     resolved_asof = asof or _default_screening_asof(conn, price_table, execute_sql_fn)
@@ -672,6 +713,7 @@ def _run_screening(
     result["sectors"] = spec["sectors"]
     result["markets"] = spec.get("markets")
     result["exchanges"] = spec.get("exchanges")
+    result["sector_neutral"] = spec.get("sector_neutral", False)
 
     if on_progress:
         on_progress(
@@ -700,6 +742,7 @@ def _run_screening(
         selected = combine_fn(
             rows, spec["criteria"], method="zscore",
             n=spec["top_n"], sectors=requested_sectors, markets=market_filter,
+            sector_neutral=spec.get("sector_neutral", False),
         )
     except ValueError as exc:  # _validate_criteria_keys 등: 존재하지 않는 필드명(환각) 포함
         result["errors"].append(f"스크리닝 조건 오류: {exc}")
@@ -796,6 +839,49 @@ def _parse_period(question: str) -> dict | None:
     if quarter_n is not None:
         return {"kind": "quarter", "quarter": f"{year}Q{quarter_n}"}
     return {"kind": "annual", "year": year}
+
+
+# ── "최근 N개월/N년 수익률" 기간 수익률 파서 (실서버 재현 버그 수정) ─────────────────
+# "삼성전자 최근 3개월 수익률"처럼 12가 아닌 임의 개월수는 _extract_metric(리터럴 "12개월"
+# 별칭만 인식)이 못 잡아 free_exec LLM 코드생성으로 폴백 → LLM이 8년 전 데이터로 계산해
+# 틀린 답을 내던 문제를 고친다. 여기서 개월수를 뽑아 결정론 함수(price_return_over_months)로
+# 라우팅한다.
+#
+# 회귀 안전장치:
+# - 월 형태는 "최근/지난" 접두 또는 "간/동안" 접미가 있을 때만 매치한다 →
+#   "직전 12개월 수익률"/"12개월 수익률"(bare)/"모멘텀"은 여기서 None을 돌려 기존
+#   _COMPUTED_KO_ALIASES(return_12m) 경로가 그대로 처리하게 한다(기존 테스트/동작 유지).
+# - 년 형태는 "최근/지난" 접두 또는 "간/동안" 접미가 있거나 한 자리 수(1~9)일 때만
+#   매치한다 → "2024년 수익률"/"25년 수익률" 같은 캘린더 연도(_parse_period가 처리)를
+#   "N년 전 기간"으로 오인하지 않는다.
+_RECENT_RETURN_MONTHS_RE = re.compile(
+    r"(?:최근|지난)\s*(\d+)\s*개월"          # 최근/지난 N개월 …
+    r"|(\d+)\s*개월\s*(?:간|동안)"           # N개월간 …
+)
+_RECENT_RETURN_YEARS_RE = re.compile(
+    r"(?:최근|지난)\s*(\d+)\s*년"            # 최근/지난 N년 …
+    r"|(\d+)\s*년\s*(?:간|동안)"             # N년간 …
+    r"|(?<!\d)([1-9])\s*년(?!\d)"           # 한 자리 N년 (캘린더 연도가 아님)
+)
+
+
+def _parse_recent_return_months(question: str) -> int | None:
+    """질문에서 "최근 N개월/N년 수익률" 류 기간을 개월수로 변환한다("년"은 ×12). 없으면 None.
+
+    "수익률"이 없으면 곧바로 None(주가/재무 다른 질문 오탐 방지). 월 형태를 년 형태보다
+    먼저 확인해 "최근 12개월 수익률"을 12로 잡는다. 기존 리터럴 "12개월" 별칭 경로와
+    겹쳐도 이 경로가 우선 반환하므로(호출부에서 먼저 분기) 순서가 명확하다.
+    """
+    q = question or ""
+    if "수익률" not in q:
+        return None
+    m = _RECENT_RETURN_MONTHS_RE.search(q)
+    if m:
+        return int(m.group(1) or m.group(2))
+    m = _RECENT_RETURN_YEARS_RE.search(q)
+    if m:
+        return int(m.group(1) or m.group(2) or m.group(3)) * 12
+    return None
 
 
 # ── 주가 시계열(price_history) 첨부 (버그A) ───────────────────────────────────
@@ -1078,6 +1164,7 @@ def answer_kr_question(
     indicators: list[dict] | None = None,
     computed_metric_fn: Callable | None = None,
     price_history_fn: Callable | None = None,
+    price_return_fn: Callable | None = None,
     on_progress: Callable[..., None] | None = None,
 ) -> dict:
     """한국주식 도메인 에이전트 진입점.
@@ -1107,6 +1194,7 @@ def answer_kr_question(
     execute_sql_fn = execute_sql_fn or execute_sql
     computed_metric_fn = computed_metric_fn or resolve_computed_metric
     price_history_fn = price_history_fn or get_price_history_kr
+    price_return_fn = price_return_fn or price_return_over_months
 
     # 기간/차트 의도는 재시도 피드백이 아니라 원본 질문 기준으로 판단한다(wants_chart 원칙).
     base_question = _strip_retry_feedback(question)
@@ -1148,6 +1236,23 @@ def answer_kr_question(
     result["stock_code"] = stock_code
     if stock_code is None:
         result["errors"].append("종목을 찾을 수 없습니다: 질문에서 종목명/종목코드를 인식하지 못함")
+        return result
+
+    # "최근 N개월/N년 수익률"은 개월수가 12가 아니면 _extract_metric이 못 잡아 상위(총괄)에서
+    # free_exec LLM 코드생성으로 폴백 → 8년 전 데이터로 계산해 틀린 답을 내던 실서버 버그.
+    # LLM에 맡기지 않고 결정론 함수(price_return_over_months, prices 테이블 최신 거래일 기준
+    # N개월 전 종가 대비 수익률)로 계산한다. intent 분류/_extract_metric을 건너뛰고 조기 반환한다.
+    recent_months = _parse_recent_return_months(base_question)
+    if recent_months is not None:
+        result["intent"] = "financial"
+        asof = _default_screening_asof(conn, "prices", execute_sql_fn)
+        financial, err = _call_with_retry(
+            lambda: price_return_fn(conn, stock_code, asof, recent_months)
+        )
+        if err:
+            result["errors"].append(f"기간 수익률 계산 실패: {err}")
+        else:
+            result["financial"] = financial
         return result
 
     intent = classify_intent(question, llm_fn=llm_fn)

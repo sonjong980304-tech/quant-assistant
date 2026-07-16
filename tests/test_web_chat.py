@@ -44,6 +44,40 @@ def test_api_chat_calls_run_turn_and_returns_session_id(client, monkeypatch):
     assert captured["question"] == "코스피 PBR 낮은 순"
 
 
+def test_api_chat_returns_domain_evidence(client, monkeypatch):
+    ev = {"kr": {"result": [{"code": "005930", "pbr": 1.2}]}}
+
+    def fake_run_turn(session, question, conn, llm_fn, **kwargs):
+        return Turn(question=question, status="success", answer="답", domain_evidence=ev)
+
+    monkeypatch.setattr(webapp, "run_turn", fake_run_turn)
+    monkeypatch.setattr(webapp, "_build_llm_fn", lambda model: None)
+
+    r = client.post("/api/chat", json={"question": "코스피 PBR 낮은 순"})
+
+    assert r.status_code == 200
+    assert r.json()["domain_evidence"] == ev
+
+
+def test_api_chat_history_includes_domain_evidence(client, monkeypatch):
+    ev = {"backtest": {"result": {"cagr": 0.1}}}
+
+    def fake_run_turn(session, question, conn, llm_fn, **kwargs):
+        turn = Turn(question=question, status="success", answer="답", domain_evidence=ev)
+        session.turns.append(turn)
+        session.has_data = True
+        session.current_data = ev
+        return turn
+
+    monkeypatch.setattr(webapp, "run_turn", fake_run_turn)
+    monkeypatch.setattr(webapp, "_build_llm_fn", lambda model: None)
+
+    sid = client.post("/api/chat", json={"question": "백테스트"}).json()["session_id"]
+    turns = client.get(f"/api/chat/history?session_id={sid}").json()["turns"]
+
+    assert turns[0]["domain_evidence"] == ev
+
+
 def test_api_chat_reuses_same_session_across_requests(client, monkeypatch):
     seen_sessions = []
 
@@ -202,6 +236,22 @@ def test_api_chat_stream_emits_progress_frames_then_done(client, monkeypatch):
     assert "2단계 진행 중" in body
     assert "event: done" in body
     assert body.index("1단계 진행 중") < body.index("event: done")  # 진행 이벤트가 완료보다 먼저
+
+
+def test_api_chat_stream_done_includes_domain_evidence(client, monkeypatch):
+    ev = {"macro": {"available": True, "overall": "GREEN"}}
+
+    def fake_run_turn(session, question, conn, llm_fn, on_progress=None, **kwargs):
+        return Turn(question=question, status="success", answer="답", domain_evidence=ev)
+
+    monkeypatch.setattr(webapp, "run_turn", fake_run_turn)
+    monkeypatch.setattr(webapp, "_build_llm_fn", lambda model: None)
+
+    with client.stream("GET", "/api/chat/stream", params={"question": "매크로"}) as r:
+        body = "".join(r.iter_text())
+
+    assert "domain_evidence" in body
+    assert "GREEN" in body  # done 이벤트에 근거 데이터가 실제로 실려온다
 
 
 def test_api_chat_stream_emits_fail_event_on_exception(client, monkeypatch):

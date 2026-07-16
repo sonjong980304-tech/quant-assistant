@@ -101,8 +101,18 @@ def select_stocks(
     n: int = 20,
     sectors=None,
     markets=None,
+    sector_neutral: bool = False,
 ) -> list[dict]:
-    """선정된 종목 리스트(점수 우수순)를 반환. markets=['KOSPI','KOSDAQ'] 또는 None(전체)."""
+    """선정된 종목 리스트(점수 우수순)를 반환. markets=['KOSPI','KOSDAQ'] 또는 None(전체).
+
+    sector_neutral=True(combine="zscore"일 때만 유효): 전체 선정종목을 한 덩어리로 평균/
+    표준편차를 구하는 대신, sector 필드로 그룹핑해 각 criterion의 평균·표준편차를 '그룹
+    (섹터)마다 따로' 구해 z-score를 계산한다(섹터 내부 상대순위). 그렇게 나온 섹터-내부-상대값을
+    가중합해 최종 점수로 쓰고, 그 점수로 전체(모든 섹터 통틀어) 정렬해 상위 n개를 뽑는다 —
+    "섹터별 자체 랭킹"이 아니라 "섹터 내부 상대순위를 전체 비교 기준으로 삼는" 표준 sector-
+    neutral 방식이다. raw 값이 큰 섹터로 결과가 쏠리던 문제(전기전자 몰림)를 없앤다.
+    combine != "zscore"이거나 sector_neutral=False(기본값)면 기존 동작 그대로다(회귀 없음).
+    """
     valid = _filter_valid(rows, criteria, sectors, markets)
     if not valid or not criteria:
         return []
@@ -121,6 +131,14 @@ def select_stocks(
     # rank_sum / zscore : "점수 낮을수록 우수"로 통일
     scores = {r["stock_code"]: 0.0 for r in valid}
     total_w = sum(c.get("weight", 1.0) for c in criteria) or 1.0
+
+    # 섹터 중립 z-score: valid를 sector 기준으로 그룹핑한다(zscore + sector_neutral일 때만).
+    # sector가 None(결측)이면 별도의 "None" 그룹으로 묶는다(에러 대신 하나의 그룹으로 취급).
+    sector_groups: dict = {}
+    if combine == "zscore" and sector_neutral:
+        for i, r in enumerate(valid):
+            sector_groups.setdefault(r.get("sector"), []).append(i)
+
     for c in criteria:
         key, high = c["key"], (c["direction"] == "high")
         w = c.get("weight", 1.0) / total_w
@@ -128,7 +146,14 @@ def select_stocks(
         if combine == "rank_sum":
             # 0=best. high면 큰 값이 best.
             comp = np.argsort(np.argsort(-vals if high else vals)).astype(float)
-        else:  # zscore
+        elif sector_neutral:  # 섹터별로 따로 평균/표준편차를 구한 z-score(섹터 내부 상대값)
+            z = np.zeros(len(vals), dtype=float)
+            for idxs in sector_groups.values():
+                gvals = vals[idxs]
+                mu, sd = gvals.mean(), (gvals.std() or 1.0)  # 1종목 섹터는 sd=0 → 1.0(z=0)
+                z[idxs] = (gvals - mu) / sd
+            comp = (-z if high else z)  # 낮을수록 우수
+        else:  # zscore(전체 한 덩어리 — 기존 동작)
             mu, sd = vals.mean(), (vals.std() or 1.0)
             z = (vals - mu) / sd
             comp = (-z if high else z)  # 낮을수록 우수

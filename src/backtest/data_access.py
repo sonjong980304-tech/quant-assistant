@@ -36,6 +36,25 @@ def _one_year_before(asof: str) -> str:
         return d.replace(year=d.year - 1, day=28).isoformat()
 
 
+def _months_before(asof: str, months: int) -> str:
+    """asof(YYYY-MM-DD)로부터 정확히 months개월 전 날짜(YYYY-MM-DD).
+
+    _one_year_before(고정 12개월)의 임의 개월수 일반화다. 연/월 캐리를 처리하고,
+    말일 보정(calendar.monthrange)으로 존재하지 않는 날짜(예: 3/31의 1개월 전 2/31)를
+    그 달 말일(평년 2/28·윤년 2/29)로 당긴다 — _one_year_before가 2/29→전년 2/28로
+    보정하는 것과 같은 이유. 실제로 months=12를 넣으면 _one_year_before와 항상 동일한
+    결과가 나온다(tests/test_backtest_data_access.py가 회귀로 고정).
+    """
+    import datetime
+
+    d = datetime.date.fromisoformat(asof)
+    total = d.year * 12 + (d.month - 1) - months
+    y, m = divmod(total, 12)
+    m += 1  # divmod의 0-based 월 인덱스를 1~12로 되돌린다
+    day = min(d.day, calendar.monthrange(y, m)[1])  # 말일 보정
+    return datetime.date(y, m, day).isoformat()
+
+
 def rebalance_dates(start_year: int, end_year: int, freq: str = "quarterly") -> list[str]:
     step = {"monthly": 1, "quarterly": 3, "semiannual": 6, "annual": 12}[freq]
     out, y, m = [], start_year, 1
@@ -64,6 +83,47 @@ def _price_at(conn, code: str, asof: str):
         (code, asof),
     ).fetchone()
     return (row["close"], row["market_cap"]) if row else (None, None)
+
+
+def price_return_over_months(conn, code: str, asof: str, months: int) -> dict:
+    """asof 기준 최근 months개월 가격 수익률(%)을 SQL로 결정론적으로 계산한다.
+
+    return_12m(metrics_at의 고정 12개월)과 동일한 "date<=시점 최근 거래일 종가" 원칙을
+    임의 개월수로 일반화한다 — LLM 코드생성 폴백(날짜 구간을 즉석에서 스스로 판단해 8년 전
+    데이터로 계산하던 실서버 버그)을 대체한다. _price_at(2-tuple 반환)의 시그니처를 바꾸지
+    않으려고 date까지 함께 SELECT하는 새 쿼리를 쓴다.
+
+    start/end 각각 요청한 날짜가 아니라 **실제 매칭된 거래일**(휴장일이면 그 이하 가장 가까운
+    거래일)을 그대로 노출해 투명성을 유지한다. start 시점 이전 데이터가 아예 없으면(상장 전 등)
+    start_date/start_close/return_pct가 None이 된다 — 예외를 던지거나 잘못된 값을 만들지 않고
+    조용히 None으로 "계산 불가"를 알린다(호출부가 안내할 수 있게).
+
+    반환: {"stock_code","months","start_target_date","start_date","start_close",
+    "end_date","end_close","return_pct"}.
+    """
+    start_target = _months_before(asof, months)
+    q = "SELECT date, close FROM prices WHERE stock_code=? AND date<=? ORDER BY date DESC LIMIT 1"
+    end_row = conn.execute(q, (code, asof)).fetchone()
+    start_row = conn.execute(q, (code, start_target)).fetchone()
+    end_date = end_row["date"] if end_row else None
+    end_close = end_row["close"] if end_row else None
+    start_date = start_row["date"] if start_row else None
+    start_close = start_row["close"] if start_row else None
+    return_pct = (
+        _div(end_close - start_close, start_close, pct=True)
+        if (start_close and start_close > 0 and end_close is not None)
+        else None
+    )
+    return {
+        "stock_code": code,
+        "months": months,
+        "start_target_date": start_target,
+        "start_date": start_date,
+        "start_close": start_close,
+        "end_date": end_date,
+        "end_close": end_close,
+        "return_pct": return_pct,
+    }
 
 
 def price_history_batch(conn, codes: list[str], asof: str, lookback_days: int) -> dict[str, list[dict]]:
@@ -130,6 +190,9 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "gp_a": "매출총이익/총자산(GPA, %, TTM 매출총이익 ÷ 해당분기 총자산). 수익성 팩터(높을수록 우수)",
     "earnings_yield": "이익수익률(EY, %, 마법공식 EBIT ÷ 기업가치EV). 밸류 팩터(높을수록 저평가·우수)",
     "roc": "투하자본수익률(ROC, %, 마법공식 EBIT ÷ 투하자본IC). 수익성 팩터(높을수록 우수)",
+    # "총자산"(total_assets)과 혼동되지 않게 시가총액임을 명시한다 — 실서버 재현 버그:
+    # "시가총액"을 스크리닝 가능한 지표로 노출하지 않아 LLM이 total_assets로 잘못 골랐다.
+    "market_cap": "시가총액(원화 절대값, 종가×상장주식수, 해당 기준시점)",
 }
 
 

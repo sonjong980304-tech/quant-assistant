@@ -214,14 +214,20 @@ def combine(
     n: int = 20,
     sectors=None,
     markets=None,
+    sector_neutral: bool = False,
 ) -> list[dict]:
     """멀티팩터 가중조합 선정. 기존 select_stocks를 그대로 감싼다(사실상 이 함수가 combine).
 
     criteria 예: [{"key":"per","direction":"low","weight":0.5},
                   {"key":"roe","direction":"high","weight":0.5}]
     method: 'and' | 'rank_sum' | 'zscore'.
+    sector_neutral: method="zscore"일 때만 유효 — 섹터별로 따로 z-score를 구해(섹터 내부
+    상대순위) 전체 비교한다(select_stocks에 그대로 전달). 기본 False면 기존 동작 그대로.
     """
-    return select_stocks(rows, criteria, combine=method, n=n, sectors=sectors, markets=markets)
+    return select_stocks(
+        rows, criteria, combine=method, n=n, sectors=sectors, markets=markets,
+        sector_neutral=sector_neutral,
+    )
 
 
 # --------------------------------------------------------------------------

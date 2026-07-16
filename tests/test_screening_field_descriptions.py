@@ -26,7 +26,10 @@ from src.backtest.data_access_us import METRIC_FIELD_DESCRIPTIONS_US
 from src.db import init_db
 
 _META_FIELDS = {
-    "stock_code", "name", "sector", "market", "quarter", "close", "market_cap",
+    # market_cap은 더 이상 여기 없다 — "시가총액 상위 N개" 스크리닝이 실서버에서
+    # 결정론적으로 실패하던 버그(LLM이 total_assets로 잘못 고름, 필드 목록에 아예
+    # 없었기 때문)를 고치며 METRIC_FIELD_DESCRIPTIONS에 정식 편입했다(식별자 겸 지표).
+    "stock_code", "name", "sector", "market", "quarter", "close",
     # roc_estimated는 랭킹/필터 대상 "지표"가 아니라 roc의 근사 여부를 알리는 메타 플래그
     # (감가상각비 데이터가 없어 0으로 근사했는지) — METRIC_FIELD_DESCRIPTIONS(스크리닝
     # criteria.key 후보 목록)에는 포함시키지 않는다.
@@ -95,6 +98,20 @@ def test_screening_prompt_lists_operating_profit_description_us():
     assert METRIC_FIELD_DESCRIPTIONS_US["operating_profit"] in prompt
 
 
+def test_screening_prompt_lists_market_cap_description_kr():
+    # 실서버 재현 버그 회귀: market_cap이 프롬프트 후보 목록에서 빠져 LLM이 total_assets를
+    # 잘못 골랐다. 이제 "market_cap: 시가총액…" 문구가 프롬프트에 실제로 들어가야 한다.
+    prompt = _screening_prompt("시가총액 가장 높은 기업", _KR_SCREEN_FIELDS, domain="KR")
+    assert "market_cap" in prompt
+    assert METRIC_FIELD_DESCRIPTIONS["market_cap"] in prompt
+
+
+def test_screening_prompt_lists_market_cap_description_us():
+    prompt = _screening_prompt("시가총액 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
+    assert "market_cap" in prompt
+    assert METRIC_FIELD_DESCRIPTIONS_US["market_cap"] in prompt
+
+
 def test_screening_prompt_us_domain_does_not_leak_kr_only_fields():
     """US 프롬프트에는 KR 전용 필드(revenue_growth 등)가 섞이지 않는다."""
     prompt = _screening_prompt("매출 성장률 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
@@ -128,6 +145,12 @@ def test_heuristic_fallback_still_maps_operating_profit_without_llm():
     assert spec["criteria"][0]["key"] == "operating_profit"
 
 
+def test_heuristic_fallback_maps_market_cap_without_llm():
+    # LLM 없을 때 폴백 경로(_SCREEN_METRIC_ALIASES)도 "시가총액"을 market_cap으로 잡아야 한다.
+    spec = kr._heuristic_screening_spec("시가총액 가장 높은 기업", domain="KR")
+    assert spec["criteria"][0]["key"] == "market_cap"
+
+
 def test_heuristic_fallback_still_distinguishes_margin_and_growth_from_absolute_regression():
     assert kr._heuristic_screening_spec(
         "영업이익률 가장 높은 기업", domain="KR"
@@ -156,3 +179,50 @@ def test_adding_one_field_to_dict_automatically_appears_in_prompt(monkeypatch):
     )
     assert "fake_metric_xyz" in prompt
     assert "가상 테스트 지표 설명" in prompt
+
+
+# ---------------------------------------------------------------------------
+# (e) 섹터 중립화(sector_neutral) 배선 — 자연어 "섹터 중립화" 요청을 spec에 반영
+# ---------------------------------------------------------------------------
+def test_screening_prompt_includes_sector_neutral_schema_and_instruction_kr():
+    prompt = _screening_prompt("섹터 중립화해서 상위 10개", _KR_SCREEN_FIELDS, domain="KR")
+    assert "sector_neutral" in prompt  # JSON 스키마 + 지시문에 노출
+
+
+def test_parse_screening_json_reads_sector_neutral_true_kr():
+    raw = json.dumps({
+        "criteria": [{"key": "return_12m", "direction": "high"}],
+        "top_n": 10, "sector_neutral": True,
+    })
+    spec = kr._parse_screening_json(raw, domain="KR")
+    assert spec["sector_neutral"] is True
+
+
+def test_parse_screening_json_defaults_sector_neutral_false_when_missing():
+    raw = json.dumps({"criteria": [{"key": "per", "direction": "low"}], "top_n": 5})
+    spec = kr._parse_screening_json(raw, domain="KR")
+    assert spec.get("sector_neutral", False) is False
+
+
+def test_parse_screening_json_coerces_bad_sector_neutral_to_false():
+    # 오타/이상한 값은 안전하게 False로.
+    raw = json.dumps({
+        "criteria": [{"key": "per", "direction": "low"}], "top_n": 5,
+        "sector_neutral": "maybe",
+    })
+    spec = kr._parse_screening_json(raw, domain="KR")
+    assert spec["sector_neutral"] is False
+
+
+def test_heuristic_screening_spec_detects_sector_neutral_keyword():
+    spec = kr._heuristic_screening_spec(
+        "코스피 전체 12개월 수익률 섹터 중립화 상위 종목", domain="KR"
+    )
+    assert spec is not None
+    assert spec["sector_neutral"] is True
+
+
+def test_heuristic_screening_spec_sector_neutral_false_without_keyword():
+    spec = kr._heuristic_screening_spec("PER 낮은 10개", domain="KR")
+    assert spec is not None
+    assert spec.get("sector_neutral", False) is False
