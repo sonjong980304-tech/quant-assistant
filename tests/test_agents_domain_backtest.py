@@ -242,6 +242,9 @@ def test_generate_backtest_steps_prompt_includes_question_and_primitives():
     assert "search_strategy" in captured["prompt"]
     assert "get_cross_section" in captured["prompt"]
     assert "winsorize" in captured["prompt"]  # 신규 이상치 완화 프리미티브도 LLM에 노출돼야 함
+    assert "correlation" in captured["prompt"]
+    assert "quantile_bucket_means" in captured["prompt"]
+    assert "gp_a" in captured["prompt"]  # GPA 필드도 get_cross_section 필드 목록에 노출돼야 함
 
 
 def test_pipeline_prompt_documents_get_cross_section_markets_filter():

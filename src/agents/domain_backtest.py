@@ -42,13 +42,15 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
 
 아래 질문을 프리미티브 조립 JSON 파이프라인으로 변환하세요. 파이썬 코드 금지, JSON만 출력.
 
-[사용 가능한 프리미티브 13종 — 이 외의 함수는 존재하지 않습니다]
+[사용 가능한 프리미티브 15종 — 이 외의 함수는 존재하지 않습니다]
 1. get_cross_section(asof, markets) : 특정 시점의 전종목 횡단면 지표 스냅샷(list of rows) 반환.
    각 row 필드: stock_code,name,sector,market,quarter,close,market_cap,per,pbr,psr,
-   roe,roa,operating_margin,net_margin,debt_ratio,revenue_growth,op_growth,ni_growth,return_12m.
+   roe,roa,operating_margin,net_margin,debt_ratio,revenue_growth,op_growth,ni_growth,return_12m,
+   gross_profit,total_assets,gp_a.
    · return_12m: 직전 12개월 가격 수익률(%) = (기준시점 종가 - 12개월전 종가)/12개월전 종가.
      "최근 12개월 수익률/가격 모멘텀이 가장 좋은 종목" 류 질문은 매출성장(revenue_growth)이
      아니라 반드시 이 return_12m을 direction='high'로 써야 합니다.
+   · gp_a: 매출총이익(TTM) ÷ 총자산(%) — GPA 수익성 팩터. "GPA"/"매출총이익/자산" 질문에 씁니다.
    asof는 'YYYY-MM-DD' 구체 날짜(오늘={today}). conn은 실행기가 자동 주입하므로 쓰지 마세요.
    · markets(선택, 예: ["KOSPI"]) : 시장 필터. "코스피 전종목"/"코스닥 전종목"처럼 특정
      시장으로 한정하는 질문은 이 단계에서 markets로 걸러야 합니다. **run_backtest의 markets
@@ -150,6 +152,16 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
     '{{field}}_winsorized'로 지정해야 눌린 값이 실제로 쓰입니다. "이상치를 눌러서/극단치를
     완화해서/윈저라이즈해서" 같은 표현이 질문에 있을 때만 씁니다(명시 없으면 안 씀 — combine의
     기본 zscore/rank_sum으로 충분).
+14. correlation(rows, field_x, field_y) : rows에서 두 필드의 값끼리 피어슨 상관계수를 구합니다.
+    "PBR과 GPA의 상관관계" 처럼 두 지표가 서로 얼마나 같이 움직이는지 물을 때 씁니다
+    (compute_ic처럼 미래수익률과 비교하는 게 아니라, 같은 시점 두 필드끼리 비교). 반환
+    {{correlation, n}} — correlation은 -1~1(None이면 한쪽 값이 전부 동일해 정의 불가), n은
+    사용된 유효 표본 수. field_x/field_y는 get_cross_section 필드 중에서만 고릅니다.
+15. quantile_bucket_means(rows, bucket_field, value_field, n) : bucket_field(예: pbr) 기준
+    오름차순으로 정렬해 동일 개수로 n분위(미지정시 5, 즉 5분위=퀸타일)로 나누고, 분위별
+    value_field(예: gp_a)의 평균을 구합니다. "PBR 분위수별 평균 GPA" 같은 팩터 분석 질문에
+    씁니다. 반환은 [{{bucket, count, bucket_range:[최소,최대], mean_value}}, ...] 리스트이며
+    bucket=1이 bucket_field가 가장 낮은 분위, bucket=n이 가장 높은 분위입니다.
 
 [JSON 형식]
 - {{"pipeline": [{{"op": "이름", "params": {{...}}, "out": "결과이름"}}, ...]}}
@@ -172,6 +184,12 @@ A: {{"pipeline": [
   {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},
   {{"op": "winsorize", "params": {{"rows": {{"$ref": "xs"}}, "field": "roe"}}, "out": "xs_w"}},
   {{"op": "combine", "params": {{"rows": {{"$ref": "xs_w"}}, "criteria": [{{"key": "roe_winsorized", "direction": "high", "weight": 1.0}}], "method": "zscore", "n": 20}}, "out": "picked"}}
+]}}
+Q: PBR과 GPA의 상관관계 구하고, PBR을 5분위수로 나눠서 분위수별 평균 GPA도 보여줘
+A: {{"pipeline": [
+  {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},
+  {{"op": "correlation", "params": {{"rows": {{"$ref": "xs"}}, "field_x": "pbr", "field_y": "gp_a"}}, "out": "corr"}},
+  {{"op": "quantile_bucket_means", "params": {{"rows": {{"$ref": "xs"}}, "bucket_field": "pbr", "value_field": "gp_a", "n": 5}}, "out": "buckets"}}
 ]}}
 Q: 2024년부터 2026년까지 매 분기 리밸런싱했을 때 MDD -10% 이내이면서 샤프가 가장 높은 전략 찾아줘
 A: {{"pipeline": [

@@ -214,6 +214,71 @@ def regress(y, x=None) -> dict:
 
 
 # --------------------------------------------------------------------------
+# 5b. correlation — 두 크로스섹션 필드 간 피어슨 상관계수
+# --------------------------------------------------------------------------
+def correlation(rows: list[dict], field_x: str, field_y: str) -> dict:
+    """rows에서 field_x/field_y 두 값을 뽑아 피어슨 상관계수를 구한다(PBR-GPA 같은 팩터간 비교용).
+
+    compute_ic(팩터 vs 미래 실현수익률의 순위상관)와는 목적이 다르다 — 이건 두 "동시점"
+    필드끼리의 선형 상관관계를 본다. 값이 None인 행은 조용히 제외한다(None 섞인 필드가
+    많으므로 에러 대신 흡수). 유효 표본이 2개 미만이면 표준편차 자체를 정의할 수 없어
+    ValueError. 표본이 있어도 한쪽 분산이 0(전부 같은 값)이면 상관계수가 수학적으로
+    정의되지 않으므로 correlation=None으로 그 사실을 그대로 반환한다(억지로 0을 주지 않음).
+    """
+    import numpy as np
+
+    xs, ys = [], []
+    for r in rows:
+        x, y = r.get(field_x), r.get(field_y)
+        if x is None or y is None:
+            continue
+        xs.append(x)
+        ys.append(y)
+    n = len(xs)
+    if n < 2:
+        raise ValueError(f"상관계수 계산에는 유효 표본이 2개 이상 필요합니다(현재 {n}개)")
+    xarr, yarr = np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+    if xarr.std() == 0 or yarr.std() == 0:
+        return {"correlation": None, "n": n}
+    return {"correlation": float(np.corrcoef(xarr, yarr)[0, 1]), "n": n}
+
+
+# --------------------------------------------------------------------------
+# 5c. quantile_bucket_means — bucket_field 기준 N분위로 나눠 분위별 value_field 평균
+# --------------------------------------------------------------------------
+def quantile_bucket_means(rows: list[dict], bucket_field: str, value_field: str, n: int = 5) -> list[dict]:
+    """bucket_field(예: PBR) 오름차순으로 정렬해 동일 개수로 n분위 나누고, 분위별 value_field
+    (예: GPA)의 평균을 구한다("PBR 분위수별 평균 GPA" 같은 팩터 분석용).
+
+    분위 경계는 값 기준이 아니라 "정렬 후 동일 개수로 분할"이다 — 값이 한쪽에 몰려 있어도
+    분위별 표본 수가 고르게 유지된다(퀀트 팩터 분석에서 흔히 쓰는 방식). 두 필드 중 하나라도
+    None인 행은 제외한다. bucket=1이 bucket_field가 가장 낮은 그룹, bucket=n이 가장 높은
+    그룹이다. 유효 표본이 n개 미만이면 분위를 나눌 수 없어 ValueError.
+    """
+    valid = [r for r in rows if r.get(bucket_field) is not None and r.get(value_field) is not None]
+    if len(valid) < n:
+        raise ValueError(
+            f"유효 표본 {len(valid)}개가 분위 수 {n}개보다 적어 분위를 나눌 수 없습니다"
+        )
+    ordered = sorted(valid, key=lambda r: r[bucket_field])
+    size = len(ordered)
+    out = []
+    for i in range(n):
+        lo = size * i // n
+        hi = size * (i + 1) // n
+        group = ordered[lo:hi]
+        bucket_vals = [r[bucket_field] for r in group]
+        value_vals = [r[value_field] for r in group]
+        out.append({
+            "bucket": i + 1,
+            "count": len(group),
+            "bucket_range": [bucket_vals[0], bucket_vals[-1]],
+            "mean_value": sum(value_vals) / len(value_vals),
+        })
+    return out
+
+
+# --------------------------------------------------------------------------
 # 6. optimize_weights — Riskfolio-Lib 3종 최적화만 감싼 래퍼
 # --------------------------------------------------------------------------
 _OPTIMIZE_METHODS = ("max_sharpe", "min_variance", "risk_parity")

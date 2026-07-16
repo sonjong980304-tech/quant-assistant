@@ -125,6 +125,9 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "operating_profit": "영업이익(원화 절대값, 해당분기, TTM 아님)",
     "revenue": "매출액(원화 절대값, 해당분기, TTM 아님)",
     "net_income": "순이익(원화 절대값, 해당분기, TTM 아님)",
+    "gross_profit": "매출총이익(원화 절대값, TTM 합산)",
+    "total_assets": "총자산(원화 절대값, 해당분기 잔액)",
+    "gp_a": "매출총이익/총자산(GPA, %, TTM 매출총이익 ÷ 해당분기 총자산). 수익성 팩터(높을수록 우수)",
 }
 
 
@@ -160,6 +163,7 @@ def metrics_at(conn, asof: str) -> list[dict]:
         liab = _fin(conn, code, q, "total_liabilities")
         assets = _fin(conn, code, q, "total_assets")
         ni_ttm = _sum_ttm(conn, code, q, "net_income")               # 연결 전체 (ROA용)
+        gp_ttm = _sum_ttm(conn, code, q, "gross_profit")             # GPA(수익성 팩터) 분자
         # PER·ROE 분자는 지배주주 귀속 순이익. 미수집 시 연결 순이익으로 폴백.
         ctrl_ni_ttm = _sum_ttm(conn, code, q, "controlling_net_income")
         if ctrl_ni_ttm is None:
@@ -215,6 +219,9 @@ def metrics_at(conn, asof: str) -> list[dict]:
             "operating_profit": op_q,
             "revenue": rev_q,
             "net_income": ni_q,
+            "gross_profit": gp_ttm,
+            "total_assets": assets,
+            "gp_a": _div(gp_ttm, assets, pct=True) if (gp_ttm is not None and assets and assets > 0) else None,
             "debt_ratio": _div(liab, equity, pct=True) if (equity and equity > 0) else None,
             "revenue_growth": _yoy(conn, code, q, "revenue"),
             "op_growth": _yoy(conn, code, q, "operating_profit"),
