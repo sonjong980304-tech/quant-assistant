@@ -32,12 +32,13 @@ _PERIODS_PER_YEAR_DAILY = 252
 _MAX_SIGNAL_CODES = 10          # 개별종목 시그널 전략 상한(스펙 확정 — 1~10개)
 _WARMUP_BUFFER_DAYS = 40        # 거래일→캘린더일 환산(주말·공휴일) 여유 버퍼
 _VALID_OPS = {"cross_above", "cross_below", ">", "<"}
-# 시그널 전략 탐색 후보 상한. 크로스섹셔널 search_strategy(_MAX_SEARCH_CANDIDATES=20)보다
-# 낮게 잡는다 — 후보마다 run_signal_backtest가 종목별(최대 10개) 전 구간 일단위 시뮬레이션을
-# 새로 돌리고 가격/지표를 후보 간 공유하지 않으므로(search_strategy는 콜백을 후보 간 재사용해
-# 캐시를 공유) 후보당 비용이 더 무겁다. 12개면 프롬프트가 권장하는 3~6개 후보에 여유를 두면서도
-# 최악의 경우(12×10 = 120회 일단위 시뮬레이션)가 파이프라인 상한(MAX_TIMEOUT=120초) 안에 든다.
-_MAX_SIGNAL_SEARCH_CANDIDATES = 12
+# 시그널 전략 탐색 후보 상한. 크로스섹셔널 search_strategy(_MAX_SEARCH_CANDIDATES)와 값을
+# 통일한다(사용자 지정) — 다만 이쪽은 후보마다 run_signal_backtest가 종목별(최대 10개) 전
+# 구간 일단위 시뮬레이션을 새로 돌리고 가격/지표를 후보 간 공유하지 않아(search_strategy는
+# 콜백을 후보 간 재사용해 캐시를 공유) 후보당 비용이 더 무겁다. 최악의 경우(20×10=200회
+# 일단위 시뮬레이션)는 파이프라인 상한(MAX_TIMEOUT=120초)을 넘을 수 있다 — 그 경우 무한정
+# 도는 게 아니라 run_pipeline이 TimeoutError로 안전하게 실패한다(하드 상한 자체는 유지됨).
+_MAX_SIGNAL_SEARCH_CANDIDATES = 20
 _DEFAULT_INDICATOR_PERIODS = {  # SERIES에 period가 없을 때 lookback 산정용 대략치
     "sma": 20, "ema": 20, "rsi": 14, "macd": 35, "macd_signal": 35,
     "bollinger_upper": 20, "bollinger_lower": 20,
@@ -285,7 +286,7 @@ def search_signal_strategy(
 
     Args:
         candidates: [{"entry_rule": {...}, "exit_rule": {...}}, ...]. 비어 있으면 ValueError,
-            _MAX_SIGNAL_SEARCH_CANDIDATES(12) 초과 시 ValueError(자원 남용 방지).
+            _MAX_SIGNAL_SEARCH_CANDIDATES(20) 초과 시 ValueError(자원 남용 방지).
         constraints: [{"metric": "mdd", "op": ">=", "value": -30.0}, ...] 전부 AND. metric은
             performance 키(total_return/cagr/mdd/sharpe 등, mdd는 음수), op는 >=/<=/>/</==/!=.
             연산자는 무거운 시뮬레이션 '전에' 사전검증한다(오타 하나로 전 후보를 돌린 뒤 실패 방지).

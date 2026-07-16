@@ -122,7 +122,7 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
     시그널 전략의 역백테스트). 규칙이 질문에 명시되지 않고 "특정 종목으로 MDD·수익률 같은 성과 목표를
     만족하는 (기술지표) 전략을 제안/추천/찾아줘"처럼 조건만 주어질 때 씁니다. candidates=시도해볼 규칙
     조합 리스트(각 원소는 {{"entry_rule": SERIES-OP-SERIES, "exit_rule": SERIES-OP-SERIES}}, entry_rule/
-    exit_rule은 11번과 완전히 동일한 형식) — **최대 12개까지만** 가능하며, 질문 의도에 맞게 유망해 보이는
+    exit_rule은 11번과 완전히 동일한 형식) — **최대 20개까지만** 가능하며, 질문 의도에 맞게 유망해 보이는
     조합(SMA/EMA 골든크로스, RSI 과매도·과매수 등)을 직접 만들어 제안하세요. stock_codes(1~10개)/start_date/
     end_date/market은 모든 후보에 동일하게 적용되는 고정값입니다(candidates만 탐색 대상).
     constraints=[{{"metric":"mdd","op":">=","value":-30.0}}, {{"metric":"total_return","op":">=","value":35.0}}]

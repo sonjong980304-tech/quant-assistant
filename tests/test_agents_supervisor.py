@@ -396,6 +396,58 @@ def test_synthesize_prompt_truncates_long_screening_rows():
     assert len(prompt) < 5000
 
 
+# ── 프롬프트 축약 상수(5)가 사용자가 실제 요청한 개수(top_n)보다 작으면, 검증/종합
+#    LLM이 "N개 중 5개만 표시"라며 요청 개수를 못 채운 것처럼 오판하던 실사용 버그.
+#    스크리닝 결과가 top_n을 알고 있으므로, 축약 기준을 고정 5가 아니라 top_n에 맞춰야 한다 ──
+def test_verify_prompt_keeps_full_list_up_to_requested_top_n():
+    seen_prompts = []
+
+    def spy_llm(prompt: str) -> str:
+        seen_prompts.append(prompt)
+        return "일치"
+
+    domain_results = {"kr": {"intent": "screening", "top_n": 10, "result": _big_screening_rows(10)}}
+    verify_answer("코스피 수익률 상위 10개", domain_results, spy_llm)
+
+    prompt = seen_prompts[0]
+    domain_json = prompt.split("도메인 결과: ", 1)[1]  # 안내문 예시 텍스트("...(총...")는 제외하고 실제 데이터만 검사
+    assert "종목9" in domain_json          # 10번째(마지막) 행까지 온전히 포함돼야 함
+    assert "...(총" not in domain_json     # top_n 이내라 축약 마커 자체가 없어야 함
+
+
+def test_synthesize_prompt_keeps_full_list_up_to_requested_top_n():
+    captured = {}
+
+    def fake_llm(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "결론"
+
+    domain_results = {"kr": {"intent": "screening", "top_n": 20, "result": _big_screening_rows(20)}}
+    synthesize_conclusion("코스피 수익률 상위 20개", domain_results, fake_llm)
+
+    prompt = captured["prompt"]
+    assert "종목19" in prompt
+    assert "...(총" not in prompt
+
+
+def test_verify_prompt_still_truncates_rows_beyond_top_n():
+    """top_n을 넘는 초과분(비정상 상황 방어)까지 무제한으로 다 보여주진 않는다 —
+    top_n개까지만 보장하고, 그 이상은 여전히 축약 대상이다."""
+    seen_prompts = []
+
+    def spy_llm(prompt: str) -> str:
+        seen_prompts.append(prompt)
+        return "일치"
+
+    domain_results = {"kr": {"intent": "screening", "top_n": 10, "result": _big_screening_rows(1000)}}
+    verify_answer("코스피 수익률 상위 10개", domain_results, spy_llm)
+
+    prompt = seen_prompts[0]
+    assert "종목9" in prompt           # top_n(10)까지는 보장
+    assert "000999" not in prompt      # 그 이상은 여전히 생략
+    assert "...(총 1000개 중" in prompt
+
+
 def test_verify_prompt_uses_json_serialization_not_python_repr():
     """dict를 파이썬 repr(작은따옴표)이 아니라 표준 JSON(큰따옴표)으로 직렬화해야 한다."""
     seen_prompts = []

@@ -438,9 +438,20 @@ def _truncate_for_prompt(value, head: int = _PROMPT_LIST_HEAD):
     domain_results는 건드리지 않고 새 구조를 반환한다 — answer_with_verification이
     사용자에게 그대로 병기하는 원본 데이터("가공 없음" 원칙)와는 별개로, 이건 LLM에게
     검증/요약을 요청하는 프롬프트 텍스트 안의 데이터만 줄이는 용도다.
+
+    스크리닝 결과 dict는 자신이 실제로 요청받은 개수(top_n)를 이미 알고 있다 — 그 값이
+    고정 축약 상수(_PROMPT_LIST_HEAD=5)보다 크면, 그 형제 리스트(result 등)는 top_n개까지
+    축약하지 않는다. 그렇지 않으면 "상위 10개"를 요청해도 검증/종합결론 LLM은 5개만 보고
+    "10개 중 5개만 표시"라며 요청을 못 채운 것처럼 부정확하게 답한다(실사용 확인된 버그) —
+    top_n이 얼마든(향후 상한이 바뀌어도) 그 숫자에 맞춰 자동으로 열리므로 별도 상수 조정이
+    필요 없다. top_n 자체가 없는 리스트(백테스트 시계열 등)는 기존과 동일하게 head로 축약된다.
     """
     if isinstance(value, dict):
-        return {k: _truncate_for_prompt(v, head) for k, v in value.items()}
+        local_head = head
+        top_n = value.get("top_n")
+        if isinstance(top_n, int) and top_n > local_head:
+            local_head = top_n
+        return {k: _truncate_for_prompt(v, local_head) for k, v in value.items()}
     if isinstance(value, list):
         if len(value) <= head:
             return [_truncate_for_prompt(v, head) for v in value]
