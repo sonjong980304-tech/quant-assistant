@@ -43,7 +43,7 @@
   .b-warn{background:rgba(240,160,32,.16);color:var(--warn)}
   pre.sql{background:#0c0e14;border:1px solid var(--line);border-radius:9px;padding:14px;overflow:auto;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#cfe1ff;white-space:pre-wrap;word-break:break-word}
-  .code-block{margin:6px 0 4px 22px}
+  .code-block{margin:6px 0 4px 0}
   .code-details summary{cursor:pointer;color:var(--muted);font-size:12.5px;display:flex;align-items:center;gap:8px;list-style:none}
   .code-details summary::-webkit-details-marker{display:none}
   .code-details summary::before{content:'▸';display:inline-block;transition:transform .12s}
@@ -285,11 +285,15 @@ function treeDepth(step){
 function treeNode(step,summary,detail,question){
   const d=treeDepth(step);
   const label=TREE_LABEL[step]||step;
-  const codeHtml=detail?codeBlockHtml(detail,question):'';
-  return `<div class="tree-node" style="padding-left:${d*22}px">`+
+  const nodeHtml=`<div class="tree-node" style="padding-left:${d*22}px">`+
     `<span class="tree-branch">${d?'└─':'●'}</span>`+
     `<span class="tree-step">${esc(label)}</span>`+
-    `<span class="tree-sum">${esc(summary)}</span>`+codeHtml+`</div>`;
+    `<span class="tree-sum">${esc(summary)}</span></div>`;
+  // 코드 블록은 tree-node(flex 컨테이너)의 자식으로 넣지 않는다 — flex item이 되면
+  // 옆 형제(branch/step/summary)에 밀려 자기 콘텐츠 크기만큼만 좁게 눌린다(실사용 확인된
+  // 버그). 별도 block 요소로 형제 배치해 카드 폭 전체를 쓰게 한다.
+  const codeHtml=detail?`<div style="padding-left:${d*22}px">${codeBlockHtml(detail,question)}</div>`:'';
+  return nodeHtml+codeHtml;
 }
 
 // ===== 실시간 코드(스크리닝 조건 JSON / 백테스트 파이프라인) 블록: 표시·편집·재실행 =====
