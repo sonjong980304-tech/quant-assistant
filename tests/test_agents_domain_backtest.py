@@ -244,6 +244,37 @@ def test_generate_backtest_steps_prompt_includes_question_and_primitives():
     assert "winsorize" in captured["prompt"]  # 신규 이상치 완화 프리미티브도 LLM에 노출돼야 함
 
 
+def test_pipeline_prompt_documents_get_cross_section_markets_filter():
+    """get_cross_section에 markets 필터가 있다는 걸 프롬프트가 알려줘야, LLM이 '코스피
+    전종목' 류 질문에서 존재하지 않는 파라미터(예: run_backtest의 markets를 잘못 전용)를
+    지어내는 대신 실제로 지원되는 markets 파라미터를 쓴다."""
+    captured: dict = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"pipeline": []})
+
+    generate_backtest_steps("코스피 전종목 PBR과 GPA 상관계수 구해줘", fake_llm)
+    p = captured["prompt"]
+    assert "get_cross_section(asof, markets)" in p
+    assert "get_cross_section에는" in p  # markets 외 다른 파라미터를 지어내지 말라는 경고 문구
+
+
+def test_pipeline_prompt_documents_neutralize_zscore_method():
+    """neutralize의 method='zscore'(그룹 표준편차 정규화)가 프롬프트에 노출돼야 LLM이
+    '섹터 중립 포트폴리오' 류 질문을 demean만으로 잘못 처리하지 않는다."""
+    captured: dict = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"pipeline": []})
+
+    generate_backtest_steps("섹터 중립화한 모멘텀 z-score로 상위 20종목 뽑아줘", fake_llm)
+    p = captured["prompt"]
+    assert "method='zscore'" in p
+    assert "method='demean'" in p
+
+
 # ── answer_backtest_question: steps 비어있고 llm_fn 있으면 자동 생성해 감사배선에 넘긴다 ──
 def test_answer_backtest_question_auto_generates_steps_when_empty(tmp_path):
     conn = _writable_conn(tmp_path)

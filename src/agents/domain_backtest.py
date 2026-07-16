@@ -43,15 +43,26 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
 아래 질문을 프리미티브 조립 JSON 파이프라인으로 변환하세요. 파이썬 코드 금지, JSON만 출력.
 
 [사용 가능한 프리미티브 13종 — 이 외의 함수는 존재하지 않습니다]
-1. get_cross_section(asof) : 특정 시점의 전종목 횡단면 지표 스냅샷(list of rows) 반환.
+1. get_cross_section(asof, markets) : 특정 시점의 전종목 횡단면 지표 스냅샷(list of rows) 반환.
    각 row 필드: stock_code,name,sector,market,quarter,close,market_cap,per,pbr,psr,
    roe,roa,operating_margin,net_margin,debt_ratio,revenue_growth,op_growth,ni_growth,return_12m.
    · return_12m: 직전 12개월 가격 수익률(%) = (기준시점 종가 - 12개월전 종가)/12개월전 종가.
      "최근 12개월 수익률/가격 모멘텀이 가장 좋은 종목" 류 질문은 매출성장(revenue_growth)이
      아니라 반드시 이 return_12m을 direction='high'로 써야 합니다.
    asof는 'YYYY-MM-DD' 구체 날짜(오늘={today}). conn은 실행기가 자동 주입하므로 쓰지 마세요.
+   · markets(선택, 예: ["KOSPI"]) : 시장 필터. "코스피 전종목"/"코스닥 전종목"처럼 특정
+     시장으로 한정하는 질문은 이 단계에서 markets로 걸러야 합니다. **run_backtest의 markets
+     파라미터와 이름·의미가 동일하지만 별개 함수의 파라미터입니다 — get_cross_section에는
+     이 markets 외에 다른 파라미터(예: market 단수형)가 없으니 절대 존재하지 않는 파라미터를
+     만들어 넣지 마세요.**
 2. zscore(rows, field, direction) : 단일 팩터 z-score 랭킹(direction='high'|'low').
-3. neutralize(rows, field, by) : 그룹(by, 기본 'sector') 내 평균 제거(섹터중립). '{{field}}_neutral' 추가.
+3. neutralize(rows, field, by, method) : 그룹(by, 기본 'sector') 내 중립화. '{{field}}_neutral' 추가.
+   · method='demean'(기본) : 그룹 평균만 뺀다(그룹 간 수준차만 제거, 변동성 차이는 남음).
+   · method='zscore' : 그룹 평균을 빼고 그룹 표준편차로 나눠 정규화한다(그룹 간 변동성
+     차이까지 보정). "섹터 중립 포트폴리오"/"섹터별 z-score"처럼 섹터 내 표준화된 순위로
+     전 종목을 한 번에 랭킹해야 하는 질문은 method='zscore'로 중립화한 뒤 그 결과를
+     zscore(rows, field='{{field}}_neutral', direction='high') 단계로 이어서 전체 랭킹하세요
+     (neutralize 자체는 랭킹하지 않고 정규화된 값만 부여합니다).
 4. combine(rows, criteria, method, n) : 멀티팩터 가중조합 선정.
    criteria=[{{"key":"per","direction":"low","weight":0.5}},{{"key":"roe","direction":"high","weight":0.5}}],
    method='zscore'|'rank_sum'|'and', n=선정 종목수.

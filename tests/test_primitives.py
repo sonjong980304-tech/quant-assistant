@@ -58,6 +58,26 @@ def test_get_cross_section_field_projection_keeps_identifiers():
     assert "roe" not in rows[0]
 
 
+def _fake_rows_mixed_markets():
+    rows = _fake_rows()  # 전부 KOSPI
+    rows.append({"stock_code": "000004", "name": "라", "sector": "화학", "market": "KOSDAQ",
+                 "quarter": "2025Q1", "per": 10.0, "roe": 10.0})
+    return rows
+
+
+def test_get_cross_section_filters_by_markets_when_given():
+    rows = get_cross_section("CONN", "2025-12-31", markets=["KOSPI"],
+                             metrics_fn=lambda c, a: _fake_rows_mixed_markets())
+    assert len(rows) == 3
+    assert all(r["market"] == "KOSPI" for r in rows)
+
+
+def test_get_cross_section_markets_none_keeps_all():
+    rows = get_cross_section("CONN", "2025-12-31",
+                             metrics_fn=lambda c, a: _fake_rows_mixed_markets())
+    assert len(rows) == 4
+
+
 # --------------------------------------------------------------------------
 # zscore — select_stocks(단일 기준 zscore) 래핑
 # --------------------------------------------------------------------------
@@ -97,6 +117,31 @@ def test_neutralize_leaves_none_for_missing_field():
             {"stock_code": "2", "sector": "화학", "roe": 10.0}]
     out = neutralize(rows, "roe", by="sector")
     assert {r["stock_code"]: r["roe_neutral"] for r in out}["1"] is None
+
+
+def test_neutralize_zscore_method_normalizes_by_group_std():
+    rows = [
+        {"stock_code": "1", "sector": "화학", "roe": 12.0},
+        {"stock_code": "2", "sector": "화학", "roe": 8.0},
+        {"stock_code": "3", "sector": "금융", "roe": 20.0},
+    ]
+    out = neutralize(rows, "roe", by="sector", method="zscore")
+    by_code = {r["stock_code"]: r for r in out}
+    # 화학: mean=10, std(population)=2 → (12-10)/2=1.0, (8-10)/2=-1.0
+    assert by_code["1"]["roe_neutral"] == pytest.approx(1.0)
+    assert by_code["2"]["roe_neutral"] == pytest.approx(-1.0)
+    # 금융: 그룹 표본 1개 → 표준편차 0 → 정의 불가(None)
+    assert by_code["3"]["roe_neutral"] is None
+
+
+def test_neutralize_demean_default_unaffected_by_zscore_addition():
+    # method 기본값은 여전히 demean이어야 한다(회귀 방지)
+    rows = [{"stock_code": "1", "sector": "화학", "roe": 12.0},
+            {"stock_code": "2", "sector": "화학", "roe": 8.0}]
+    out = neutralize(rows, "roe", by="sector")
+    by_code = {r["stock_code"]: r["roe_neutral"] for r in out}
+    assert by_code["1"] == pytest.approx(2.0)
+    assert by_code["2"] == pytest.approx(-2.0)
 
 
 # --------------------------------------------------------------------------

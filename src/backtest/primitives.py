@@ -26,15 +26,22 @@ from .selection import select_stocks
 # --------------------------------------------------------------------------
 # 1. get_cross_section — metrics_at() 래핑 (횡단면 스냅샷)
 # --------------------------------------------------------------------------
-def get_cross_section(conn, asof, fields=None, metrics_fn: Callable | None = None) -> list[dict]:
+def get_cross_section(
+    conn, asof, fields=None, markets=None, metrics_fn: Callable | None = None
+) -> list[dict]:
     """시점 asof의 유효 지표 행 목록. 기존 metrics_at()를 얇게 래핑한다
     (look-ahead 방지/생존편향 제거/이상치 가드를 그대로 재사용).
 
     fields가 주어지면 그 컬럼만 남긴다(식별자 stock_code/name/sector/market/quarter는 항상 유지).
+    markets가 주어지면 그 시장(예: ["KOSPI"])만 남긴다(run_backtest/select_stocks의 markets
+    파라미터와 동일 이름·의미 — "코스피 전 종목"류 질문에서 시장 필터가 필요한 correlation/
+    quantile_bucket_means/scatter_data 파이프라인이 이 단계에서 바로 걸러낼 수 있게 한다).
     metrics_fn은 테스트 주입용(기본=metrics_at) — SQL은 metrics_at의 바인딩 쿼리를 재사용한다.
     """
     metrics_fn = metrics_fn or metrics_at
     rows = metrics_fn(conn, asof)
+    if markets:
+        rows = [r for r in rows if r.get("market") in markets]
     if fields:
         keep = set(fields) | {"stock_code", "name", "sector", "market", "quarter"}
         rows = [{k: v for k, v in r.items() if k in keep} for r in rows]
@@ -62,12 +69,21 @@ def zscore(rows: list[dict], field: str, direction: str = "high", n: int | None 
 # --------------------------------------------------------------------------
 # 3. neutralize — 그룹(섹터) 내 평균 제거 (섹터중립화)
 # --------------------------------------------------------------------------
-def neutralize(rows: list[dict], field: str, by: str = "sector") -> list[dict]:
-    """섹터(기본) 중립화: 같은 그룹(by) 안에서 field의 평균을 빼 그룹 간 수준차를 제거한다.
+def neutralize(rows: list[dict], field: str, by: str = "sector", method: str = "demean") -> list[dict]:
+    """섹터(기본) 중립화: 같은 그룹(by) 안에서 field의 그룹간 수준차를 제거한다.
+
+    method='demean'(기본, 회귀 유지): 그룹 평균만 뺀다.
+    method='zscore': 그룹 평균을 빼고 그룹 표준편차(모집단, ddof=0)로 나눠 정규화한다 —
+    섹터마다 변동성이 다르면 순수 디민만으로는 섹터 간 비교가 왜곡되므로(변동성 큰 섹터가
+    과대 반영), 실제 섹터중립 포트폴리오 구성에는 이 표준화가 필요하다. 그룹 표본이 1개뿐이면
+    표준편차가 0이라 정규화가 수학적으로 정의되지 않으므로 해당 행은 None을 반환한다
+    (correlation()의 분산=0 처리와 동일 원칙 — 억지로 0을 주지 않음).
 
     각 행에 '{field}_neutral'을 부여해 반환(원 순서/원 필드 유지). select_stocks에는
-    중립화 기능이 없어 여기서만 최소한의 그룹-디민(demean) 로직을 더한다.
+    중립화 기능이 없어 여기서만 최소한의 그룹 통계 로직을 더한다.
     """
+    if method not in ("demean", "zscore"):
+        raise ValueError(f"지원하지 않는 method: {method} (demean|zscore만 가능)")
     groups: dict = {}
     for r in rows:
         v = r.get(field)
@@ -75,12 +91,23 @@ def neutralize(rows: list[dict], field: str, by: str = "sector") -> list[dict]:
             continue
         groups.setdefault(r.get(by), []).append(v)
     means = {g: sum(vs) / len(vs) for g, vs in groups.items()}
+    stds: dict = {}
+    if method == "zscore":
+        import numpy as np
+
+        stds = {g: float(np.asarray(vs, dtype=float).std()) for g, vs in groups.items()}
     out = []
     for r in rows:
         v = r.get(field)
         nr = dict(r)
         g = r.get(by)
-        nr[f"{field}_neutral"] = (v - means[g]) if (v is not None and g in means) else None
+        if v is None or g not in means:
+            nr[f"{field}_neutral"] = None
+        elif method == "demean":
+            nr[f"{field}_neutral"] = v - means[g]
+        else:  # zscore
+            sd = stds[g]
+            nr[f"{field}_neutral"] = ((v - means[g]) / sd) if sd else None
         out.append(nr)
     return out
 
