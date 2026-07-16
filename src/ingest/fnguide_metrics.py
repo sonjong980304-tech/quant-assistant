@@ -107,22 +107,42 @@ def parse_target_chart(snp_target_chart: dict) -> list[dict]:
 
 
 def fetch_snapshot_html(stock_code: str, fetcher: ThrottledFetcher | None = None) -> str:
-    """FnGuide SVD_Main 페이지 HTML을 받아온다(추출은 extract_snapshot_json이 담당)."""
+    """FnGuide SVD_Main 페이지 HTML을 받아온다(추출은 extract_snapshot_json이 담당).
+
+    FnGuide gicode는 6자리 종목코드 앞에 'A'가 붙어야 한다(예: 005930 → A005930).
+    접두사 없이 요청하면 FnGuide가 사실상 빈 응답(50자 안팎, snpFinancial 없음)을
+    줘서 이후 파싱이 전부 실패한다 — stock_code는 DB(company.stock_code) 관례대로
+    접두사 없이 받고, 여기서만 FnGuide 전용 포맷으로 변환한다.
+    """
     fetcher = fetcher or ThrottledFetcher()
-    url = _SVD_MAIN_URL.format(code=stock_code)
+    url = _SVD_MAIN_URL.format(code=f"A{stock_code}")
     return fetcher.get(url).text
 
 
+_FNGUIDE_ACTIVE_MARKETS = ("KOSPI", "KOSDAQ", "KONEX")
+
+
 def ingest_fnguide_metrics(db_path: str | None = None, fetcher: ThrottledFetcher | None = None) -> dict:
-    """company 테이블 전종목의 재무 하이라이트+컨센서스 목표주가를 FnGuide에서 받아
+    """company 테이블 상장종목의 재무 하이라이트+컨센서스 목표주가를 FnGuide에서 받아
     fnguide_metrics에 upsert. 실패 종목은 건너뛰고 Slack 알림만 보낸다(AC11).
+
+    market이 ''(빈값)이거나 '기타'인 종목(상장폐지/비정상 상태)은 대상에서 제외한다 —
+    FnGuide는 현재 상장된 종목의 스냅샷만 서비스하므로 이런 종목은 항상 error2.htm으로
+    리다이렉트돼(빈 응답) 백필을 돌릴 때마다 헛된 요청과 Slack 실패알림만 쌓인다.
     """
     fetcher = fetcher or ThrottledFetcher()
     init_db(db_path)
     conn = connect(db_path)
     collected_at = datetime.now(timezone.utc).isoformat()
     try:
-        codes = [r["stock_code"] for r in conn.execute("SELECT stock_code FROM company").fetchall()]
+        placeholders = ",".join("?" for _ in _FNGUIDE_ACTIVE_MARKETS)
+        codes = [
+            r["stock_code"]
+            for r in conn.execute(
+                f"SELECT stock_code FROM company WHERE market IN ({placeholders})",
+                _FNGUIDE_ACTIVE_MARKETS,
+            ).fetchall()
+        ]
         succeeded = 0
         failed: list[str] = []
         metric_rows = 0

@@ -113,10 +113,13 @@ def test_parse_target_chart_skips_records_with_null_field_value():
 
 
 def test_fetch_snapshot_html_builds_svd_main_url_with_gicode():
+    # FnGuide gicode는 6자리 종목코드 앞에 반드시 'A'가 붙어야 한다(코스닥 등 접두사
+    # 종류가 더 있지만 이 프로젝트가 다루는 KR 상장주는 전부 'A'). 접두사가 없으면
+    # FnGuide가 빈 응답을 줘 지금까지 fnguide_metrics 테이블이 통째로 비어있었다.
     fetcher = FakeFetcher("<html>snapshot.init({});</html>")
     fetch_snapshot_html("005930", fetcher=fetcher)
     assert fetcher.calls == [
-        "https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=005930"
+        "https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A005930"
     ]
 
 
@@ -160,6 +163,34 @@ def test_ingest_fnguide_metrics_upserts_financial_and_target_chart_rows(tmp_path
     assert result["failed"] == []
 
 
+def test_ingest_fnguide_metrics_skips_delisted_market_companies(tmp_path, monkeypatch):
+    # market이 ''(빈값)이거나 '기타'인 종목은 상장폐지/비정상 상태라 FnGuide에 페이지가
+    # 없다(error2.htm 리다이렉트로 항상 실패) — 애초에 요청 목록에서 빼서 헛된 재시도와
+    # Slack 실패알림을 만들지 않는다. KOSPI/KOSDAQ/KONEX만 실제 대상이다.
+    db = str(tmp_path / "fg3.db")
+    init_db(db)
+    conn = connect(db)
+    conn.executemany(
+        "INSERT INTO company(stock_code, name, sector, market) VALUES (?,?,?,?)",
+        [
+            ("005930", "삼성전자", "전기전자", "KOSPI"),
+            ("007800", "솔로몬저축은행", "", ""),
+            ("065160", "라임", "", "기타"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(fnguide_metrics, "send_slack_alert", lambda *a, **kw: None)
+    fetcher = FakeFetcher(_SAMPLE_SNAPSHOT_HTML)
+    result = ingest_fnguide_metrics(db_path=db, fetcher=fetcher)
+
+    assert result["tickers"] == 1  # 삼성전자만 대상
+    assert fetcher.calls == ["https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?pGB=1&gicode=A005930"]
+    assert result["succeeded"] == 1
+    assert result["failed"] == []
+
+
 def test_ingest_fnguide_metrics_skips_failing_ticker_and_alerts(tmp_path, monkeypatch):
     db = str(tmp_path / "fg2.db")
     init_db(db)
@@ -169,7 +200,7 @@ def test_ingest_fnguide_metrics_skips_failing_ticker_and_alerts(tmp_path, monkey
 
     alerts: list[str] = []
     monkeypatch.setattr(fnguide_metrics, "send_slack_alert", lambda msg, **kw: alerts.append(msg))
-    fetcher = FailingFetcher(_SAMPLE_SNAPSHOT_HTML, fail_when="gicode=005930")
+    fetcher = FailingFetcher(_SAMPLE_SNAPSHOT_HTML, fail_when="gicode=A005930")
     result = ingest_fnguide_metrics(db_path=db, fetcher=fetcher)
 
     assert result["failed"] == ["005930"]
