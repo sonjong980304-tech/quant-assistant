@@ -105,9 +105,20 @@ def _resolve_params(params: dict, state: dict) -> dict:
     return resolved
 
 
+def _referenced_out_names(steps: list[dict]) -> set:
+    """모든 step의 params에서 {"$ref": 이름}으로 소비되는 out 이름을 전부 모은다."""
+    refs: set = set()
+    for step in steps:
+        for val in step.get("params", {}).values():
+            if isinstance(val, dict) and set(val.keys()) == {"$ref"}:
+                refs.add(val["$ref"])
+    return refs
+
+
 def _execute_steps(steps: list[dict], conn, ops: dict, max_size: int):
     state: dict = {}
     result = None
+    outs_in_order: list[str] = []
     for step in steps:
         op = step.get("op")
         if op not in ops:  # 고정 dict 조회 (getattr 아님)
@@ -124,6 +135,20 @@ def _execute_steps(steps: list[dict], conn, ops: dict, max_size: int):
         out = step.get("out")
         if out:
             state[out] = result
+            outs_in_order.append(out)
+
+    # "leaf" out = 뒤 단계의 $ref로 한 번도 소비되지 않은 최종 산출물. 하나뿐이면(기존
+    # 모든 단일목적 파이프라인 — run_backtest/compute_ic 등) 그 값을 그대로 반환해
+    # 완전히 하위호환한다. 둘 이상이면(예: correlation+quantile_bucket_means를 각각
+    # 별도 out으로 뽑는 팩터분석 파이프라인) 마지막 단계 것만 남기고 나머지를 조용히
+    # 버리던 실서버 재현 버그를 막기 위해 {out이름: 값} dict로 전부 보존한다.
+    referenced = _referenced_out_names(steps)
+    seen: set = set()
+    leaves = [o for o in outs_in_order if o not in referenced and not (o in seen or seen.add(o))]
+    if len(leaves) >= 2:
+        merged = {name: state[name] for name in leaves}
+        _check_size([merged], max_size)
+        return merged
     return result
 
 

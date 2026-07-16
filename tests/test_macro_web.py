@@ -106,7 +106,7 @@ def test_macro_route_serves_html(client_with_signals):
 # 신규 /api/macro/signal, /api/macro/history가 /api/macro를 가로채지 않는다.
 # --------------------------------------------------------------------------
 def test_existing_api_macro_still_works(monkeypatch):
-    monkeypatch.setattr(webapp, "get_usdkrw_rate", lambda conn: 1350.5)
+    monkeypatch.setattr(webapp, "fetch_usdkrw_rate_live", lambda: 1350.5)
     monkeypatch.setattr(webapp, "_fetch_index_quote",
                         lambda ticker: {"close": 100.0, "change_pct": 1.23})
     monkeypatch.setattr(webapp, "_fetch_krx_index_quote",
@@ -137,7 +137,7 @@ def test_kospi_kosdaq_use_naver_realtime_index_not_yfinance(monkeypatch):
         # US 지수는 여전히 yfinance 경로를 타야 한다(호출되면 그 자체가 증거).
         return {"close": 100.0, "change_pct": 0.0}
 
-    monkeypatch.setattr(webapp, "get_usdkrw_rate", lambda conn: 1490.9)
+    monkeypatch.setattr(webapp, "fetch_usdkrw_rate_live", lambda: 1490.9)
     monkeypatch.setattr(webapp, "_fetch_krx_index_quote", fake_krx)
     monkeypatch.setattr(webapp, "_fetch_index_quote", fake_yf)
 
@@ -172,6 +172,28 @@ def test_fetch_krx_index_quote_parses_naver_comma_formatted_fields(monkeypatch):
     monkeypatch.setattr(webapp.requests, "get", lambda *a, **k: _FakeResp())
     result = webapp._fetch_krx_index_quote("KOSPI")
     assert result == {"close": 6856.83, "change_pct": 0.73}
+
+
+# --------------------------------------------------------------------------
+# 회귀(실사용 버그) — 프론트가 60초마다 /api/macro를 폴링하는데, 환율만 당일 캐시된
+# get_usdkrw_rate()를 쓰고 있어 하루 중 첫 요청 값이 그날 내내 고정돼 "실시간으로
+# 안 바뀐다"는 문제가 재현됐다. fetch_usdkrw_rate_live()로 바꿔 매 요청마다 새로
+# 가져오는지 확인한다(코스피/코스닥/해외지수와 동일한 무캐시 정책).
+# --------------------------------------------------------------------------
+def test_api_macro_usdkrw_refetches_every_request_no_daily_cache(monkeypatch):
+    rates = iter([1500.0, 1501.5])
+    monkeypatch.setattr(webapp, "fetch_usdkrw_rate_live", lambda: next(rates))
+    monkeypatch.setattr(webapp, "_fetch_index_quote",
+                        lambda ticker: {"close": 100.0, "change_pct": 1.23})
+    monkeypatch.setattr(webapp, "_fetch_krx_index_quote",
+                        lambda naver_code: {"close": 200.0, "change_pct": 2.34})
+    client = TestClient(webapp.app)
+
+    first = client.get("/api/macro").json()["usdkrw"]["rate"]
+    second = client.get("/api/macro").json()["usdkrw"]["rate"]
+
+    assert first == 1500.0
+    assert second == 1501.5  # 캐시됐다면 첫 값(1500.0)과 같았을 것
 
 
 def test_macro_routes_are_distinct_and_not_shadowed():

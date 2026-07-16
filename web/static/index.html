@@ -115,6 +115,7 @@
 <body>
 <header>
   <h1>📊 Quant Assistant</h1>
+  <a href="/chat" style="text-decoration:none;background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:8px 14px;border-radius:9px;font-size:13px;font-weight:600">💬 멀티턴 대화 →</a>
   <a href="/macro" style="text-decoration:none;background:var(--panel2);color:var(--text);border:1px solid var(--line);padding:8px 14px;border-radius:9px;font-size:13px;font-weight:600">🚦 매크로 →</a>
   <label class="env" style="display:flex;align-items:center;gap:6px">LLM
     <select id="modelSel" style="background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12.5px"><option>로딩…</option></select>
@@ -419,7 +420,7 @@ function startStreamTree(q){
 // ===== 계층형 총괄 그래프 응답 렌더 (HA-13) =====
 // 응답: {question, routes:[...], domain_results:{도메인:원본dict}, conclusion, uncertain, attempts, reason}
 // (diagCard / evaluation / sql / rows-columns 등 legacy 응답 필드는 신규 아키텍처에 없어 제거됨)
-const DOMAIN_LABELS={kr:'한국주식',us:'미국주식',macro:'매크로',backtest:'백테스트'};
+const DOMAIN_LABELS={kr:'한국주식',us:'미국주식',macro:'매크로',backtest:'백테스트',free_exec:'자유 코드 실행(폴백)'};
 
 // 도메인마다 dict 구조가 조금씩 달라(과설계 방지) 하나의 범용 재귀 렌더러로
 // 원본 데이터를 가공 없이 그대로 병기한다(AC4). 원시값은 fmtCell(조/억·콤마 포맷)로 표시.
@@ -503,13 +504,19 @@ function renderQuery(s){
         <div>시도 <b>${esc(s.attempts)}회</b></div>
       </div>
       <div style="margin:8px 0">라우팅 ${badges}</div>
+      ${s.used_fallback?'<div class="meta" style="margin-bottom:6px">🛠️ 정형 방식이 3회 실패해 AI가 직접 작성한 SQL/Python 코드로 답했습니다(아래 "자유 코드 실행(폴백)" 카드에서 코드와 원본 결과를 확인할 수 있습니다).</div>':''}
       <b>${s.uncertain?'🔎 종합 (불확실)':'🧭 종합 결론'}</b>
       <div style="margin-top:6px;white-space:pre-wrap">${esc(s.conclusion||(s.uncertain?'확실한 결론을 제시할 수 없습니다.':''))}</div>
     </div>`;
   // 차트 요청("그래프/차트/그려줘" 등)일 때만 백엔드가 chart_base64를 채운다 — 있으면 이미지로 표시.
-  const chartHtml = s.chart_base64 ?
-    `<div class="card"><b>📈 ${esc(s.chart_title||'차트')}</b>
-      <img class="qchart" src="data:image/png;base64,${s.chart_base64}" alt="${esc(s.chart_title||'차트')}"></div>` : '';
+  // 산점도+막대그래프처럼 한 질문에서 차트가 여러 개 나올 수 있으면 s.charts(배열)로 온다.
+  // 없으면(단일 차트만 있는 기존 응답) s.chart_base64 하나만 표시(하위호환).
+  const chartList = Array.isArray(s.charts) && s.charts.length ? s.charts
+    : (s.chart_base64 ? [{chart_base64: s.chart_base64, chart_title: s.chart_title}] : []);
+  const chartHtml = chartList.map(c =>
+    `<div class="card"><b>📈 ${esc(c.chart_title||'차트')}</b>
+      <img class="qchart" src="data:image/png;base64,${c.chart_base64}" alt="${esc(c.chart_title||'차트')}"></div>`
+  ).join('');
   const domainsHtml = Object.entries(s.domain_results||{})
     .map(([d,r])=>domainCard(d,r)).join('') || '<div class="card"><div class="meta">도메인 결과가 없습니다.</div></div>';
   document.getElementById('qResult').innerHTML = uncertainHtml + conclusionHtml + chartHtml + domainsHtml;

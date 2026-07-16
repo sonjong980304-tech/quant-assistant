@@ -165,3 +165,53 @@ def render_scatter_chart_base64(
     fig.savefig(buf, format="png", dpi=110)
     plt.close(fig)  # 메모리 누수 방지(라인차트와 동일)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def render_bar_chart_base64(
+    labels: list[str],
+    values: list[float],
+    x_label: str,
+    y_label: str,
+    title: str,
+) -> str:
+    """막대그래프를 그려 순수 base64 PNG 문자열(데이터 URI 접두사 없이)로 반환한다.
+
+    render_line_chart_base64/render_scatter_chart_base64와 동일한 한글폰트 폴백/Agg
+    백엔드/지연 import/plt.close 관례를 그대로 재사용한다. quantile_bucket_means(분위별
+    평균) 같은 "그룹별 단일 값 비교" 결과를 시각화할 때 쓴다.
+
+    Args:
+        labels: 각 막대의 x축 라벨(예: "1분위".."5분위"). values와 길이 동일.
+        values: 각 막대의 높이(음수 가능 — 적자 구간 등).
+        x_label / y_label: 축 라벨(한글 가능). title: 제목(한글 가능).
+
+    Returns:
+        base64.b64encode(png_bytes).decode() 결과 문자열.
+    """
+    import base64
+    import io
+
+    import matplotlib  # 지연 import — 다른 차트 함수와 동일(서버 시작 속도/의존성 격리)
+
+    matplotlib.use("Agg")  # 헤드리스 백엔드
+    _configure_korean_font(matplotlib)
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    x = list(range(len(labels)))
+    ax.bar(x, values, color="#4C72B0")
+    ax.set_xticks(x)
+    # 라벨이 많으면(과밀 방지, 라인차트 x축 관례와 동일) 회전+작은 글씨로 표시.
+    ax.set_xticklabels([str(v) for v in labels], rotation=45 if len(labels) > 8 else 0, ha="right" if len(labels) > 8 else "center", fontsize=8)
+
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.axhline(0, color="black", linewidth=0.8)  # 음수 막대가 섞여도 기준선이 보이게
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110)
+    plt.close(fig)  # 메모리 누수 방지(다른 차트 함수와 동일)
+    return base64.b64encode(buf.getvalue()).decode()

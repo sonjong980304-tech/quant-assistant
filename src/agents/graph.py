@@ -63,6 +63,8 @@ class HierarchicalState(TypedDict, total=False):
     reason: Optional[str]              # 불확실 사유(실패 시)
     chart_base64: Optional[str]        # 차트 요청 시 이미지(PNG base64, 접두사 없음), 아니면 None
     chart_title: Optional[str]         # 차트 제목(차트가 있을 때만)
+    charts: Optional[List[Dict[str, Any]]]  # 차트가 여러 개(산점도+막대그래프 등)면 전부. 없으면 None
+    used_fallback: Optional[bool]      # 정형 검증 3회 실패 후 자유 코드 생성 폴백으로 답했으면 True
 
     # 스트리밍 이벤트 누적(노드 완료 시점마다 append). 여러 노드로 확장돼도 누적되도록 reducer 지정.
     events: Annotated[List[Dict[str, Any]], operator.add]
@@ -121,6 +123,8 @@ def supervisor_node(
         # 차트 요청 시에만 채워지는 필드(그대로 pass-through — web/app.py가 {**result}로 노출).
         "chart_base64": result.get("chart_base64"),
         "chart_title": result.get("chart_title"),
+        "charts": result.get("charts"),
+        "used_fallback": result.get("used_fallback"),
         "events": [event],
     }
 

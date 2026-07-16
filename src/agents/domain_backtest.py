@@ -184,6 +184,11 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
 - {{"pipeline": [{{"op": "이름", "params": {{...}}, "out": "결과이름"}}, ...]}}
 - 앞 단계 결과를 뒤 단계 입력으로 넘길 때 params 값에 {{"$ref": "결과이름"}}을 씁니다.
 - regress/optimize_weights의 시계열/수익률 값이 질문에 숫자로 주어지면 그 숫자를 그대로 넣습니다.
+- 한 파이프라인이 서로 다른 out을 여러 개 만들어도(예: 상관계수+분위별평균+산점도 데이터를
+  각각 별도 단계로) **여러 개의 최종 산출물이 모두 보존**되어 응답에 실립니다 — 뒤 단계의
+  $ref로 한 번도 참조되지 않은 out은 전부 최종 산출물로 취급되므로, 질문이 여러 결과물을
+  요구하면(예: "상관계수 구하고 산점도로, 분위별 평균은 막대그래프로") 주저 없이 필요한
+  단계를 전부 넣으세요. 하나만 골라 나머지를 생략하지 마세요.
 
 [예시]
 Q: 2023년부터 2025년까지 3년간 매 분기 매출성장률이 가장 좋은 20개 종목으로 리밸런싱했을 때 누적수익률을 알려줘
@@ -202,12 +207,14 @@ A: {{"pipeline": [
   {{"op": "winsorize", "params": {{"rows": {{"$ref": "xs"}}, "field": "roe"}}, "out": "xs_w"}},
   {{"op": "combine", "params": {{"rows": {{"$ref": "xs_w"}}, "criteria": [{{"key": "roe_winsorized", "direction": "high", "weight": 1.0}}], "method": "zscore", "n": 20}}, "out": "picked"}}
 ]}}
-Q: PBR과 GPA의 상관관계 구하고, PBR을 5분위수로 나눠서 분위수별 평균 GPA도 보여줘
+Q: PBR과 GPA의 상관관계 구하고 산점도로 보여줘. PBR을 5분위수로 나눠서 분위수별 평균 GPA도 막대그래프로 보여줘
 A: {{"pipeline": [
   {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},
   {{"op": "correlation", "params": {{"rows": {{"$ref": "xs"}}, "field_x": "pbr", "field_y": "gp_a"}}, "out": "corr"}},
-  {{"op": "quantile_bucket_means", "params": {{"rows": {{"$ref": "xs"}}, "bucket_field": "pbr", "value_field": "gp_a", "n": 5}}, "out": "buckets"}}
+  {{"op": "quantile_bucket_means", "params": {{"rows": {{"$ref": "xs"}}, "bucket_field": "pbr", "value_field": "gp_a", "n": 5}}, "out": "buckets"}},
+  {{"op": "scatter_data", "params": {{"rows": {{"$ref": "xs"}}, "x_field": "pbr", "y_field": "gp_a"}}, "out": "scatter"}}
 ]}}
+(상관계수만 묻고 시각화 언급이 없으면 scatter_data/quantile_bucket_means 단계는 질문에 실제로 필요한 것만 넣으세요 — 이 예시는 상관관계+산점도+분위수+막대그래프를 모두 요구한 경우입니다.)
 Q: 이익수익률과 투하자본수익률 산점도 그려줘, 이상치는 빼고
 A: {{"pipeline": [
   {{"op": "get_cross_section", "params": {{"asof": "{today}"}}, "out": "xs"}},

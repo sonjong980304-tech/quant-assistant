@@ -114,6 +114,64 @@ def test_hierarchical_state_declares_chart_fields():
     assert "chart_base64" in keys and "chart_title" in keys
 
 
+# 실서버 재현 버그: pipeline_exec 다중산출물 수정 후 answer_with_verification이
+# 산점도+막대그래프 둘 다 담은 charts(리스트) 필드를 돌려주는데, 이 그래프 노드가
+# chart_base64/chart_title만 골라 통과시키고 charts는 그냥 버려서, 실제 응답(SSE/REST)에
+# 산점도 1개만 보이고 막대그래프는 사라졌다.
+def test_supervisor_node_passes_through_charts_list(monkeypatch):
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {
+            "uncertain": False,
+            "conclusion": "종합결론",
+            "domain_results": {"backtest": {"result": {}}},
+            "attempts": 1,
+            "routes": ["backtest"],
+            "chart_base64": "c2NhdHRlcg==",
+            "chart_title": "산점도",
+            "charts": [
+                {"chart_base64": "c2NhdHRlcg==", "chart_title": "산점도"},
+                {"chart_base64": "YmFy", "chart_title": "막대그래프"},
+            ],
+        }
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "산점도랑 막대그래프 둘 다 그려줘"}, conn=None, llm_fn=None)
+
+    assert out.get("charts") == [
+        {"chart_base64": "c2NhdHRlcg==", "chart_title": "산점도"},
+        {"chart_base64": "YmFy", "chart_title": "막대그래프"},
+    ]
+
+
+def test_hierarchical_state_declares_charts_field():
+    keys = set(HierarchicalState.__annotations__)
+    assert "charts" in keys
+
+
+def test_supervisor_node_passes_through_used_fallback_flag(monkeypatch):
+    """자유 실행 폴백(exec_fallback)이 쓰였는지를 total=False TypedDict가 조용히
+    떨어뜨리지 않고 그래프 상태까지 그대로 전달하는지(과거 charts 필드 누락 회귀와 동일 유형)."""
+    def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
+        return {
+            "uncertain": False,
+            "conclusion": "종합결론(폴백)",
+            "domain_results": {"free_exec": {"fallback_used": True, "result": {}}},
+            "attempts": 3,
+            "routes": ["kr"],
+            "used_fallback": True,
+        }
+
+    monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
+    out = supervisor_node({"question": "코스피 코스닥 각각 상위 10개"}, conn=None, llm_fn=None)
+
+    assert out.get("used_fallback") is True
+
+
+def test_hierarchical_state_declares_used_fallback_field():
+    keys = set(HierarchicalState.__annotations__)
+    assert "used_fallback" in keys
+
+
 def test_supervisor_node_reads_conn_and_llm_from_state(monkeypatch):
     """conn/llm_fn을 명시 인자로 안 넘기면 state에서 읽는다(직접 노드 등록도 지원)."""
     captured: dict = {}

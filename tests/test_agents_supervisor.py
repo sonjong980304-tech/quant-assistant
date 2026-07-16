@@ -97,6 +97,14 @@ def test_route_prompt_mentions_correlation_and_quantile_for_llm_routing():
     assert "상관관계" in prompt or "분위수" in prompt
 
 
+def test_route_question_fallback_without_llm_detects_common_kr_company_nicknames():
+    """실사용 재현: LLM 라우팅이 일시 실패해 휴리스틱으로 폴백했을 때, '코스피'/'삼성' 같은
+    시장 키워드 없이 개별 종목 약칭만 있는 질문("하이닉스 12개월 누적수익률")이 빈 라우팅으로
+    끝나 "질문을 이해하지 못했습니다"가 나오던 버그."""
+    assert "kr" in route_question("하이닉스 12개월 누적수익률 구해줘", None)
+    assert "kr" in route_question("네이버 최근 실적 어때", None)
+
+
 def test_route_question_fallback_returns_empty_for_completely_unrelated_question():
     """휴리스틱 키워드 사전에 전혀 안 걸리는 질문(LLM도 없을 때)은 무조건 ['kr']로
     폴백하지 않고 빈 리스트(unknown)를 반환해야 한다 — 무관한 질문에 한국주식을 억지로
@@ -544,6 +552,97 @@ def test_answer_with_verification_respects_custom_max_retries():
     assert len(verify_calls) == 2
     assert res["attempts"] == 2
     assert res["uncertain"] is True
+
+
+# ── 자유 실행 폴백: 3회 정형 검증 실패 후 마지막 안전망(exec_fallback.run_free_exec_fallback)
+#    으로 escalate — 정형 어휘(스크리닝 criteria/top_n, 파이프라인 연산)의 표현력 한계로
+#    반복 실패하는 질문(예: "시장별로 나눠 각각 상위 N개")을 위한 최후 수단. ──────────────
+
+def test_answer_with_verification_falls_back_to_free_exec_when_retries_exhausted():
+    fallback_calls: list[tuple] = []
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {"attempt": "x"}}
+
+    def always_invalid_verify(question, domain_results, llm_fn):
+        return {"valid": False, "reason": "시장별 분리가 안 됨"}
+
+    def stub_synth(question, domain_results, llm_fn):
+        return f"종합결론(free_exec 포함={'free_exec' in domain_results})"
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        fallback_calls.append((question, conn, llm_fn, last_reason))
+        return {"ok": True, "result": {"KOSPI": ["005930"]}, "sql": "SELECT 1;", "code": "result=1"}
+
+    res = answer_with_verification(
+        "코스피 코스닥 각각 상위 10개", conn="conn", llm_fn="llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=always_invalid_verify, synthesize_fn=stub_synth,
+        fallback_fn=fake_fallback,
+    )
+
+    assert len(fallback_calls) == 1  # 정확히 1회만(재시도 없음 — 최후 수단이므로)
+    assert fallback_calls[0][3] == "시장별 분리가 안 됨"  # last_reason이 그대로 전달됨
+    assert res["uncertain"] is False
+    assert res["used_fallback"] is True
+    assert res["domain_results"]["free_exec"]["result"] == {"KOSPI": ["005930"]}
+    assert res["domain_results"]["free_exec"]["fallback_used"] is True
+    assert "free_exec 포함=True" in res["conclusion"]
+
+
+def test_answer_with_verification_stays_uncertain_when_fallback_also_fails():
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {}}
+
+    def always_invalid_verify(question, domain_results, llm_fn):
+        return {"valid": False, "reason": "실패사유"}
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        return {"ok": False, "result": None, "sql": None, "code": None, "error": "SQL도 못 만듦"}
+
+    res = answer_with_verification(
+        "질문", conn="conn", llm_fn="llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=always_invalid_verify, fallback_fn=fake_fallback,
+    )
+
+    assert res["uncertain"] is True
+    assert res["attempts"] == 3
+    assert "free_exec" not in res["domain_results"]
+    assert "SQL도 못 만듦" in res["reason"]
+
+
+def test_answer_with_verification_does_not_attempt_fallback_when_verification_passes():
+    fallback_calls: list = []
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {"ok": True}}
+
+    def always_valid_verify(question, domain_results, llm_fn):
+        return {"valid": True, "reason": "통과"}
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        fallback_calls.append(1)
+        return {"ok": True, "result": "should not be used"}
+
+    res = answer_with_verification(
+        "질문", conn="conn", llm_fn="llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=always_valid_verify, fallback_fn=fake_fallback,
+    )
+
+    assert fallback_calls == []
+    assert res["uncertain"] is False
+    assert "free_exec" not in res["domain_results"]
 
 
 # ── AC4: 복합 도메인(macro+kr) — 종합결론 + 원본 domain_results 병기 ───────────

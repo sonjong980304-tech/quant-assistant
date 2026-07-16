@@ -10,7 +10,11 @@ from __future__ import annotations
 import base64
 import struct
 
-from src.agents.charting import render_line_chart_base64, render_scatter_chart_base64
+from src.agents.charting import (
+    render_bar_chart_base64,
+    render_line_chart_base64,
+    render_scatter_chart_base64,
+)
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -93,4 +97,31 @@ def test_render_scatter_chart_base64_many_points():
     y = [float(i * 2) for i in range(200)]
     labels = [f"종목{i}" for i in range(200)]
     b64 = render_scatter_chart_base64(x, y, labels, "EY", "ROC", "대량 산점도")
+    _assert_valid_png(b64)
+
+
+# ── 막대그래프(bar) 렌더링 — quantile_bucket_means(분위별 평균) 시각화용. 실서버 재현
+#    버그: "분위별 평균 GPA를 막대그래프로" 요청에 응답할 렌더 함수 자체가 없었다. ──────
+
+def test_render_bar_chart_base64_returns_valid_png_with_korean_labels():
+    """한글 라벨/제목 케이스 — 라인/산점도차트와 동일 폰트 폴백을 재사용해야 한다."""
+    b64 = render_bar_chart_base64(
+        ["1분위", "2분위", "3분위", "4분위", "5분위"],
+        [12.06, 15.82, 15.90, 17.52, 19.31],
+        "PBR 분위", "평균 GPA(%)", "PBR 분위수별 평균 GPA",
+    )
+    _assert_valid_png(b64)
+
+
+def test_render_bar_chart_base64_handles_negative_values():
+    """평균값이 음수(적자 구간 등)여도 예외 없이 유효 PNG."""
+    b64 = render_bar_chart_base64(["1분위", "2분위"], [-3.5, 4.2], "분위", "값", "제목")
+    _assert_valid_png(b64)
+
+
+def test_render_bar_chart_base64_many_bars_limits_xticks():
+    """막대가 많아도(라벨 과밀 방지) 예외 없이 유효 PNG."""
+    labels = [f"그룹{i}" for i in range(30)]
+    values = [float(i) for i in range(30)]
+    b64 = render_bar_chart_base64(labels, values, "그룹", "값", "대량 막대그래프")
     _assert_valid_png(b64)

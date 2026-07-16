@@ -353,6 +353,165 @@ def test_answer_with_verification_uncertain_has_no_chart():
     assert res.get("chart_base64") is None
 
 
+# ── 다중 산출물 파이프라인(pipeline_exec 수정 후 backtest.result가 {out이름: 값} dict인
+#    경우) 안에 중첩된 산점도/막대그래프 데이터도 인식해야 한다. 실서버 재현 버그:
+#    "PBR-GPA 상관관계 구하고 산점도로, 분위별 평균은 막대그래프로" 같은 질문이
+#    correlation+quantile_bucket_means+scatter_data 3개를 한 파이프라인으로 뽑는데,
+#    예전엔(pipeline_exec 버그로) 마지막 산출물 하나만 남았고, 설령 다 남아도 이 함수들이
+#    result를 "그 자체가 scatter/bucket 모양"인지만 봐서 중첩된 경우를 못 찾았다. ──────
+
+def test_extract_scatter_data_finds_scatter_nested_in_multi_output_dict():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {
+            "blocked": False,
+            "result": {
+                "corr": {"correlation": 0.42, "n": 655},
+                "buckets": [{"bucket": 1, "count": 10, "bucket_range": [0.0, 1.0], "mean_value": 5.0}],
+                "scatter": {
+                    "x": [5.0, 8.0], "y": [12.0, 20.0], "labels": ["가", "나"],
+                    "x_field": "pbr", "y_field": "gp_a",
+                },
+            },
+        }
+    }
+    out = sup._extract_scatter_data(domain_results)
+    assert out is not None
+    x, y, labels, x_label, y_label, title = out
+    assert x == [5.0, 8.0] and y == [12.0, 20.0]
+    assert x_label == "pbr" and y_label == "gp_a"
+
+
+# ── _extract_bar_data — quantile_bucket_means 결과(분위별 평균)를 막대그래프로 인식 ──
+
+def test_extract_bar_data_recognizes_quantile_buckets_directly():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"blocked": False, "result": [
+            {"bucket": 1, "count": 131, "bucket_range": [0.02, 0.37], "mean_value": 12.06},
+            {"bucket": 2, "count": 131, "bucket_range": [0.37, 0.55], "mean_value": 15.82},
+        ]}
+    }
+    out = sup._extract_bar_data(domain_results)
+    assert out is not None
+    labels, values, x_label, y_label, title = out
+    assert labels == ["1분위", "2분위"]
+    assert values == [12.06, 15.82]
+
+
+def test_extract_bar_data_finds_buckets_nested_in_multi_output_dict():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"blocked": False, "result": {
+            "corr": {"correlation": 0.42, "n": 655},
+            "buckets": [
+                {"bucket": 1, "count": 10, "bucket_range": [0.0, 1.0], "mean_value": 5.0},
+                {"bucket": 2, "count": 10, "bucket_range": [1.0, 2.0], "mean_value": 8.0},
+            ],
+        }}
+    }
+    out = sup._extract_bar_data(domain_results)
+    assert out is not None
+    labels, values, x_label, y_label, title = out
+    assert labels == ["1분위", "2분위"]
+    assert values == [5.0, 8.0]
+
+
+def test_extract_bar_data_does_not_false_positive_on_screening_rows():
+    """일반 스크리닝 결과(종목 리스트)는 분위 버킷 모양이 아니므로 None(오탐 방지)."""
+    import src.agents.supervisor as sup
+
+    domain_results = {"kr": {"intent": "screening", "result": [
+        {"stock_code": "005930", "name": "삼성전자", "pbr": 1.2},
+    ]}}
+    assert sup._extract_bar_data(domain_results) is None
+
+
+def test_extract_bar_data_none_when_blocked():
+    import src.agents.supervisor as sup
+
+    domain_results = {"backtest": {"blocked": True, "result": [
+        {"bucket": 1, "count": 1, "bucket_range": [0.0, 1.0], "mean_value": 1.0},
+    ]}}
+    assert sup._extract_bar_data(domain_results) is None
+
+
+# ── _build_charts — 산점도+막대그래프가 동시에 있으면 둘 다 렌더(질문당 차트 여러 개 가능) ──
+
+def test_build_charts_returns_both_scatter_and_bar_when_both_present():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"result": {
+            "corr": {"correlation": 0.9, "n": 5},
+            "buckets": [
+                {"bucket": 1, "count": 1, "bucket_range": [0.0, 1.0], "mean_value": 5.0},
+                {"bucket": 2, "count": 1, "bucket_range": [1.0, 2.0], "mean_value": 8.0},
+            ],
+            "scatter": {
+                "x": [1.0, 2.0], "y": [3.0, 4.0], "labels": None,
+                "x_field": "pbr", "y_field": "gp_a",
+            },
+        }}
+    }
+    charts = sup._build_charts(domain_results, conn=None)
+    assert len(charts) == 2
+    for chart_base64, title in charts:
+        assert base64.b64decode(chart_base64)[:8] == _PNG_MAGIC
+    titles = [t for _, t in charts]
+    assert any("산점도" in t for t in titles)
+    assert any("분위" in t or "막대" in t for t in titles)
+
+
+def test_build_charts_falls_back_to_single_line_chart():
+    """산점도/막대 데이터가 없으면 기존처럼 라인차트 1개만(회귀 없음)."""
+    import src.agents.supervisor as sup
+
+    domain_results = {"backtest": {"result": {"dates": ["a", "b"], "navs": [1.0, 1.1]}}}
+    charts = sup._build_charts(domain_results, conn=None)
+    assert len(charts) == 1
+    assert "백테스트" in charts[0][1]
+
+
+def test_build_charts_empty_when_nothing_to_draw():
+    import src.agents.supervisor as sup
+
+    assert sup._build_charts({}, conn=None) == []
+
+
+def test_answer_with_verification_exposes_charts_list_for_multi_output():
+    """scatter+bar 둘 다 있으면 res['charts']에 둘 다, res['chart_base64']는 첫번째(하위호환)."""
+    from src.agents.supervisor import answer_with_verification
+
+    bt = {"result": {
+        "corr": {"correlation": 0.9, "n": 5},
+        "buckets": [
+            {"bucket": 1, "count": 1, "bucket_range": [0.0, 1.0], "mean_value": 5.0},
+            {"bucket": 2, "count": 1, "bucket_range": [1.0, 2.0], "mean_value": 8.0},
+        ],
+        "scatter": {"x": [1.0, 2.0], "y": [3.0, 4.0], "labels": None, "x_field": "pbr", "y_field": "gp_a"},
+    }}
+
+    def stub_route(question, llm_fn):
+        return ["backtest"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"backtest": bt}
+
+    res = answer_with_verification(
+        "PBR과 GPA 상관관계 산점도로 그려주고 분위별 평균도 막대그래프로 보여줘",
+        conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+    )
+    assert res.get("chart_base64")  # 하위호환 — 기존 소비자는 여전히 단일 차트로 읽을 수 있음
+    assert isinstance(res.get("charts"), list)
+    assert len(res["charts"]) == 2
+    assert res["charts"][0]["chart_base64"] == res["chart_base64"]
+
+
 def test_answer_with_verification_no_chart_when_no_series_data():
     """차트 키워드는 있으나 그릴 시계열이 없으면(스크리닝 등) 차트 없이 텍스트 응답만."""
     def stub_route(question, llm_fn):

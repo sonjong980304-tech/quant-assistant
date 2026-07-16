@@ -40,13 +40,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from src.agents.conversation import get_history, get_or_create_session, get_session, reset_session, run_turn, turn_to_csv
 from src.agents.domain_backtest import answer_backtest_question
 from src.agents.domain_kr import answer_kr_screening
 from src.agents.domain_us import answer_us_screening
 from src.agents.graph import run_hierarchical, run_streaming
 from src.config import CONFIG
 from src.db import connect, connect_readonly
-from src.ingest.exchange_rate import get_usdkrw_rate
+from src.ingest.exchange_rate import fetch_usdkrw_rate_live
 from src.wiki.store import WikiStore
 
 app = FastAPI(title="Quant Assistant")
@@ -95,6 +96,16 @@ class WikiUpdate(BaseModel):
     sql: Optional[str] = None
     verified: Optional[bool] = None
     tags: Optional[str] = None
+
+
+class ChatReq(BaseModel):
+    session_id: Optional[str] = None
+    question: str
+    model: Optional[str] = None
+
+
+class ChatResetReq(BaseModel):
+    session_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +210,128 @@ def api_query_rerun(req: RerunReq):
     finally:
         conn.close()
     return result
+
+
+# ---------------------------------------------------------------------------
+# 멀티턴 대화 (.omc/specs/brainstorming-multiturn-conversation.md, MT-6)
+# 세션은 src.agents.conversation의 프로세스 메모리 저장소에만 존재한다(서버 재시작 시
+# 소실 — 설계상 허용, AC8). run_turn이 세션에 데이터가 없으면 신규(SQL+Python), 있으면
+# 이어가기(Python만)로 자동 분기하므로 여기서는 얇게 배선만 한다.
+# ---------------------------------------------------------------------------
+@app.post("/api/chat")
+def api_chat(req: ChatReq):
+    """멀티턴 대화 턴 실행. conn은 요청마다 새 읽기전용 연결(신규 턴에서만 실제 SQL 실행)."""
+    if not req.question.strip():
+        raise HTTPException(400, "질문이 비어 있습니다.")
+    session = get_or_create_session(req.session_id)
+    conn = connect_readonly()
+    try:
+        llm_fn = _build_llm_fn(req.model)
+        turn = run_turn(session, req.question, conn, llm_fn)
+    except Exception as exc:  # noqa: BLE001 — 원인을 감추지 않고 그대로 500으로 노출(api_query와 동일 관례)
+        raise HTTPException(500, f"멀티턴 턴 실행 실패: {type(exc).__name__}: {exc}") from exc
+    finally:
+        conn.close()
+    return {
+        "session_id": session.session_id,
+        "status": turn.status,
+        "answer": turn.answer,
+        "error": turn.error,
+        "sql": turn.sql,
+        "code": turn.code,
+    }
+
+
+@app.post("/api/chat/reset")
+def api_chat_reset(req: ChatResetReq):
+    """대화 초기화 — 누적 맥락(메모리 데이터)을 폐기하고 새 세션 상태로 되돌린다(AC7)."""
+    reset_session(req.session_id)
+    return {"session_id": req.session_id, "reset": True}
+
+
+@app.get("/api/chat/history")
+def api_chat_history(session_id: str):
+    """턴별 질문/답변 + CSV 재다운로드 가능여부(AC9-AC10). 모르는 session_id는 빈 이력."""
+    session = get_session(session_id)
+    if session is None:
+        return {"session_id": session_id, "turns": []}
+    return {"session_id": session_id, "turns": get_history(session)}
+
+
+@app.get("/api/chat/csv")
+def api_chat_csv(session_id: str, turn_index: int):
+    """턴의 최종 데이터를 CSV로 다운로드. 세션이 메모리에서 사라졌으면(재시작 등) 404 —
+    이것이 "서버 재시작 후 CSV 재다운로드 불가"(AC10)의 실제 동작 근거다."""
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "세션을 찾을 수 없습니다(서버 재시작 등으로 소실됐을 수 있습니다).")
+    try:
+        csv_text = turn_to_csv(session, turn_index)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return StreamingResponse(
+        iter([csv_text]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=turn_{turn_index}.csv"},
+    )
+
+
+def _chat_event_stream(session_id: Optional[str], question: str, model: Optional[str]):
+    """run_turn의 on_progress 콜백을 SSE 프레임으로 흘려보낸다(AC13).
+
+    run_turn 자체는 동기 함수라, 별도 스레드에서 실행하며 진행 메시지를 큐에 쌓고
+    이 제너레이터가 그 큐를 순서대로 소비해 SSE로 방출한다(_sse_message 프레이밍 재사용).
+    스레드 안에서 connect_readonly()로 자체 연결을 새로 여므로 스레드 간 커넥션 공유가
+    없다(sqlite3 기본 스레드 제약 회피). exec_fallback.py 자체는 건드리지 않으므로 신규
+    턴(SQL+Python)은 굵은 단위로, 이어가기(conversation.py 자체 구현)는 시도별로 세밀하게
+    보고된다 — src/agents/conversation.py의 on_progress 참고.
+    """
+    import queue
+    import threading
+
+    session = get_or_create_session(session_id)
+    q: queue.Queue = queue.Queue()
+
+    def worker():
+        conn = None
+        try:
+            conn = connect_readonly()
+            llm_fn = _build_llm_fn(model)
+            turn = run_turn(session, question, conn, llm_fn, on_progress=lambda msg: q.put({"step": msg}))
+            q.put({"_done": True, "status": turn.status, "answer": turn.answer, "error": turn.error,
+                   "sql": turn.sql, "code": turn.code})
+        except Exception as exc:  # noqa: BLE001 — 스트림 도중 실패를 클라이언트에 명시적으로 알림
+            q.put({"_fail": True, "message": str(exc)})
+        finally:
+            if conn is not None:
+                conn.close()
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    yield _sse_message({"step": f"세션 {session.session_id} — 처리 시작"})
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        if item.pop("_done", False):
+            yield f"event: done\ndata: {json.dumps({**item, 'session_id': session.session_id}, ensure_ascii=False)}\n\n"
+        elif item.pop("_fail", False):
+            yield f"event: fail\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+        else:
+            yield _sse_message(item)
+
+
+@app.get("/api/chat/stream")
+def api_chat_stream(question: str, session_id: Optional[str] = None, model: Optional[str] = None):
+    """멀티턴 대화 턴을 SSE로 스트리밍 실행 — 진행 이벤트가 도착하는 즉시 방출된다(AC13)."""
+    if not question.strip():
+        raise HTTPException(400, "질문이 비어 있습니다.")
+    return StreamingResponse(
+        _chat_event_stream(session_id, question, model),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -403,14 +536,10 @@ def api_macro():
 
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    conn = connect()
     try:
-        try:
-            usdkrw: dict = {"rate": get_usdkrw_rate(conn)}
-        except Exception as exc:  # noqa: BLE001 — 환율 실패해도 나머지는 계속 응답
-            usdkrw = {"error": str(exc)}
-    finally:
-        conn.close()
+        usdkrw: dict = {"rate": fetch_usdkrw_rate_live()}
+    except Exception as exc:  # noqa: BLE001 — 환율 실패해도 나머지는 계속 응답
+        usdkrw = {"error": str(exc)}
 
     indices = []
     for item in _MACRO_INDICES:
@@ -585,6 +714,19 @@ def api_backtest_runs():
 # ---------------------------------------------------------------------------
 @app.get("/")
 def index():
+    """기본 화면 — 멀티턴 대화(chat.html). 기존 단발성 질의 화면은 /query로 이동했다."""
+    return FileResponse(STATIC_DIR / "chat.html")
+
+
+@app.get("/chat")
+def chat_page():
+    """멀티턴 대화 화면 — /의 별칭(북마크·기존 링크 호환용, 내용은 동일)."""
+    return FileResponse(STATIC_DIR / "chat.html")
+
+
+@app.get("/query")
+def query_page():
+    """기존 단발성 질의 화면(지표 조회 등, index.html) — 기본 화면 자리를 /에 내주고 이 경로로 이동."""
     return FileResponse(STATIC_DIR / "index.html")
 
 

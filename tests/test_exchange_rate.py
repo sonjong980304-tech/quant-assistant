@@ -9,7 +9,11 @@ from __future__ import annotations
 from datetime import date
 
 from src.db import connect, get_meta, init_db
-from src.ingest.exchange_rate import get_usdkrw_rate, parse_naver_rate_response
+from src.ingest.exchange_rate import (
+    fetch_usdkrw_rate_live,
+    get_usdkrw_rate,
+    parse_naver_rate_response,
+)
 
 
 def test_parse_naver_rate_response_extracts_latest_close_price():
@@ -62,3 +66,30 @@ def test_get_usdkrw_rate_refetches_on_new_day(tmp_path):
 
     assert rate == 1510.0
     assert get_meta(conn, "usdkrw_rate_date") == "2026-07-13"
+
+
+# --------------------------------------------------------------------------
+# fetch_usdkrw_rate_live — /api/macro 실시간 티커 전용, 당일 캐시를 쓰지 않는다.
+# 프론트가 60초마다 폴링하는데 get_usdkrw_rate()의 당일 캐시를 그대로 쓰면 하루 중
+# 첫 요청 값이 그날 내내 고정돼버려 "실시간으로 안 바뀐다"는 버그가 났다(실사용 재현).
+# --------------------------------------------------------------------------
+def test_fetch_usdkrw_rate_live_refetches_every_call_no_cache():
+    calls = {"n": 0}
+
+    def fetch_fn():
+        calls["n"] += 1
+        return 1500.0 + calls["n"]
+
+    first = fetch_usdkrw_rate_live(fetch_fn=fetch_fn)
+    second = fetch_usdkrw_rate_live(fetch_fn=fetch_fn)
+
+    assert first == 1501.0
+    assert second == 1502.0  # 캐시됐다면 첫 값(1501.0)과 같았을 것
+    assert calls["n"] == 2
+
+
+def test_fetch_usdkrw_rate_live_defaults_to_naver_fetch(monkeypatch):
+    import src.ingest.exchange_rate as mod
+
+    monkeypatch.setattr(mod, "_fetch_usdkrw_rate", lambda: 1490.9)
+    assert fetch_usdkrw_rate_live() == 1490.9

@@ -242,6 +242,38 @@ def test_answer_kr_screening_matched_sector_filters_correctly():
     assert [r["name"] for r in result["result"]] == ["저PER가", "중간나"]  # 화학(고PER다) 제외
 
 
+# ── answer_kr_screening: sector가 없는(None/누락) 종목은 "기타"로 채워서 반환한다
+#    (실사용에서 발견: KRX 미분류 종목이 sector=None으로 나와 업종 필터/집계에서
+#    조용히 누락됨) ────────────────────────────────────────────────────────────
+def _fake_rows_with_missing_sector(_conn, _asof):
+    return [
+        {"stock_code": "A", "name": "저PER가", "sector": "반도체", "market": "KOSPI", "per": 5.0, "roe": 8.0},
+        {"stock_code": "N", "name": "섹터없다", "sector": None, "market": "KOSPI", "per": 1.0, "roe": 1.0},
+    ]
+
+
+def test_answer_kr_screening_missing_sector_defaults_to_gita():
+    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 2})
+    result = answer_kr_screening(
+        "PER이 가장 낮은 2개 회사", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows_with_missing_sector, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    by_code = {r["stock_code"]: r for r in result["result"]}
+    assert by_code["N"]["sector"] == "기타"
+    assert by_code["A"]["sector"] == "반도체"  # 기존 값이 있는 행은 그대로
+
+
+def test_answer_kr_screening_gita_sector_is_filterable_like_any_other():
+    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 5, "sectors": ["기타"]})
+    result = answer_kr_screening(
+        "기타 업종에서 PER 낮은 5개", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows_with_missing_sector, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    assert [r["stock_code"] for r in result["result"]] == ["N"]
+
+
 def test_screening_prompt_includes_valid_sector_list_when_available():
     seen_prompts = []
 

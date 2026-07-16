@@ -942,3 +942,141 @@ def test_resolve_computed_metric_estimated_is_none_without_companion_field():
     )
     assert result["value"] == 20.0
     assert result["estimated"] is None
+
+
+# ── 실서버 재현 버그: 마법공식(EY/ROC)/GPA는 스크리닝에서만 인식되고 단일종목
+#    질문("삼성전자 투하자본수익률")에서는 _extract_metric이 지표명을 못 찾아 매번
+#    "재무 지표를 인식하지 못함"으로 결정론적으로 실패했다(_SCREEN_METRIC_ALIASES에
+#    roc/earnings_yield/gp_a 한국어 별칭이 등록 안 됨). ──────────────────────────
+def test_answer_kr_question_recognizes_roc_single_stock(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+
+    def fake_cross_section(conn, asof):
+        return [{"stock_code": "005930", "roc": 13.0, "roc_estimated": True}]
+
+    try:
+        result = answer_kr_question(
+            "삼성전자 투하자본수익률 알려줘", conn,
+            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
+                conn, code, metric, cross_section_fn=fake_cross_section,
+                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-07-15"}]},
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert "재무 지표를 인식하지 못함" not in result["errors"]
+    assert result["financial"]["value"] == 13.0
+    assert result["financial"]["estimated"] is True
+
+
+def test_answer_kr_question_recognizes_earnings_yield_single_stock(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+
+    def fake_cross_section(conn, asof):
+        return [{"stock_code": "005930", "earnings_yield": 8.5}]
+
+    try:
+        result = answer_kr_question(
+            "삼성전자 이익수익률 알려줘", conn,
+            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
+                conn, code, metric, cross_section_fn=fake_cross_section,
+                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-07-15"}]},
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert "재무 지표를 인식하지 못함" not in result["errors"]
+    assert result["financial"]["value"] == 8.5
+
+
+# ── 실서버 재현 버그: "삼성전자 25년 투하자본수익률"처럼 연도가 명시된 계산지표
+#    질문이 항상 오늘 날짜(최신 거래일) 기준으로만 계산돼 검증에서 결정론적으로
+#    탈락했다(질문 연도와 결과 period가 안 맞음). resolve_metric(기존 DART 재무지표)
+#    경로는 이미 period를 반영하는데, computed_metric_fn(roc/ey/gp_a/return_12m) 경로는
+#    period를 아예 안 넘기고 있었다. ──────────────────────────────────────────
+
+def test_resolve_computed_metric_uses_explicit_asof_when_given():
+    fake_execute_sql = lambda sql, conn: {"ok": True, "rows": [{"d": "2026-07-16"}]}
+    calls: list = []
+
+    def fake_cross_section(conn, asof):
+        calls.append(asof)
+        return [{"stock_code": "005930", "roc": 13.0}]
+
+    result = resolve_computed_metric(
+        None, "005930", "roc", asof="2025-12-30",
+        execute_sql_fn=fake_execute_sql, cross_section_fn=fake_cross_section,
+    )
+    assert calls == ["2025-12-30"]  # _default_screening_asof(오늘)이 아니라 명시값 사용
+    assert result["period"] == "2025-12-30"
+    assert result["value"] == 13.0
+
+
+def test_resolve_computed_metric_falls_back_to_default_asof_when_not_given():
+    """asof 생략(기존 호출부 하위호환) — 기존처럼 최신 거래일로 폴백."""
+    fake_execute_sql = lambda sql, conn: {"ok": True, "rows": [{"d": "2026-07-16"}]}
+    fake_cross_section = lambda conn, asof: [{"stock_code": "005930", "roc": 13.0}]
+
+    result = resolve_computed_metric(
+        None, "005930", "roc",
+        execute_sql_fn=fake_execute_sql, cross_section_fn=fake_cross_section,
+    )
+    assert result["period"] == "2026-07-16"
+
+
+def test_answer_kr_question_passes_explicit_year_to_computed_metric(tmp_path):
+    """'삼성전자 25년 투하자본수익률' — 질문의 2025년이 computed_metric_fn의 asof로 전달돼야
+    한다(오늘 날짜로 계산해 질문 연도와 안 맞다고 검증 실패하는 결정론적 버그 재현 방지)."""
+    db = _seed_two_companies(tmp_path)
+    # _seed_two_companies는 2026-07-15 가격만 시드하므로, "25년" 질문이 실제로 2025년
+    # 이하 최신 거래일을 찾을 수 있도록 2025-12-30 가격을 추가로 시드한다.
+    seed_conn = connect(db)
+    seed_conn.execute(
+        "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
+        ("005930", "2025-12-30", 65000.0, 3.9e14),
+    )
+    seed_conn.commit()
+    seed_conn.close()
+    conn = connect_readonly(db)
+    seen_asof: list = []
+
+    def spy_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        seen_asof.append(asof)
+        return {"stock_code": code, "metric": metric, "value": 22.65,
+                "source": "computed", "period": asof, "estimated": True}
+
+    try:
+        result = answer_kr_question(
+            "삼성전자 25년 투하자본수익률", conn, computed_metric_fn=spy_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    assert seen_asof == ["2025-12-30"]  # 2025년 말일 이하 최신 거래일로 확정돼야 함
+    assert result["financial"]["period"] == "2025-12-30"
+
+
+def test_answer_kr_question_recognizes_gpa_single_stock(tmp_path):
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+
+    def fake_cross_section(conn, asof):
+        return [{"stock_code": "005930", "gp_a": 21.0}]
+
+    try:
+        result = answer_kr_question(
+            "삼성전자 GPA 알려줘", conn,
+            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
+                conn, code, metric, cross_section_fn=fake_cross_section,
+                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-07-15"}]},
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert "재무 지표를 인식하지 못함" not in result["errors"]
+    assert result["financial"]["value"] == 21.0

@@ -165,6 +165,62 @@ def test_run_pipeline_with_real_regress_primitive():
     assert res["slope"] == pytest.approx(1.0, abs=0.2)
 
 
+# --------------------------------------------------------------------------
+# 다중 산출물 파이프라인 (실서버 재현 버그: correlation+quantile_bucket_means+
+# scatter_data처럼 서로 다른 3개 산출물을 만드는 파이프라인이 마지막 단계
+# 결과 하나만 남기고 나머지를 조용히 버려서, "상관계수를 구해줘"라고 했는데
+# 상관계수가 최종 응답에서 사라지는 문제가 있었다. $ref로 뒤 단계에 소비되지
+# "않는"(=leaf) out이 2개 이상이면 {out이름: 값} dict로 전부 보존해야 한다.
+# leaf가 1개뿐인 기존 모든 파이프라인(run_backtest 등)은 그 값 그대로 반환해
+# 완전히 하위호환(회귀 없음).
+# --------------------------------------------------------------------------
+def test_run_pipeline_returns_dict_of_all_leaf_outputs_when_multiple():
+    ops = {
+        "source": lambda: [1, 2, 3, 4],
+        "sum_all": lambda x: sum(x),
+        "max_all": lambda x: max(x),
+    }
+    steps = [
+        {"op": "source", "params": {}, "out": "xs"},
+        {"op": "sum_all", "params": {"x": {"$ref": "xs"}}, "out": "total"},
+        {"op": "max_all", "params": {"x": {"$ref": "xs"}}, "out": "peak"},
+    ]
+    res = run_pipeline(steps, ops=ops)
+    # xs는 total/peak 둘 다에 $ref로 소비되므로 leaf가 아니다 → 최종 dict에 안 실림.
+    assert res == {"total": 10, "peak": 4}
+
+
+def test_run_pipeline_single_leaf_still_returns_bare_value_not_dict():
+    """leaf가 1개면(기존 모든 단일목적 파이프라인) 예전처럼 dict로 안 감싸고 값 그대로."""
+    ops = {"double": lambda x: [v * 2 for v in x], "sum_all": lambda x: sum(x)}
+    steps = [
+        {"op": "double", "params": {"x": [1, 2, 3]}, "out": "d"},
+        {"op": "sum_all", "params": {"x": {"$ref": "d"}}, "out": "total"},
+    ]
+    assert run_pipeline(steps, ops=ops) == 12  # dict가 아니라 스칼라 그대로(회귀 없음)
+
+
+def test_run_pipeline_correlation_and_quantile_bucket_means_both_survive():
+    """실서버 재현 버그의 실제 패턴: 같은 rows에서 correlation과 quantile_bucket_means를
+    각각 별도 out으로 뽑는 파이프라인 — 예전엔 quantile_bucket_means(마지막 단계)만 남고
+    correlation은 사라졌다."""
+    rows = [
+        {"pbr": 0.5, "gp_a": 10.0}, {"pbr": 1.0, "gp_a": 20.0},
+        {"pbr": 1.5, "gp_a": 25.0}, {"pbr": 2.0, "gp_a": 35.0},
+        {"pbr": 2.5, "gp_a": 40.0},
+    ]
+    steps = [
+        {"op": "correlation", "params": {"rows": rows, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+        {"op": "quantile_bucket_means", "params": {
+            "rows": rows, "bucket_field": "pbr", "value_field": "gp_a", "n": 5,
+        }, "out": "buckets"},
+    ]
+    res = run_pipeline(steps)
+    assert set(res.keys()) == {"corr", "buckets"}
+    assert res["corr"]["correlation"] == pytest.approx(1.0, abs=0.01)
+    assert len(res["buckets"]) == 5
+
+
 def test_run_pipeline_chains_winsorize_into_combine():
     """LLM이 실제로 만들 법한 조립: winsorize로 극단치를 누른 뒤 그 필드로 combine."""
     rows = [

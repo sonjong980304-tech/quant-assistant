@@ -37,13 +37,18 @@ import re
 from datetime import date
 from typing import Callable
 
-from src.agents.charting import render_line_chart_base64, render_scatter_chart_base64
+from src.agents.charting import (
+    render_bar_chart_base64,
+    render_line_chart_base64,
+    render_scatter_chart_base64,
+)
 from src.agents.data_price_kr import get_price_history_kr
 from src.agents.data_price_us import get_price_history_us
 from src.agents.domain_backtest import answer_backtest_question
 from src.agents.domain_kr import answer_kr_question
 from src.agents.domain_macro import answer_macro_question, get_macro_history
 from src.agents.domain_us import answer_us_question
+from src.agents.exec_fallback import run_free_exec_fallback
 from src.llm import extract_json
 
 # 정규 도메인 순서 — LLM 응답의 순서/중복과 무관하게 항상 이 순서로 정렬해 결정론을 보장한다.
@@ -66,7 +71,10 @@ _ROUTE_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
     "macro": ("매크로", "금리차", "스프레드", "장단기", "공포탐욕", "vix", "레짐", "매크로 신호"),
     "us": ("애플", "apple", "미국", "나스닥", "s&p", "테슬라", "엔비디아", "aapl", "tsla", "nvda"),
-    "kr": ("삼성", "코스피", "코스닥", "국내", "한국주식"),
+    # "삼성" 외 국내 시가총액 상위 종목의 흔한 약칭도 넣는다 — LLM 라우팅(_route_prompt)이
+    # 일시적으로 실패해 이 휴리스틱으로 폴백했을 때 "하이닉스 12개월 수익률"처럼 시장 자체를
+    # 언급하지 않는 개별 종목 질문이 라우팅되지 않던 실사용 버그 재현.
+    "kr": ("삼성", "코스피", "코스닥", "국내", "한국주식", "하이닉스", "네이버", "카카오", "포스코", "현대차", "기아"),
 }
 
 # 차트 요청 감지용 키워드(_ROUTE_KEYWORDS와 동일 스타일의 부분일치). 명시적으로 그래프/
@@ -219,57 +227,129 @@ def _extract_chart_data(domain_results: dict, conn) -> tuple[list, dict, str] | 
     return None
 
 
-def _extract_scatter_data(domain_results: dict) -> tuple[list, list, list | None, str, str, str] | None:
-    """domain_results에서 산점도로 그릴 데이터를 고른다(백테스트 scatter_data 프리미티브 결과).
+def _is_scatter_shape(res) -> bool:
+    return (
+        isinstance(res, dict)
+        and res.get("x") and res.get("y")
+        and "x_field" in res and "y_field" in res
+    )
 
-    반환: (x, y, labels, x_label, y_label, title). 백테스트 파이프라인이 scatter_data
-    프리미티브로 끝나면 result가 {"x":[...],"y":[...],"labels":[...],"x_field":..,"y_field":..}
-    형태이며, 이를 인식해 산점도 스펙으로 변환한다. 산점도 데이터가 없으면(기존 시계열 백테스트
-    등) None을 반환해 _build_chart가 기존 라인차트 경로로 폴백한다(기존 3케이스 동작 불변).
+
+def _is_quantile_bucket_shape(res) -> bool:
+    """quantile_bucket_means() 반환 모양([{"bucket","count","bucket_range","mean_value"}, ...])인지.
+
+    일반 스크리닝 결과(종목 리스트)도 list-of-dict라 오탐 위험이 있으므로, 반드시 이 4개
+    키를 모두 가진 dict로만 구성된 리스트일 때만 인정한다(종목 dict엔 이 조합이 없다).
+    """
+    return (
+        isinstance(res, list) and len(res) > 0
+        and all(
+            isinstance(r, dict) and {"bucket", "count", "bucket_range", "mean_value"} <= r.keys()
+            for r in res
+        )
+    )
+
+
+def _find_in_backtest_result(domain_results: dict, matcher: Callable[[object], bool]):
+    """domain_results['backtest']['result']에서 matcher를 만족하는 값을 찾는다.
+
+    pipeline_exec의 다중산출물 지원(leaf out이 2개 이상이면 {out이름: 값} dict로 반환)
+    이후, result가 산출물 그 자체(단일목적 파이프라인)일 수도 있고, 여러 산출물을 담은
+    dict(예: {"corr":.., "buckets":.., "scatter":..})일 수도 있다 — 두 모양 다 뒤진다.
+    blocked=True(하드차단)면 애초에 신뢰할 결과가 아니므로 None.
     """
     bt = domain_results.get("backtest")
     if not isinstance(bt, dict) or bt.get("blocked"):
         return None
     res = bt.get("result")
-    if (
-        isinstance(res, dict)
-        and res.get("x") and res.get("y")
-        and "x_field" in res and "y_field" in res
-    ):
-        x_field, y_field = res["x_field"], res["y_field"]
-        labels = list(res["labels"]) if res.get("labels") else None
-        title = f"{x_field} vs {y_field} 산점도"
-        return list(res["x"]), list(res["y"]), labels, x_field, y_field, title
+    if matcher(res):
+        return res
+    if isinstance(res, dict):
+        for val in res.values():
+            if matcher(val):
+                return val
     return None
 
 
-def _build_chart(domain_results: dict, conn) -> tuple[str, str] | None:
-    """차트 데이터를 고르고 base64 PNG를 만든다. 산점도(2팩터 관계)를 시계열 라인차트보다
-    우선 확인하고, 산점도 데이터가 있으면 render_scatter_chart_base64로, 없으면 기존
-    _extract_chart_data(시계열 3케이스)를 render_line_chart_base64로 그린다.
+def _extract_scatter_data(domain_results: dict) -> tuple[list, list, list | None, str, str, str] | None:
+    """domain_results에서 산점도로 그릴 데이터를 고른다(백테스트 scatter_data 프리미티브 결과).
 
-    반환: (chart_base64, chart_title) 또는 None(그릴 데이터가 없거나 렌더링 실패 시). 차트는
-    부가 기능이므로, 렌더링이 어떤 이유로든 실패해도 예외를 전파하지 않고 None으로 흡수해
-    본문 텍스트 응답이 깨지지 않게 한다.
+    반환: (x, y, labels, x_label, y_label, title). scatter_data 프리미티브 결과
+    {"x":[...],"y":[...],"labels":[...],"x_field":..,"y_field":..}가 result 자체에 있든,
+    (correlation/quantile_bucket_means 등과 함께 뽑힌) 다중산출물 dict 안에 중첩돼 있든
+    찾아낸다. 없으면(기존 시계열 백테스트 등) None을 반환해 _build_charts가 라인차트
+    경로로 폴백한다(기존 동작 불변).
     """
+    res = _find_in_backtest_result(domain_results, _is_scatter_shape)
+    if res is None:
+        return None
+    x_field, y_field = res["x_field"], res["y_field"]
+    labels = list(res["labels"]) if res.get("labels") else None
+    title = f"{x_field} vs {y_field} 산점도"
+    return list(res["x"]), list(res["y"]), labels, x_field, y_field, title
+
+
+def _extract_bar_data(domain_results: dict) -> tuple[list, list, str, str, str] | None:
+    """domain_results에서 막대그래프로 그릴 분위별 평균(quantile_bucket_means) 데이터를 고른다.
+
+    반환: (labels, values, x_label, y_label, title). bucket=1이 가장 낮은 분위이므로
+    "1분위".."N분위" 라벨을 그대로 순서대로 쓴다(quantile_bucket_means 자체가 오름차순
+    정렬해 반환하므로 재정렬 불필요). 없으면 None.
+    """
+    res = _find_in_backtest_result(domain_results, _is_quantile_bucket_shape)
+    if res is None:
+        return None
+    labels = [f"{r['bucket']}분위" for r in res]
+    values = [r["mean_value"] for r in res]
+    title = "분위수별 평균값"
+    return labels, values, "분위", "평균값", title
+
+
+def _build_charts(domain_results: dict, conn) -> list[tuple[str, str]]:
+    """domain_results에서 그릴 수 있는 차트를 전부 찾아 base64 PNG 리스트로 만든다.
+
+    산점도/막대그래프는 서로 다른 산출물(예: correlation+quantile_bucket_means+
+    scatter_data를 한 파이프라인에서 함께 요청한 질문)이라 동시에 존재할 수 있으므로
+    질문당 차트 여러 개를 허용한다. 둘 다 없으면(기존 단일목적 백테스트 등) 기존
+    _extract_chart_data(시계열 3케이스)로 라인차트 1개만 폴백한다(기존 동작 불변).
+    차트 렌더링은 부가 기능이므로, 개별 렌더가 실패해도 그 항목만 건너뛰고 나머지는
+    계속 시도한다(본문 텍스트 응답을 절대 무너뜨리지 않는다).
+    """
+    charts: list[tuple[str, str]] = []
+
     scatter = _extract_scatter_data(domain_results)
     if scatter is not None:
         x, y, labels, x_label, y_label, title = scatter
         try:
-            chart_base64 = render_scatter_chart_base64(x, y, labels, x_label, y_label, title)
-        except Exception:  # noqa: BLE001 — 차트 실패가 본문 응답을 무너뜨리지 않게 한다
-            return None
-        return chart_base64, title
+            charts.append((render_scatter_chart_base64(x, y, labels, x_label, y_label, title), title))
+        except Exception:  # noqa: BLE001 — 한 차트 실패가 나머지/본문 응답을 무너뜨리지 않게 한다
+            pass
+
+    bar = _extract_bar_data(domain_results)
+    if bar is not None:
+        labels, values, x_label, y_label, title = bar
+        try:
+            charts.append((render_bar_chart_base64(labels, values, x_label, y_label, title), title))
+        except Exception:  # noqa: BLE001
+            pass
+
+    if charts:
+        return charts
 
     data = _extract_chart_data(domain_results, conn)
     if data is None:
-        return None
+        return []
     dates, series, title = data
     try:
-        chart_base64 = render_line_chart_base64(dates, series, title)
+        return [(render_line_chart_base64(dates, series, title), title)]
     except Exception:  # noqa: BLE001 — 차트 실패가 본문 응답을 무너뜨리지 않게 한다
-        return None
-    return chart_base64, title
+        return []
+
+
+def _build_chart(domain_results: dict, conn) -> tuple[str, str] | None:
+    """단일 차트만 필요한 호출부용 하위호환 래퍼 — _build_charts의 첫 번째 결과만 반환."""
+    charts = _build_charts(domain_results, conn)
+    return charts[0] if charts else None
 
 
 def dispatch_domains(
@@ -636,6 +716,7 @@ def answer_with_verification(
     synthesize_fn: Callable | None = None,
     steps: list[dict] | None = None,
     on_progress: Callable[[str, str], None] | None = None,
+    fallback_fn: Callable | None = None,
 ) -> dict:
     """총괄 오케스트레이션: route→dispatch→verify, 실패 시 정확히 max_retries회까지 재시도.
 
@@ -646,7 +727,14 @@ def answer_with_verification(
            가공 없이 그대로 병기**해 반환한다.
          - 검증 실패 시: 재시도. **정확히 max_retries회에서 멈춘다(무한루프 없음)** — 즉
            4번째 시도가 없다.
-      3) max_retries회 모두 실패하면 "불확실성 명시" 응답을 반환한다(uncertain=True).
+      3) max_retries회 모두 실패하면, 정형 검증 루프와는 별개인 마지막 안전망으로
+         fallback_fn(question, conn, llm_fn, last_reason)을 **정확히 1회만** 시도한다
+         (exec_fallback.run_free_exec_fallback — LLM이 SQL+Python을 직접 작성해
+         exec_runtime.py의 안전장치 위에서 실행). 정형 어휘(스크리닝 criteria/top_n,
+         파이프라인 연산)의 표현력 한계로 반복 실패하는 질문을 위한 최후 수단이지,
+         검증 루프를 다시 도는 게 아니므로 정형 검증(verify_fn)은 다시 거치지 않는다.
+         성공하면 domain_results에 "free_exec" 키로 결과를 추가하고 uncertain=False로
+         반환한다. 실패하면 기존과 동일하게 "불확실성 명시" 응답을 반환한다(uncertain=True).
 
     복합 도메인(kr+us 등) 질문에서는 verify_fn이 반환하는 verdict["per_domain"]을 읽어,
     이미 검증을 통과한 도메인은 그대로 두고 **실패한 도메인만** 다음 시도에서 재-dispatch한다
@@ -670,6 +758,7 @@ def answer_with_verification(
     dispatch_fn = dispatch_fn or dispatch_domains
     verify_fn = verify_fn or verify_answer
     synthesize_fn = synthesize_fn or synthesize_conclusion
+    fallback_fn = fallback_fn or run_free_exec_fallback
 
     # on_progress가 없으면(대부분의 기존 호출부) 하위 함수에 그 키워드 자체를 안 넘긴다 —
     # 주입되는 fake route_fn/dispatch_fn(테스트)이 on_progress 파라미터를 몰라도 깨지지 않는다.
@@ -727,11 +816,14 @@ def answer_with_verification(
                 "routes": routes,
             }
             # 명시적 차트 요청("그래프/차트/그려줘" 등)이 원본 question에 있을 때만 이미지 차트를
-            # 붙인다(모든 질문에 자동으로 붙이지 않음). 그릴 데이터가 없으면 None(차트 없이 텍스트만).
+            # 붙인다(모든 질문에 자동으로 붙이지 않음). 그릴 데이터가 없으면 차트 필드 없이 텍스트만.
             if wants_chart(question):
-                chart = _build_chart(domain_results, conn)
-                if chart is not None:
-                    result["chart_base64"], result["chart_title"] = chart
+                charts = _build_charts(domain_results, conn)
+                if charts:
+                    result["chart_base64"], result["chart_title"] = charts[0]
+                    result["charts"] = [
+                        {"chart_base64": b64, "chart_title": title} for b64, title in charts
+                    ]
             return result
         last_reason = verdict.get("reason")
         per_domain = verdict.get("per_domain") or {}
@@ -743,11 +835,42 @@ def answer_with_verification(
             suffix = " → 재시도" if attempt < max_retries else ""
             on_progress("verify", f"{attempt}차 검증 실패: {last_reason}{suffix}")
 
+    # 정형 검증 루프가 모두 실패 — 정형 어휘의 표현력 한계일 수 있으므로 마지막으로 딱 1회,
+    # LLM이 SQL+Python을 직접 작성하는 자유 실행 폴백을 시도한다(재시도 루프와 무관, 검증도
+    # 다시 거치지 않음 — 그러면 같은 이유로 다시 실패해 무한루프에 가까워진다).
+    fallback = fallback_fn(question, conn, llm_fn, last_reason)
+    if fallback.get("ok"):
+        if on_progress:
+            on_progress(
+                "supervisor", f"{max_retries}회 정형 검증 실패 → 자유 코드 생성 폴백 성공",
+            )
+        domain_results["free_exec"] = {
+            "fallback_used": True,
+            "sql": fallback.get("sql"),
+            "code": fallback.get("code"),
+            "result": fallback.get("result"),
+        }
+        conclusion = synthesize_fn(question, domain_results, llm_fn)
+        return {
+            "uncertain": False,
+            "conclusion": conclusion,
+            "domain_results": domain_results,
+            "attempts": attempts,
+            "routes": routes,
+            "used_fallback": True,
+        }
+    if on_progress:
+        on_progress(
+            "supervisor",
+            f"{max_retries}회 정형 검증 실패 → 자유 코드 생성 폴백도 실패: {fallback.get('error')}",
+        )
+
     return {
         "uncertain": True,
         "reason": (
             f"{max_retries}회 검증에 모두 실패했습니다. 확실한 답을 제시할 수 없습니다."
             + (f" (마지막 사유: {last_reason})" if last_reason else "")
+            + (f" (자유 코드 생성 폴백도 실패: {fallback.get('error')})" if fallback.get("error") else "")
         ),
         "attempts": attempts,
         "domain_results": domain_results,

@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quant Assistant</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1f2430; --line:#2a2f3c;
+    --text:#e6e9ef; --muted:#8b93a7; --accent:#5b8cff; --accent2:#3ad29f;
+    --warn:#f0a020; --bad:#ff6b6b; --chip:#262c3a;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Apple SD Gothic Neo",sans-serif;
+    font-size:14px;line-height:1.5;display:flex;flex-direction:column;min-height:100dvh;
+    word-break:keep-all}
+  header{padding:16px 28px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex:0 0 auto}
+  header h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.2px}
+  header nav{margin-left:auto;display:flex;gap:8px}
+  header nav a{text-decoration:none;background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    padding:8px 14px;border-radius:9px;font-size:13px;font-weight:600;transition:filter .15s}
+  header nav a:hover{filter:brightness(1.15)}
+  header .env{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px}
+  header .env select{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    border-radius:6px;padding:5px 9px;font-size:12.5px}
+
+  main{flex:1 1 auto;overflow-y:auto;padding:18px 28px 0;max-width:1180px;margin:0 auto;width:100%;
+    display:flex;flex-direction:column;gap:16px;min-height:0}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .meta{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+  .err{color:var(--bad)}
+
+  .top-answer .label{color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+  .top-answer .body{white-space:pre-wrap}
+  .top-answer .actions{margin-top:12px;display:flex;gap:8px}
+
+  .chat-main{display:grid;grid-template-columns:1fr 300px;gap:16px;flex:1 1 auto;min-height:280px}
+  .chat-history{display:flex;flex-direction:column;gap:10px;overflow-y:auto;padding-bottom:16px}
+  details.turn{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  details.turn summary{cursor:pointer;padding:13px 16px;display:flex;gap:10px;align-items:baseline;list-style:none}
+  details.turn summary::-webkit-details-marker{display:none}
+  details.turn summary::before{content:'▸';color:var(--muted);display:inline-block;transition:transform .12s;flex:0 0 auto}
+  details.turn[open] summary::before{transform:rotate(90deg)}
+  details.turn .q{font-weight:600;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  details.turn .status{font-size:12px;flex:0 0 auto}
+  details.turn .status.success{color:var(--accent2)}
+  details.turn .status.fail{color:var(--bad)}
+  .turn-body{padding:0 16px 16px;border-top:1px solid var(--line);padding-top:12px}
+  .turn-body .chip{display:inline-block;margin-top:8px;text-decoration:none}
+
+  .chat-progress{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;
+    align-self:start;position:sticky;top:0;max-height:70vh;overflow-y:auto}
+  .chat-progress h2{font-size:12px;margin:0 0 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:650}
+
+  .chat-inputbar{flex:0 0 auto;border-top:1px solid var(--line);background:var(--bg);
+    padding:14px 28px;display:flex;gap:10px;max-width:1180px;margin:0 auto;width:100%}
+  textarea#q{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    padding:12px 14px;border-radius:9px;font-size:14px;outline:none;resize:vertical;min-height:52px;
+    max-height:160px;font-family:inherit;line-height:1.5}
+  textarea#q:focus{border-color:var(--accent)}
+  .inputbar-actions{display:flex;flex-direction:column;gap:8px}
+
+  button{background:var(--accent);color:#fff;border:0;padding:11px 18px;border-radius:9px;cursor:pointer;
+    font-weight:600;font-size:14px;transition:filter .15s,transform .1s}
+  button:hover{filter:brightness(1.08)} button:active{transform:scale(.98)} button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:var(--panel2);color:var(--text);border:1px solid var(--line)}
+  button.sm{padding:6px 12px;font-size:13px}
+
+  .chip{background:var(--chip);padding:5px 11px;border-radius:20px;font-size:12.5px;color:var(--text);cursor:pointer;
+    border:0;transition:filter .15s}
+  .chip:hover{filter:brightness(1.15)}
+
+  pre.sql{background:#0c0e14;border:1px solid var(--line);border-radius:9px;padding:12px;overflow:auto;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#cfe1ff;
+    white-space:pre-wrap;word-break:break-word;margin:6px 0}
+
+  table{width:100%;border-collapse:collapse;margin-top:6px;font-size:13.5px;font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600}
+  tr:hover td{background:rgba(255,255,255,.02)}
+
+  .tree-done{color:var(--accent2);font-weight:600;margin-bottom:8px}
+  .tree-fail{color:var(--bad);font-weight:600;margin-bottom:8px}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);
+    border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .hidden{display:none}
+
+  @media (max-width:820px){
+    .chat-main{grid-template-columns:1fr}
+    .chat-progress{position:static;max-height:none}
+  }
+
+  .macro-bar{display:flex;flex-wrap:wrap;align-items:stretch;background:var(--panel);border-bottom:1px solid var(--line);padding:0 28px}
+  .macro-item{display:flex;align-items:baseline;gap:6px;padding:9px 16px;border-right:1px solid var(--line);white-space:nowrap}
+  .macro-l{color:var(--muted);font-size:11.5px}
+  .macro-v{font-weight:650;font-size:13.5px;font-variant-numeric:tabular-nums}
+  .macro-chg{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .macro-chg.up{color:var(--accent2)} .macro-chg.down{color:var(--bad)}
+  .macro-err{color:var(--muted);font-size:12px;padding:9px 16px}
+  .macro-note{margin-left:auto;align-self:center;padding:9px 16px;color:var(--muted);font-size:11px;white-space:nowrap}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Quant Assistant</h1>
+  <nav>
+    <a href="/macro">🚦 매크로 →</a>
+    <label class="env">LLM
+      <select id="modelSel"><option>로딩…</option></select>
+    </label>
+  </nav>
+</header>
+<div class="macro-bar" id="macroBar"><div class="macro-err"><span class="spinner"></span> 거시지표 로딩…</div></div>
+
+<main>
+  <div class="card top-answer" id="topAnswer">
+    <div class="label">최종 답변</div>
+    <div class="body" id="topAnswerBody">아직 질문이 없습니다. 아래 입력창에 질문을 적어보세요. 초기화 전까지는 이어지는 모든 질문이 직전 결과를 이어받아 처리됩니다.</div>
+    <div class="actions">
+      <a class="chip hidden" id="csvLink" download>CSV 다운로드</a>
+    </div>
+  </div>
+
+  <div class="chat-main">
+    <div class="chat-history" id="chatHistory">
+      <div class="meta" id="historyEmpty">지나간 턴이 여기에 쌓입니다. 최신 턴만 펼쳐지고 이전 턴은 접힙니다.</div>
+    </div>
+    <aside class="chat-progress card">
+      <h2>처리 상황 · 근거 데이터</h2>
+      <div id="progressBody" class="meta">대기 중</div>
+    </aside>
+  </div>
+</main>
+
+<div class="chat-inputbar">
+  <textarea id="q" placeholder="새 질문을 입력하거나, 이전 결과를 이어서 가공할 질문을 입력하세요 (⌘/Ctrl+Enter로 전송)"></textarea>
+  <div class="inputbar-actions">
+    <button id="sendBtn">보내기</button>
+    <button class="ghost sm" id="resetBtn">대화 초기화</button>
+  </div>
+</div>
+
+<script>
+const SID_KEY = 'chatSessionId';
+let sessionId = localStorage.getItem(SID_KEY) || null;
+
+function esc(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadModels(){
+  const sel=document.getElementById('modelSel');
+  try{
+    const models=await (await fetch('/api/models')).json();
+    sel.innerHTML=models.map(m=>`<option value="${esc(m.id)}"${m.available?'':' disabled'}>${esc(m.label)}${m.available?'':' · 불가'}</option>`).join('');
+    const firstOk=models.find(m=>m.available);
+    if(firstOk) sel.value=firstOk.id;
+  }catch(e){sel.innerHTML='<option>서버 오프라인</option>';}
+}
+
+function macroItem(label,value,chgPct){
+  let chg='';
+  if(chgPct!=null){
+    const cls=chgPct>=0?'up':'down';
+    chg=`<span class="macro-chg ${cls}">${chgPct>=0?'+':''}${chgPct.toFixed(2)}%</span>`;
+  }
+  return `<div class="macro-item"><span class="macro-l">${esc(label)}</span><span class="macro-v">${esc(value)}</span>${chg}</div>`;
+}
+async function loadMacro(){
+  const bar=document.getElementById('macroBar');
+  try{
+    const m=await (await fetch('/api/macro')).json();
+    const items=[];
+    if(m.usdkrw && m.usdkrw.rate!=null){
+      items.push(macroItem('원/달러', m.usdkrw.rate.toLocaleString(undefined,{maximumFractionDigits:2})));
+    }else{
+      items.push('<div class="macro-err">원/달러 조회 실패</div>');
+    }
+    (m.indices||[]).forEach(ix=>{
+      if(ix.error){ items.push(`<div class="macro-err">${esc(ix.label)} 조회 실패</div>`); return; }
+      items.push(macroItem(ix.label, ix.close.toLocaleString(undefined,{maximumFractionDigits:2}), ix.change_pct));
+    });
+    items.push(`<span class="macro-note">지수 ${esc(m.note?.quotes||'약 15-20분 지연')}</span>`);
+    bar.innerHTML=items.join('');
+  }catch(e){
+    bar.innerHTML='<div class="macro-err">거시지표 조회 실패</div>';
+  }
+}
+
+function isTabular(answer){
+  return Array.isArray(answer) && answer.length>0 && typeof answer[0]==='object' && answer[0]!==null && !Array.isArray(answer[0]);
+}
+
+function renderAnswerBody(answer){
+  if(answer==null) return '<span class="meta">결과 없음</span>';
+  if(isTabular(answer)){
+    const cols=Object.keys(answer[0]);
+    const rows=answer.slice(0,50);
+    let html='<table><thead><tr>'+cols.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr></thead><tbody>';
+    for(const r of rows){ html+='<tr>'+cols.map(c=>`<td>${esc(r[c])}</td>`).join('')+'</tr>'; }
+    html+='</tbody></table>';
+    if(answer.length>50) html+=`<div class="meta">… 총 ${answer.length}행 중 50행만 표시</div>`;
+    return html;
+  }
+  return `<pre class="sql">${esc(JSON.stringify(answer,null,2))}</pre>`;
+}
+
+function renderEvidence(sql, code){
+  let html='';
+  if(sql) html+=`<div class="meta" style="margin-top:10px">SQL</div><pre class="sql">${esc(sql)}</pre>`;
+  if(code) html+=`<div class="meta" style="margin-top:10px">Python</div><pre class="sql">${esc(code)}</pre>`;
+  if(!html) html='<div class="meta">이 턴은 새로 실행한 SQL/코드가 없습니다.</div>';
+  return html;
+}
+
+function turnCard(turn, turnIndex, expand){
+  const statusLabel = turn.status==='success' ? '✓ 성공' : '⚠ 실패';
+  const statusClass = turn.status==='success' ? 'success' : 'fail';
+  const bodyHtml = turn.status==='success'
+    ? renderAnswerBody(turn.answer) + renderEvidence(turn.sql, turn.code)
+    : `<div class="err">${esc(turn.error||'실패')}</div>`;
+  const csvHtml = turn.csv_available
+    ? `<a class="chip" href="/api/chat/csv?session_id=${encodeURIComponent(sessionId)}&turn_index=${turnIndex}" download>CSV 다운로드</a>`
+    : '';
+  const el=document.createElement('details');
+  el.className='turn';
+  if(expand) el.open=true;
+  el.innerHTML =
+    `<summary><span class="q">${esc(turn.question)}</span><span class="status ${statusClass}">${statusLabel}</span></summary>`+
+    `<div class="turn-body">${bodyHtml}${csvHtml}</div>`;
+  return el;
+}
+
+function updateTopAnswer(turn){
+  const body=document.getElementById('topAnswerBody');
+  const csvLink=document.getElementById('csvLink');
+  if(!turn){
+    body.textContent='아직 질문이 없습니다. 아래 입력창에 질문을 적어보세요. 초기화 전까지는 이어지는 모든 질문이 직전 결과를 이어받아 처리됩니다.';
+    csvLink.classList.add('hidden');
+    return;
+  }
+  body.innerHTML = turn.status==='success'
+    ? renderAnswerBody(turn.answer)
+    : `<span class="err">${esc(turn.error||'실패')}</span>`;
+  if(turn.csv_available){
+    csvLink.href = `/api/chat/csv?session_id=${encodeURIComponent(sessionId)}&turn_index=${turn._index}`;
+    csvLink.classList.remove('hidden');
+  } else {
+    csvLink.classList.add('hidden');
+  }
+}
+
+async function loadHistory(){
+  const box=document.getElementById('chatHistory');
+  if(!sessionId){
+    box.innerHTML='<div class="meta" id="historyEmpty">지나간 턴이 여기에 쌓입니다. 최신 턴만 펼쳐지고 이전 턴은 접힙니다.</div>';
+    updateTopAnswer(null);
+    return;
+  }
+  const r = await fetch(`/api/chat/history?session_id=${encodeURIComponent(sessionId)}`);
+  const data = await r.json();
+  const turns = data.turns||[];
+  box.innerHTML='';
+  if(!turns.length){
+    box.innerHTML='<div class="meta">지나간 턴이 여기에 쌓입니다. 최신 턴만 펼쳐지고 이전 턴은 접힙니다.</div>';
+    updateTopAnswer(null);
+    return;
+  }
+  // 최신 턴이 위로 오도록 뒤에서부터 prepend
+  turns.forEach((t,i)=>{
+    box.insertAdjacentElement('afterbegin', turnCard(t, i, i===turns.length-1));
+  });
+  const last = turns[turns.length-1];
+  updateTopAnswer({...last, _index: turns.length-1});
+}
+
+let _chatES=null;
+
+function sendQuestion(){
+  const ta=document.getElementById('q');
+  const question=ta.value.trim();
+  if(!question) return;
+  const sendBtn=document.getElementById('sendBtn');
+  const progressBody=document.getElementById('progressBody');
+  sendBtn.disabled=true; ta.disabled=true;
+  progressBody.innerHTML='';
+
+  if(_chatES){ _chatES.close(); _chatES=null; }
+
+  const params=new URLSearchParams({question});
+  if(sessionId) params.set('session_id', sessionId);
+  const model=document.getElementById('modelSel').value;
+  if(model) params.set('model', model);
+  _chatES=new EventSource(`/api/chat/stream?${params.toString()}`);
+
+  const finish=()=>{
+    if(_chatES){ _chatES.close(); _chatES=null; }
+    sendBtn.disabled=false; ta.disabled=false; ta.focus();
+  };
+
+  // 기본(data:) 프레임 = 진행 단계 메시지. 도착 즉시 오른쪽 패널에 실시간으로 쌓인다(AC13).
+  _chatES.onmessage=(e)=>{
+    const ev=JSON.parse(e.data);
+    if(ev.step){
+      progressBody.insertAdjacentHTML('beforeend', `<div class="meta"><span class="spinner"></span> ${esc(ev.step)}</div>`);
+      progressBody.scrollTop = progressBody.scrollHeight;
+    }
+  };
+  _chatES.addEventListener('done', async (e)=>{
+    const data=JSON.parse(e.data);
+    if(data.session_id){
+      sessionId=data.session_id;
+      localStorage.setItem(SID_KEY, sessionId);
+    }
+    progressBody.innerHTML = (data.status==='success'
+      ? '<div class="tree-done">✓ 완료</div>'
+      : `<div class="tree-fail">⚠ 실패: ${esc(data.error||'')}</div>`) + renderEvidence(data.sql, data.code);
+    ta.value='';
+    finish();
+    await loadHistory();
+  });
+  _chatES.addEventListener('fail',(e)=>{
+    const data=JSON.parse(e.data||'{}');
+    progressBody.innerHTML=`<div class="tree-fail">⚠ ${esc(data.message||'스트림 오류')}</div>`;
+    finish();
+  });
+  _chatES.onerror=()=>{
+    if(_chatES && _chatES.readyState===EventSource.CLOSED) return;  // 이미 done/fail로 정상 종료됨
+    progressBody.innerHTML='<div class="tree-fail">⚠ 연결이 끊겼습니다.</div>';
+    finish();
+  };
+}
+
+document.getElementById('sendBtn').addEventListener('click', sendQuestion);
+document.getElementById('q').addEventListener('keydown', (e)=>{
+  if(e.key==='Enter' && (e.metaKey||e.ctrlKey)){ e.preventDefault(); sendQuestion(); }
+});
+
+document.getElementById('resetBtn').addEventListener('click', async ()=>{
+  if(sessionId){
+    await fetch('/api/chat/reset',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:sessionId}),
+    });
+  }
+  document.getElementById('progressBody').textContent='대기 중';
+  await loadHistory();
+});
+
+loadModels();
+loadHistory();
+loadMacro();
+setInterval(loadMacro, 60000);  // 1분마다 자동 갱신(코스피/코스닥·환율·해외지수 새로고침 없이 반영)
+</script>
+</body>
+</html>

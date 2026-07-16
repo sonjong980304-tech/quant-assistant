@@ -51,6 +51,18 @@ def _fetch_usdkrw_rate() -> float:
     return parse_naver_rate_response(resp.json())
 
 
+def fetch_usdkrw_rate_live(fetch_fn=None) -> float:
+    """캐시 없이 매 호출마다 최신 원/달러 환율을 가져온다 — /api/macro 실시간 티커 전용.
+
+    get_usdkrw_rate()의 당일 캐시는 NL 질의응답(하루 단위 정확도로 충분, 크롤링
+    최소화가 목적)에 맞춘 것이다. /api/macro는 프론트가 60초마다 폴링하며 코스피/
+    코스닥/해외지수처럼 매번 새 값을 기대하므로, 그 캐시를 재사용하면 하루 중 첫
+    요청 값이 그날 내내 고정된다(실사용에서 "실시간으로 안 바뀐다"로 재현된 버그).
+    """
+    fetch_fn = fetch_fn or _fetch_usdkrw_rate
+    return fetch_fn()
+
+
 def get_usdkrw_rate(conn, on: date | None = None, fetch_fn=None) -> float:
     """오늘자 원/달러 환율을 반환한다(당일 캐시, 없으면 크롤링 후 저장).
 

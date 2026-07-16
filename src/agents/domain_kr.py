@@ -193,6 +193,12 @@ _SCREEN_METRIC_ALIASES: dict[str, str] = {
     "순이익": "net_income",
     "12개월수익률": "return_12m", "12개월 수익률": "return_12m",
     "가격수익률": "return_12m", "주가수익률": "return_12m", "모멘텀": "return_12m",
+    # 마법공식(그린블라트)/GPA 팩터 — 스크리닝 경로는 LLM이 프롬프트의 필드설명을
+    # 직접 읽어 인식하지만, 단일종목 조회 경로(_extract_metric)는 이 사전에 없으면
+    # 절대 인식하지 못한다(실서버 재현 버그: "삼성전자 투하자본수익률" 결정론적 실패).
+    "투하자본수익률": "roc", "roc": "roc",
+    "이익수익률": "earnings_yield", "ey": "earnings_yield",
+    "매출총이익률": "gp_a", "gpa": "gp_a", "gp/a": "gp_a",
 }
 _SCREEN_METRIC_ORDER: list[str] = sorted(_SCREEN_METRIC_ALIASES, key=len, reverse=True)
 
@@ -643,6 +649,12 @@ def _run_screening(
         result["errors"].append(f"횡단면(cross-section) 조회 실패: {type(exc).__name__}: {exc}")
         return result
 
+    # KRX 미분류 등으로 sector가 비어있는 종목은 "기타"로 채운다 — 채우지 않으면 valid_sectors
+    # 집계·업종 필터·화면 표시에서 조용히 누락된다(사용자가 실사용에서 발견한 회귀).
+    for row in rows:
+        if not row.get("sector"):
+            row["sector"] = "기타"
+
     # 실제 존재하는 업종 목록(질문 해석 시 LLM에게 알려주고, 매칭 실패를 사후 검증하는 데도 쓴다).
     valid_sectors = sorted({r["sector"] for r in rows if r.get("sector")})
 
@@ -839,6 +851,7 @@ def resolve_computed_metric(
     conn,
     stock_code: str,
     metric: str,
+    asof: str | None = None,
     execute_sql_fn: Callable | None = None,
     cross_section_fn: Callable | None = None,
 ) -> dict:
@@ -846,19 +859,25 @@ def resolve_computed_metric(
 
     resolve_metric(DART financials/metrics 테이블 전용)로는 다룰 수 없는 return_12m 등의
     계산 지표를 위해 존재한다. get_cross_section(=metrics_at 래핑, 스크리닝 경로와 동일
-    인프라)으로 최신 거래일(prices 테이블) 기준 전종목 스냅샷을 계산한 뒤 해당 종목 행
-    하나만 골라낸다 — 새 SQL/계산 로직을 추가하지 않고 기존 인프라를 그대로 재사용한다.
+    인프라)으로 특정 기준시점(prices 테이블) 스냅샷을 계산한 뒤 해당 종목 행 하나만
+    골라낸다 — 새 SQL/계산 로직을 추가하지 않고 기존 인프라를 그대로 재사용한다.
+
+    asof를 주면(예: "삼성전자 25년 투하자본수익률"처럼 질문에 연도/분기가 명시된 경우,
+    호출부가 _resolve_screening_asof로 확정해 넘김) 그 시점 그대로 쓴다. 생략하면(기존
+    호출부 하위호환) _default_screening_asof(prices 테이블 최신 거래일)로 폴백한다 — 이
+    폴백이 없으면 "질문은 2025년을 물었는데 결과는 오늘 날짜로 계산됨"이라는 실서버
+    재현 버그(검증이 매번 결정론적으로 실패)가 재발한다.
 
     반환 형식은 resolve_metric()과 동일한 계약에 "estimated"를 더한다: {"stock_code",
     "metric","value","source","period","estimated"}. source="computed"는 재무제표가 아니라
-    가격 시계열에서 즉석 계산된 값임을 표시하고, period는 계산 기준시점(asof, prices 테이블의
-    최신 거래일)이다. estimated는 행에 '{metric}_estimated' 컴패니언 필드(예: roc_estimated —
-    감가상각비 데이터가 없어 0으로 근사했는지)가 있으면 그 값을, 없으면 None을 담는다 —
-    metrics_at()이 계산한 근사 여부가 단일종목 조회에서도 조용히 사라지지 않게 한다.
+    가격 시계열에서 즉석 계산된 값임을 표시하고, period는 계산 기준시점(asof)이다.
+    estimated는 행에 '{metric}_estimated' 컴패니언 필드(예: roc_estimated — 감가상각비
+    데이터가 없어 0으로 근사했는지)가 있으면 그 값을, 없으면 None을 담는다 — metrics_at()이
+    계산한 근사 여부가 단일종목 조회에서도 조용히 사라지지 않게 한다.
     """
     execute_sql_fn = execute_sql_fn or execute_sql
     cross_section_fn = cross_section_fn or (lambda c, a: get_cross_section(c, a))
-    asof = _default_screening_asof(conn, "prices", execute_sql_fn)
+    asof = asof or _default_screening_asof(conn, "prices", execute_sql_fn)
     value = None
     estimated = None
     if asof:
@@ -1006,8 +1025,11 @@ def _answer_kr_multi_entity_question(
             if metric is None:
                 entity["errors"].append("재무 지표를 인식하지 못함")
             elif metric in _COMPUTED_ONLY_FIELDS:
+                computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
                 financial, err = _call_with_retry(
-                    lambda c=code: computed_metric_fn(conn, c, metric, execute_sql_fn=execute_sql_fn)
+                    lambda c=code: computed_metric_fn(
+                        conn, c, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
+                    )
                 )
                 if err:
                     entity["errors"].append(f"계산 지표 조회 실패: {err}")
@@ -1136,8 +1158,11 @@ def answer_kr_question(
         if metric is None:
             result["errors"].append("재무 지표를 인식하지 못함")
         elif metric in _COMPUTED_ONLY_FIELDS:
+            computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
             financial, err = _call_with_retry(
-                lambda: computed_metric_fn(conn, stock_code, metric, execute_sql_fn=execute_sql_fn)
+                lambda: computed_metric_fn(
+                    conn, stock_code, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
+                )
             )
             if err:
                 result["errors"].append(f"계산 지표 조회 실패: {err}")

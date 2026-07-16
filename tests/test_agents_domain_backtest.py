@@ -295,6 +295,29 @@ def test_pipeline_prompt_documents_neutralize_zscore_method():
     assert "method='demean'" in p
 
 
+def test_pipeline_prompt_correlation_example_also_includes_scatter_combo():
+    """실서버 재현 버그: '상관관계 구하고 산점도로, 분위별 평균은 막대그래프로' 같은 3종
+    복합 요청에서 LLM이 correlation/quantile_bucket_means만 뽑고 scatter_data를 빠뜨렸다.
+    프롬프트의 correlation+quantile_bucket_means 예시가 scatter_data까지 포함한 3종 조합
+    예시여야, 비슷한 질문에서 LLM이 산점도 단계를 빠뜨리지 않는다."""
+    captured: dict = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return json.dumps({"pipeline": []})
+
+    generate_backtest_steps("PBR과 GPA 상관관계 구하고 산점도로 보여줘", fake_llm)
+    p = captured["prompt"]
+    # 기존 correlation+quantile_bucket_means 예시가 있던 자리에 scatter_data 단계도
+    # 함께 있어야 한다(3개 산출물을 한 파이프라인에서 동시에 요청하는 패턴을 학습시킴).
+    assert '"op": "correlation"' in p
+    assert '"op": "quantile_bucket_means"' in p
+    assert '"op": "scatter_data"' in p
+    # 여러 out을 만드는 파이프라인이 전부 보존된다는 것도 명시해, LLM이 "마지막 하나만
+    # 살아남는다"고 오해해 산출물을 하나로 줄이지 않게 한다.
+    assert "여러 개의 최종 산출물" in p or "모두 보존" in p
+
+
 # ── answer_backtest_question: steps 비어있고 llm_fn 있으면 자동 생성해 감사배선에 넘긴다 ──
 def test_answer_backtest_question_auto_generates_steps_when_empty(tmp_path):
     conn = _writable_conn(tmp_path)
