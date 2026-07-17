@@ -59,6 +59,11 @@ def fetch_yf_close_series(ticker: str, fetch_fn: Callable[[str], pd.Series] | No
     s = fetch_fn(ticker)
     s = s.copy()
     s.index = pd.to_datetime(s.index)
+    # 실제 yfinance는 tz-aware DatetimeIndex를 반환한다(티커별 거래소 시간대가 다름 —
+    # 예: QQQ/TLT=America/New_York, 411060.KS=Asia/Seoul). 삼성전자(DB, tz-naive)와
+    # 섞으면 build_price_panel의 pd.DataFrame(dict) 생성 시점에 죽으므로 여기서 미리 통일한다.
+    if getattr(s.index, "tz", None) is not None:
+        s.index = s.index.tz_localize(None)
     return s
 
 

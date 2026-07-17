@@ -82,6 +82,27 @@ def test_fetch_irx_series_uses_irx_ticker():
     assert seen["ticker"] == "^IRX"
 
 
+def test_build_price_panel_handles_tz_aware_yfinance_index(tmp_path):
+    # 실측 버그 재현: 실제 yfinance는 tz-aware DatetimeIndex를 반환한다(예: QQQ/TLT는
+    # America/New_York). 삼성전자(DB, tz-naive)와 섞이면 pd.DataFrame(dict) 생성 시점에
+    # "Cannot join tz-naive with tz-aware DatetimeIndex"로 죽는다 — 실제 배치 실행에서 재현됨.
+    db = _db_with_samsung(tmp_path)
+
+    def fake_fetch_tz_aware(ticker: str) -> pd.Series:
+        dates = pd.date_range("2016-01-04", periods=30, freq="B", tz="America/New_York")
+        return pd.Series([100.0 + i for i in range(30)], index=dates)
+
+    conn = sqlite3.connect(db)
+    try:
+        panel = build_price_panel(conn, fetch_fn=fake_fetch_tz_aware)
+    finally:
+        conn.close()
+
+    assert getattr(panel.index, "tz", None) is None
+    assert set(panel.columns) == set(TICKERS)
+    assert len(panel) > 0
+
+
 def test_risk_free_rate_at_returns_point_in_time_value():
     # AC7: 리밸런싱 시점마다 그 시점의 과거 ^IRX 값을 쓴다(단일 현재값 고정 아님).
     dates = pd.to_datetime(["2016-01-04", "2017-06-01", "2018-01-02"])
