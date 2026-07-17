@@ -71,13 +71,19 @@ def run_backtest_with_audit(
         통과 시: {"blocked": False, "error": None, "result": dict(백테스트 결과),
                  "hard": [...], "warnings": [triggered된 소프트 verdict...]}
 
-    감사 레이어 자체의 예외는 정상 실행을 막지 않는다(레거시와 동일 — 보조 레이어이므로
-    감사가 실패해도 본 파이프라인 흐름은 계속된다).
+    안전 원칙(fail-closed, SoT §3.4/§3.5·AC9/AC11): 하드차단 검사(사전 공매도 / 사후
+    생존편향·미래참조)가 그 자체로 예외를 던져 죽으면, "차단 안 됨=통과"로 새지 않고
+    반드시 **안전측(결과 폐기·차단)**으로 귀결한다. 검사기가 고장 났을 때 검증 안 된 결과를
+    통과시키는 것은 이 3대 하드 규칙의 존재 목적(방어적 안전망)과 정면 충돌하기 때문이다.
+    (소프트경고 4종은 보조 자문이라 실패해도 정상 결과를 폐기하지 않는 fail-open이 맞다 —
+    run_soft_inspectors가 자체 타임아웃/오류를 내부에서 흡수한다. 반면 하드차단은 fail-closed.)
     """
     try:
         pre = auditor.pre_audit(steps, conn, run_pipeline_fn)
-    except Exception:  # noqa: BLE001 — 감사 자체 오류는 실행을 막지 않는다(보조 레이어)
-        pre = None
+    except Exception as exc:  # noqa: BLE001 — fail-closed: 사전 하드검사가 죽으면 안전측(차단)
+        pre = {"sin": "short_positions", "blocked": True,
+               "reason": f"사전 하드검사(공매도) 내부 오류 — fail-closed 차단: {exc}",
+               "evidence": []}
     if pre and on_progress:
         _report_hard_verdict(pre, on_progress)
     if pre and pre.get("blocked"):
@@ -88,8 +94,13 @@ def run_backtest_with_audit(
 
     try:
         audit = auditor.post_audit(result, conn, question, llm_fn, market=market)
-    except Exception:  # noqa: BLE001 — 감사 자체 오류는 정상 결과를 버리지 않는다
-        audit = {"blocked": False, "hard": [], "soft": []}
+    except Exception as exc:  # noqa: BLE001 — fail-closed: 사후 하드검사가 죽으면 안전측(차단)
+        audit = {"blocked": True,
+                 "hard": [{"sin": "hard_audit_error", "blocked": True,
+                           "reason": f"사후 하드검사(생존편향/미래참조) 내부 오류 — "
+                                     f"fail-closed 차단: {exc}",
+                           "evidence": []}],
+                 "soft": []}
 
     if on_progress:
         for v in audit.get("hard", []):

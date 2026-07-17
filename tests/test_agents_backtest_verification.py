@@ -280,3 +280,66 @@ def test_us_market_survivorship_unverifiable_warning_propagates(tmp_path):
     assert out["blocked"] is False
     sins = {w["sin"] for w in out["warnings"]}
     assert "survivorship" in sins
+
+
+# --------------------------------------------------------------------------
+# fail-closed 안전원칙(SoT §3.4/§3.5, AC9/AC11): 하드차단 3종의 검사기 "자체가"
+# 내부 예외로 죽어도, '차단 안 됨=통과'로 새지 않고 반드시 안전측(결과 폐기·차단)으로
+# 귀결돼야 한다. 안전장치가 고장 났을 때 검증 안 된 결과를 통과시키면 하드차단의 존재
+# 목적(방어적 안전망)과 정면 충돌한다.
+# --------------------------------------------------------------------------
+def _boom(*a, **k):
+    raise RuntimeError("검사기 자체가 폭발(회귀/DB오류 시뮬)")
+
+
+def test_pre_hard_check_exception_fails_closed(tmp_path, monkeypatch):
+    """사전 하드검사(공매도)가 내부 예외로 죽으면 → 실행 자체를 막고 결과 폐기(fail-closed)."""
+    conn = _seeded_conn(tmp_path)
+    ran = {"pipeline": False}
+    monkeypatch.setattr(auditor, "check_short_positions", _boom)
+
+    def run_pipeline_fn(s, conn=None):
+        ran["pipeline"] = True
+        return dict(_BT_RESULT)
+
+    steps = [{"op": "run_backtest",
+              "params": {"weights": {"000001": 0.6, "000002": 0.4}}, "out": "bt"}]
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR")
+
+    assert out["blocked"] is True
+    assert out["result"] is None
+    assert ran["pipeline"] is False  # 사전 차단이므로 파이프라인 실행 자체가 안 됨
+
+
+def test_post_survivorship_check_exception_fails_closed(tmp_path, monkeypatch):
+    """사후 하드검사(생존편향)가 내부 예외로 죽으면 → 정상 결과를 폐기하고 차단(fail-closed)."""
+    conn = _seeded_conn(tmp_path)
+    ran = {"pipeline": False}
+    monkeypatch.setattr(auditor, "check_survivorship", _boom)
+
+    def run_pipeline_fn(s, conn=None):
+        ran["pipeline"] = True
+        return dict(_BT_RESULT)
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
+                                  llm_fn=_json_llm(True, "x"), market="KR")
+
+    assert ran["pipeline"] is True   # 실행은 됐지만
+    assert out["blocked"] is True    # 검증 실패 → 결과 폐기
+    assert out["result"] is None
+    assert out["warnings"] == []
+
+
+def test_post_lookahead_check_exception_fails_closed(tmp_path, monkeypatch):
+    """사후 하드검사(미래참조)가 내부 예외로 죽어도 → 결과 폐기하고 차단(fail-closed)."""
+    conn = _seeded_conn(tmp_path)
+    monkeypatch.setattr(auditor, "check_lookahead", _boom)
+
+    steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
+    run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
+    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="KR")
+
+    assert out["blocked"] is True
+    assert out["result"] is None
+    assert out["warnings"] == []
