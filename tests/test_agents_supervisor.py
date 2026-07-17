@@ -114,6 +114,24 @@ def test_route_prompt_mentions_histogram_for_llm_routing():
     assert "히스토그램" in prompt or "분포" in prompt
 
 
+def test_route_question_fallback_without_llm_detects_qvm_as_backtest():
+    """QVM(퀄리티·밸류·모멘텀) 멀티팩터 질문은 '백테스트'/'전략' 단어가 없어도 backtest로
+    라우팅돼야 한다 — 실서버 재현: "너는 한국 주식 멀티팩터 스크리너다" 같은 QVM 질문이
+    compute_qvm_scores(backtest 전용 프리미티브)를 쓸 수 없는 kr 도메인으로 잘못 라우팅돼
+    3회 검증에 모두 실패하고 자유 코드 폴백까지 실패했다(라우팅 자체가 원인)."""
+    assert route_question("한국 주식 멀티팩터 스크리너 전략을 돌려줘", None) == ["backtest"]
+    assert "backtest" in route_question("퀄리티 밸류 모멘텀 전략으로 코스피 상위 20개 뽑아줘", None)
+    assert route_question("QVM 전략으로 스크리닝해줘", None) == ["backtest"]
+
+
+def test_route_prompt_mentions_qvm_for_llm_routing():
+    """LLM 우선 라우팅 경로도 인식하도록 _route_prompt의 backtest 설명에 QVM/멀티팩터
+    복합점수 스크리닝이 포함돼야 한다("전략 백테스트"로만 설명되면 LLM이 이 도메인을
+    kr의 단일지표 스크리닝과 혼동해 놓친다)."""
+    prompt = supervisor_mod._route_prompt("아무 질문")
+    assert "qvm" in prompt.lower() or "복합" in prompt or "멀티팩터" in prompt
+
+
 def test_route_question_fallback_without_llm_detects_common_kr_company_nicknames():
     """실사용 재현: LLM 라우팅이 일시 실패해 휴리스틱으로 폴백했을 때, '코스피'/'삼성' 같은
     시장 키워드 없이 개별 종목 약칭만 있는 질문("하이닉스 12개월 누적수익률")이 빈 라우팅으로
