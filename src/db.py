@@ -381,12 +381,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def seed_metric_defs(conn: sqlite3.Connection) -> None:
+    """METRIC_DEFS를 metric_def 테이블에 upsert하고, 거기서 빠진(제거된) key는 지운다.
+
+    upsert만 하면 이미 시드된 DB에 init_db를 다시 돌려도 옛 지표(예: 계산 로직이 없어
+    UI에서 뺀 dividend_yield)가 그대로 남아 체크박스가 되살아난다 — DELETE로 항상
+    METRIC_DEFS와 정확히 일치시킨다.
+    """
+    keys = [key for key, *_ in METRIC_DEFS]
     for key, label, cat, direction, desc in METRIC_DEFS:
         conn.execute(
             "INSERT OR REPLACE INTO metric_def(key,label,category,direction,description) "
             "VALUES(?,?,?,?,?)",
             (key, label, cat, direction, desc),
         )
+    placeholders = ",".join("?" * len(keys))
+    conn.execute(f"DELETE FROM metric_def WHERE key NOT IN ({placeholders})", keys)
     conn.commit()
 
 

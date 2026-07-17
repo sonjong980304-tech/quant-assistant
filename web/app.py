@@ -737,10 +737,9 @@ def api_backtest(req: BacktestReq):
         if invalid:
             raise HTTPException(
                 400, f"허용되지 않는 시장 {invalid} (domain={req.domain}, 허용: {sorted(allowed_markets)})")
-    # UI 지표 목록(metric_def)의 'momentum'(가격모멘텀)은 백테스트 단면에 그 이름의 필드가
-    # 없다(있는 것은 return_12m — 직전 12개월 가격수익률). 도메인 스크리닝 경로(domain_kr.py의
-    # "모멘텀"→return_12m)와 동일 규약으로 여기서 별칭 치환한다. 치환이 없으면 selection.py의
-    # _validate_criteria_keys가 ValueError('존재하지 않는 필드: momentum')를 던져 실행이 실패했다.
+    # metric_def의 UI 체크박스 key는 이제 'return_12m'로 통일돼 있어 momentum을 안 보낸다.
+    # 이 치환은 과거에 저장된 백테스트 설정(criteria에 momentum이 박혀 있는 경우) 등을 위한
+    # 하위호환 방어 코드로만 남아있다 — 없어도 새 UI 흐름엔 영향 없다.
     criteria = [{**c, "key": "return_12m"} if c.get("key") == "momentum" else c
                 for c in req.criteria]
     conn = connect()

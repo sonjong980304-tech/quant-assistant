@@ -384,7 +384,9 @@ def metrics_at(conn, asof: str) -> list[dict]:
         # EV/EBITDA — 마법공식 EV·EBIT 인프라를 그대로 재사용한다. EBITDA = EBIT + 감가상각비(TTM,
         # EBIT과 기간을 맞춤). roc(IC용 dep는 0으로 근사)와 달리 감가상각비가 없으면 EBITDA 자체를
         # 근사하지 않고 None으로 둔다 — DART 표준 API에 감가상각비 계정이 없는 종목(삼성전자 등
-        # 대형주 다수)은 EV/EBITDA가 None이 된다(src/ingest/metrics.py의 ev_ebitda와 동일 관례).
+        # 대형주 다수)은 EV/EBITDA가 None이 된다. src/ingest/metrics.py의 ev_ebitda와 취지는
+        # 같지만(감가상각비 없으면 None) EBIT/EV 구성 자체는 다르다(여기는 마법공식의
+        # EBIT=ni+tax+int, EV=시총+총부채-여유자금 인프라를 재사용 — ingest는 영업이익 기반).
         ebitda = (ebit + dep_ttm) if (ebit is not None and dep_ttm is not None) else None
         # 투하자본 IC = (유동자산-유동부채)+(비유동자산-감가상각비). IC<=0이면 ROC 무의미 → None.
         # 감가상각비는 DART 표준 API에 계정 자체가 없는 종목이 많다(삼성전자 등 대형주 다수 —
