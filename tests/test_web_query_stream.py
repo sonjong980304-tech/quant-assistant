@@ -51,7 +51,9 @@ def test_sse_message_formats_event_frame():
 # ── 스트리밍 : run_streaming 이벤트를 SSE 로 순서대로 방출 + done 종료 ───────────
 
 def test_query_stream_emits_events_as_sse(client, monkeypatch):
-    def fake_run_streaming(question, conn, llm_fn=None, steps=None):
+    def fake_run_streaming(question, conn, llm_fn=None, steps=None, out_final=None):
+        if out_final is not None:
+            out_final.update({"conclusion": "결론", "routes": ["kr", "us"]})
         yield {"step": "supervisor", "summary": "한국+미국 도메인 라우팅, 검증 통과(2회 시도)"}
 
     monkeypatch.setattr(webapp, "run_streaming", fake_run_streaming)
@@ -65,6 +67,38 @@ def test_query_stream_emits_events_as_sse(client, monkeypatch):
     assert "event: done" in body
 
 
+# ── 중복 실행 버그 회귀 : done 이벤트가 이 실행의 최종 상태를 그대로 실어보낸다 ──────
+# (과거에는 done의 data가 항상 `{}`라, 프론트가 최종 답변을 얻으려 POST /api/query 를
+# 또 호출해 동일 질문을 두 번 계산했다 — 비용 2배 + 화면 진행상황과 실제 답이 달라질 수
+# 있는 문제였다. 이제 run_streaming(out_final=...) 로 이 스트리밍 실행 한 번이 최종 상태
+# 까지 넘겨주므로, done 이벤트만으로 최종 답변을 렌더링할 수 있다.)
+def test_query_stream_done_event_carries_final_result(client, monkeypatch):
+    def fake_run_streaming(question, conn, llm_fn=None, steps=None, out_final=None):
+        if out_final is not None:
+            out_final.update({
+                "conclusion": "삼성전자 PER 12.3배",
+                "routes": ["kr"],
+                "domain_results": {"kr": {"financial": {"value": 12.3}}},
+                "uncertain": False,
+                "attempts": 1,
+            })
+        yield {"step": "supervisor", "summary": "한국 도메인 라우팅, 검증 통과(1회 시도)"}
+
+    monkeypatch.setattr(webapp, "run_streaming", fake_run_streaming)
+    body = client.get("/api/query/stream", params={"question": "삼성전자 PER"}).text
+
+    done_idx = body.index("event: done")
+    done_data = body[done_idx:].split("data: ", 1)[1].split("\n", 1)[0].strip()
+    payload = json.loads(done_data)
+    assert payload["conclusion"] == "삼성전자 PER 12.3배"
+    assert payload["routes"] == ["kr"]
+    assert payload["domain_results"]["kr"]["financial"]["value"] == 12.3
+    assert payload["uncertain"] is False
+    assert payload["attempts"] == 1
+    # POST /api/query 응답과 동일하게 answered_by 가 붙는다(프론트 렌더링 함수 재사용 가능).
+    assert payload["answered_by"] == "hierarchical"
+
+
 def test_query_stream_emits_multiple_events_in_order(client, monkeypatch):
     seq = [
         {"step": "supervisor", "summary": "A"},
@@ -72,7 +106,7 @@ def test_query_stream_emits_multiple_events_in_order(client, monkeypatch):
         {"step": "verify", "summary": "C"},
     ]
     monkeypatch.setattr(webapp, "run_streaming",
-                        lambda q, conn, llm_fn=None, steps=None: iter(seq))
+                        lambda q, conn, llm_fn=None, steps=None, out_final=None: iter(seq))
     body = client.get("/api/query/stream", params={"question": "q"}).text
     ia, ib, ic = body.index('"A"'), body.index('"B"'), body.index('"C"')
     assert ia < ib < ic   # 방출 순서 보존
@@ -94,10 +128,11 @@ def test_query_stream_missing_question_returns_422(client):
 def test_query_stream_threads_question_to_run_streaming(client, monkeypatch):
     captured = {}
 
-    def fake_run_streaming(question, conn, llm_fn=None, steps=None):
+    def fake_run_streaming(question, conn, llm_fn=None, steps=None, out_final=None):
         captured["question"] = question
         captured["conn"] = conn
         captured["llm_fn"] = llm_fn
+        captured["out_final"] = out_final
         return iter([{"step": "supervisor", "summary": "ok"}])
 
     monkeypatch.setattr(webapp, "run_streaming", fake_run_streaming)
@@ -105,6 +140,7 @@ def test_query_stream_threads_question_to_run_streaming(client, monkeypatch):
     assert captured["question"] == "삼성전자 PER"
     assert captured["conn"] is not None       # connect_readonly 더미가 전달됨
     assert captured["llm_fn"] is None          # 픽스처가 _build_llm_fn→None 으로 스텁
+    assert isinstance(captured["out_final"], dict)  # 최종 상태를 받을 가변 컨테이너가 전달됨
 
 
 def test_query_stream_builds_llm_fn_with_selected_model(client, monkeypatch):
@@ -112,7 +148,7 @@ def test_query_stream_builds_llm_fn_with_selected_model(client, monkeypatch):
     monkeypatch.setattr(webapp, "_build_llm_fn",
                         lambda model: seen.setdefault("model", model) or None)
     monkeypatch.setattr(webapp, "run_streaming",
-                        lambda q, conn, llm_fn=None, steps=None: iter([]))
+                        lambda q, conn, llm_fn=None, steps=None, out_final=None: iter([]))
     client.get("/api/query/stream", params={"question": "q", "model": "gpt-5.5"})
     assert seen["model"] == "gpt-5.5"
 
@@ -120,7 +156,7 @@ def test_query_stream_builds_llm_fn_with_selected_model(client, monkeypatch):
 # ── 에러 격리 : run_streaming 도중 예외 → fail 이벤트로 알림(연결은 정상 종료) ──
 
 def test_query_stream_emits_fail_event_on_exception(client, monkeypatch):
-    def boom(question, conn, llm_fn=None, steps=None):
+    def boom(question, conn, llm_fn=None, steps=None, out_final=None):
         yield {"step": "supervisor", "summary": "시작"}
         raise RuntimeError("도메인 폭발")
 

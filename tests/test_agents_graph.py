@@ -299,3 +299,29 @@ def test_run_streaming_uses_heuristic_route_without_llm(monkeypatch):
     events = collect_stream("삼성전자 PER 알려줘", conn=None, llm_fn=None)
     assert events and events[0]["step"] == "supervisor"
     assert "한국" in events[0]["summary"]
+
+
+# ── out_final — 진행 이벤트와 최종 답변을 같은 실행 한 번에서 모두 얻는다 ─────────────
+# (회귀 방지: web/app.py GET /api/query/stream 이 과거 이 최종 상태를 버리고 POST /api/query
+# 를 한 번 더 호출해 동일 질문을 두 번 계산했다 — 비용 2배 + 화면 진행상황과 실제 최종
+# 답변이 달라질 수 있는 문제였다. out_final 은 그 문제를 "실행을 하나로 합쳐" 해결한다.)
+
+def test_run_streaming_populates_out_final_with_final_state(monkeypatch):
+    """out_final(가변 dict)을 넘기면, 이 스트리밍 실행이 끝난 뒤 그래프 최종 상태로 채워진다."""
+    _seed_valid_domains(monkeypatch)
+    out_final: dict = {}
+    events = list(run_streaming(
+        "삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm, out_final=out_final,
+    ))
+
+    assert events  # 진행 이벤트는 그대로 방출된다(기존 동작 불변)
+    assert out_final.get("conclusion") == "삼성전자와 애플 종합 결론"
+    assert out_final.get("routes") == ["kr", "us"]
+    assert out_final.get("uncertain") is False
+
+
+def test_run_streaming_without_out_final_keeps_default_behavior(monkeypatch):
+    """out_final 을 안 넘기면(기존 호출부) 동작이 전혀 바뀌지 않는다 — 하위호환."""
+    _seed_valid_domains(monkeypatch)
+    events = list(run_streaming("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm))
+    assert events and events[0]["step"] == "supervisor"

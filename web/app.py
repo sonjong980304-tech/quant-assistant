@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -376,17 +376,24 @@ def _query_event_stream(question: str, model: Optional[str]):
 
     conn 은 요청마다 새 읽기전용 연결(connect_readonly) — 도메인/데이터 에이전트가
     LLM 생성 SQL 을 실행하므로 읽기전용 연결을 요구한다(src/agents/exec_runtime.py).
-    스트림이 정상 종료되면 `event: done` 마커를 보내 프론트가 EventSource 를 닫게 하고
-    (미종료 시 EventSource 가 자동 재연결→재실행하는 것을 막는다), 도중 실패는 `event: fail`
-    로 알린다(api_macro 의 "실패 격리, 응답은 유지" 관례와 동일 철학).
+    스트림이 정상 종료되면 `event: done` 마커에 이 실행의 최종 상태(conclusion/domain_results/
+    routes/uncertain/attempts/chart_*/...)를 실어 보낸다 — 프론트가 EventSource 를 닫게 하고
+    (미종료 시 EventSource 가 자동 재연결→재실행하는 것을 막는다) 동시에 최종 답변도 함께
+    받는다. (과거에는 done이 빈 데이터만 보내, 프론트가 최종 답변을 얻으려 POST /api/query를
+    한 번 더 호출해 동일 질문을 두 번 계산했다 — 비용 2배 + 화면 진행상황과 실제 답이 달라질
+    수 있는 문제였다. run_streaming(out_final=...)로 이 실행 한 번에서 진행 이벤트와 최종
+    상태를 모두 얻어, 실행 경로를 하나로 합쳤다.) 도중 실패는 `event: fail`로 알린다
+    (api_macro 의 "실패 격리, 응답은 유지" 관례와 동일 철학).
     """
     conn = None
+    final: Dict[str, Any] = {}
     try:
         conn = connect_readonly()
         llm_fn = _build_llm_fn(model)
-        for event in run_streaming(question, conn, llm_fn=llm_fn):
+        for event in run_streaming(question, conn, llm_fn=llm_fn, out_final=final):
             yield _sse_message(event)
-        yield "event: done\ndata: {}\n\n"
+        payload = {**final, "answered_by": "hierarchical"}
+        yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
     except Exception as exc:  # noqa: BLE001 — 스트림 도중 실패를 클라이언트에 명시적으로 알림
         yield f"event: fail\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
     finally:
@@ -400,7 +407,11 @@ def api_query_stream(question: str, model: Optional[str] = None):
 
     요청:  GET /api/query/stream?question=<질문>&model=<선택 LLM id>
     응답:  text/event-stream — 이벤트마다 `data: {"step","summary"}\\n\\n`,
-           정상 종료 `event: done`, 실패 `event: fail`.
+           정상 종료 `event: done`(data에 최종 상태 — conclusion/domain_results/routes/
+           uncertain/attempts/... 포함, POST /api/query 응답과 동일 형태), 실패 `event: fail`.
+           이 스트리밍 실행 한 번이 진행 이벤트와 최종 답변을 모두 내어주므로, 프론트는
+           이 응답만으로 렌더링을 완결할 수 있다(POST /api/query 를 별도로 또 호출해
+           동일 질문을 두 번 계산할 필요가 없다).
     """
     if not question.strip():
         raise HTTPException(400, "질문이 비어 있습니다.")

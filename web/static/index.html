@@ -244,26 +244,21 @@ async function loadMacro(){
   }
 }
 
-async function runQuery(){
+function runQuery(){
   const q=document.getElementById('q').value.trim(); if(!q)return;
   const btn=document.getElementById('runBtn'); btn.disabled=true;
   // 새 질문 제출 시: 이전 SSE 연결을 먼저 닫고(이벤트 섞임 방지) 트리/결론/차트/에러를 완전히 비운다.
   if(_treeES){ _treeES.close(); _treeES=null; }
   document.getElementById('treeResult').innerHTML='';
-  document.getElementById('qResult').innerHTML='';
-  _lastQueryResult=null;                                       // 이전 질문의 재실행 캐시 폐기
-  startStreamTree(q);   // 실시간 트리(SSE)를 항상 자동 실행 — 별도 토글 없음
   document.getElementById('qResult').innerHTML='<div class="card"><span class="spinner"></span> 계층형 에이전트 실행 중…</div>';
-  try{
-    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:q,model:document.getElementById('modelSel').value})});
-    const s=await r.json();
-    if(!r.ok){throw new Error(s.detail||'오류');}
-    _lastQueryResult=s;                                        // 재실행(HA-12 확장)이 참조할 최신 응답
-    renderQuery(s);
-  }catch(e){
-    document.getElementById('qResult').innerHTML=`<div class="card err">오류: ${esc(e.message)}</div>`;
-  }finally{btn.disabled=false;}
+  _lastQueryResult=null;                                       // 이전 질문의 재실행 캐시 폐기
+  // 실시간 트리(SSE, GET /api/query/stream)를 항상 자동 실행 — 별도 토글 없음.
+  // 과거에는 여기서 별도로 POST /api/query 도 함께 호출해 동일 질문을 두 번 계산했다
+  // (진행 트리용 실행 + 최종 답변용 실행이 서로 다른 두 번의 계층형 그래프 실행이라
+  // 비용이 2배였고, 화면에 보인 진행과정과 실제 최종 답이 이론상 달라질 수 있었다).
+  // 이제 SSE의 done 이벤트가 최종 상태를 함께 실어오므로(web/app.py _query_event_stream),
+  // 이 스트리밍 실행 하나로 진행 트리와 최종 답변을 모두 받는다 — POST 재호출 없음.
+  startStreamTree(q, btn);
 }
 
 // ===== 계층형 에이전트 실시간 트리 (HA-12) =====
@@ -383,7 +378,7 @@ function applyRerunResult(info,result){
   _lastQueryResult.domain_results[domain]=result;
   renderQuery(_lastQueryResult);
 }
-function startStreamTree(q){
+function startStreamTree(q, btn){
   if(_treeES){ _treeES.close(); _treeES=null; }              // 이전 스트림 정리(중복 실행 방지)
   const box=document.getElementById('treeResult');
   box.innerHTML='<div class="card"><b>🌳 계층형 에이전트 · 실시간 진행</b>'+
@@ -399,21 +394,35 @@ function startStreamTree(q){
     if(!got){ nodes.innerHTML=''; got=true; }                 // 첫 이벤트 도착 시 로딩표시 제거
     nodes.insertAdjacentHTML('beforeend', treeNode(ev.step, ev.summary||'', ev.detail, q));
   };
-  _treeES.addEventListener('done',()=>{                       // 정상 종료 마커 → 닫기(자동 재연결·재실행 방지)
+  _treeES.addEventListener('done',(e)=>{                      // 정상 종료 마커 → 닫기(자동 재연결·재실행 방지)
     if(_treeES){ _treeES.close(); _treeES=null; }
     if(!got){ nodes.innerHTML='<div class="meta">진행 이벤트가 없었습니다.</div>'; }
     nodes.insertAdjacentHTML('beforeend','<div class="tree-done">✓ 완료</div>');
     // 완료 후엔 코드 블록을 접어 화면을 정리한다(편집·재실행은 계속 가능 — 펼치면 그대로 있음).
     nodes.querySelectorAll('details.code-details[open]').forEach(d=>d.removeAttribute('open'));
+    // done 이벤트가 이 실행의 최종 상태(conclusion/domain_results/...)를 함께 실어온다 —
+    // 별도로 POST /api/query 를 또 호출하지 않고 이 데이터로 바로 최종 답변을 렌더링한다.
+    let s=null; try{ s=JSON.parse(e.data); }catch(_){}
+    if(s && typeof s==='object' && Object.keys(s).length){
+      _lastQueryResult=s;                                     // 재실행(HA-12 확장)이 참조할 최신 응답
+      renderQuery(s);
+    }else{
+      document.getElementById('qResult').innerHTML='<div class="card err">오류: 최종 결과를 받지 못했습니다.</div>';
+    }
+    if(btn) btn.disabled=false;
   });
   _treeES.addEventListener('fail',(e)=>{                      // 서버가 보낸 실패 이벤트
     if(_treeES){ _treeES.close(); _treeES=null; }
     let msg=''; try{ msg=(JSON.parse(e.data)||{}).message||''; }catch(_){}
     nodes.insertAdjacentHTML('beforeend',`<div class="tree-fail">⚠ 실패: ${esc(msg||'스트림 오류')}</div>`);
+    document.getElementById('qResult').innerHTML=`<div class="card err">오류: ${esc(msg||'스트림 오류')}</div>`;
+    if(btn) btn.disabled=false;
   });
   _treeES.onerror=()=>{                                        // 연결 끊김(EventSource 기본 error) → 닫아 재연결 방지
     if(_treeES){ _treeES.close(); _treeES=null; }
     if(!got){ nodes.innerHTML='<div class="meta err">스트림 연결 실패</div>'; }
+    document.getElementById('qResult').innerHTML='<div class="card err">오류: 스트림 연결 실패</div>';
+    if(btn) btn.disabled=false;
   };
 }
 
