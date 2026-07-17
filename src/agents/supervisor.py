@@ -39,6 +39,7 @@ from typing import Callable
 
 from src.agents.charting import (
     render_bar_chart_base64,
+    render_histogram_chart_base64,
     render_line_chart_base64,
     render_scatter_chart_base64,
 )
@@ -68,6 +69,9 @@ _ROUTE_KEYWORDS: dict[str, tuple[str, ...]] = {
         # 계산 가능하다 — "백테스트"라는 단어가 없어도 이 도메인으로 가야 한다.
         "상관관계", "상관계수", "산점도", "분위수", "5분위", "팩터분석", "요인분석",
         "correlation", "quantile",
+        # 히스토그램(분포도)도 histogram_buckets 프리미티브(get_cross_section 기반)로만
+        # 계산 가능하다 — "백테스트"라는 단어가 없어도 이 도메인으로 가야 한다.
+        "히스토그램", "histogram", "분포도",
     ),
     "macro": ("매크로", "금리차", "스프레드", "장단기", "공포탐욕", "vix", "레짐", "매크로 신호"),
     "us": ("애플", "apple", "미국", "나스닥", "s&p", "테슬라", "엔비디아", "aapl", "tsla", "nvda"),
@@ -131,7 +135,9 @@ def _route_prompt(question: str) -> str:
     return (
         "다음 사용자 질문을 처리하려면 어떤 도메인 에이전트가 필요한지 고르세요.\n"
         "가능한 도메인: kr(국내주식 재무/주가), us(미국주식 재무/주가), "
-        "macro(매크로 신호/금리차), backtest(전략 백테스트, 팩터/지표 간 상관관계·분위수 분석).\n"
+        "macro(매크로 신호/금리차), backtest(전략 백테스트, 그리고 전종목 횡단면 지표 분석 — "
+        "팩터/지표 간 상관관계·산점도, 분위수, 히스토그램/분포도. 특정 지표(PBR 등)를 구간으로 "
+        "나눠 히스토그램/분포를 그리는 질문은 개별 종목 조회가 아니라 반드시 backtest입니다).\n"
         "여러 도메인이 필요하면 모두 나열하세요(예: 국내 vs 미국 비교 → kr, us).\n"
         "도메인 키워드만 콤마로 구분해 답하세요.\n\n"
         f"질문: {question}\n답:"
@@ -250,6 +256,20 @@ def _is_quantile_bucket_shape(res) -> bool:
     )
 
 
+def _is_histogram_shape(res) -> bool:
+    """histogram_buckets() 반환 모양({"field","bucket_edges","counts",...} dict)인지.
+
+    quantile_bucket_means는 list(분위별 평균 dict의 리스트)를 반환하고 histogram은 dict 자체라
+    애초에 모양이 다르다 — 'bucket' 키 부재 검사는 quantile 개별 원소(dict)와의 오탐을 막는
+    안전장치일 뿐, 실제로 겹칠 일은 없다.
+    """
+    return (
+        isinstance(res, dict)
+        and "bucket_edges" in res and "counts" in res and "field" in res
+        and "bucket" not in res
+    )
+
+
 def _find_in_backtest_result(domain_results: dict, matcher: Callable[[object], bool]):
     """domain_results['backtest']['result']에서 matcher를 만족하는 값을 찾는다.
 
@@ -305,6 +325,21 @@ def _extract_bar_data(domain_results: dict) -> tuple[list, list, str, str, str] 
     return labels, values, "분위", "평균값", title
 
 
+def _extract_histogram_data(domain_results: dict) -> tuple[list, list, str, str] | None:
+    """domain_results에서 히스토그램으로 그릴 데이터(histogram_buckets 프리미티브 결과)를 고른다.
+
+    반환: (bucket_edges, counts, x_label(=field), title). result 자체가 histogram 모양이든
+    다중산출물 dict 안에 중첩돼 있든 _find_in_backtest_result가 찾아낸다. 없으면 None.
+    """
+    res = _find_in_backtest_result(domain_results, _is_histogram_shape)
+    if res is None:
+        return None
+    edges = list(res["bucket_edges"])
+    counts = list(res["counts"])
+    field = res["field"]
+    return edges, counts, field, f"{field} 분포 히스토그램"
+
+
 def _build_charts(domain_results: dict, conn) -> list[tuple[str, str]]:
     """domain_results에서 그릴 수 있는 차트를 전부 찾아 base64 PNG 리스트로 만든다.
 
@@ -330,6 +365,14 @@ def _build_charts(domain_results: dict, conn) -> list[tuple[str, str]]:
         labels, values, x_label, y_label, title = bar
         try:
             charts.append((render_bar_chart_base64(labels, values, x_label, y_label, title), title))
+        except Exception:  # noqa: BLE001
+            pass
+
+    hist = _extract_histogram_data(domain_results)
+    if hist is not None:
+        edges, counts, x_label, title = hist
+        try:
+            charts.append((render_histogram_chart_base64(edges, counts, x_label, title), title))
         except Exception:  # noqa: BLE001
             pass
 

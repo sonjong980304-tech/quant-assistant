@@ -24,19 +24,28 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 
 from .primitives import (
     combine,
+    composite_score,
     compute_ic_primitive,
+    compute_qvm_scores,
     compute_technical_indicator,
     correlation,
+    drop_missing_factors,
     get_cross_section,
+    get_cross_section_qvm,
+    histogram_buckets,
+    invert_field,
     neutralize,
     optimize_weights,
     quantile_bucket_means,
     regress,
     remove_outliers,
     run_backtest_primitive,
+    run_qvm_backtest,
     scatter_data,
     search_strategy,
+    sector_zscore_with_fallback,
     winsorize,
+    winsorize_pct,
     zscore,
 )
 from .signal_engine import run_signal_backtest, search_signal_strategy
@@ -56,6 +65,7 @@ PRIMITIVE_OPS = {
     "regress": regress,
     "correlation": correlation,
     "quantile_bucket_means": quantile_bucket_means,
+    "histogram_buckets": histogram_buckets,
     "remove_outliers": remove_outliers,
     "scatter_data": scatter_data,
     "optimize_weights": optimize_weights,
@@ -65,12 +75,22 @@ PRIMITIVE_OPS = {
     "compute_technical_indicator": compute_technical_indicator,
     "search_strategy": search_strategy,
     "search_signal_strategy": search_signal_strategy,
+    # QVM 멀티팩터(신규): 저수준 5종(순수) + 조립 compute_qvm_scores + conn 필요 2종
+    "invert_field": invert_field,
+    "winsorize_pct": winsorize_pct,
+    "sector_zscore_with_fallback": sector_zscore_with_fallback,
+    "composite_score": composite_score,
+    "drop_missing_factors": drop_missing_factors,
+    "compute_qvm_scores": compute_qvm_scores,
+    "get_cross_section_qvm": get_cross_section_qvm,
+    "run_qvm_backtest": run_qvm_backtest,
 }
 
 # DB 연결(conn)을 실행기가 주입해줘야 하는 연산(LLM이 conn을 지정하지 않도록)
 _NEEDS_CONN = {
     "get_cross_section", "run_backtest", "run_signal_backtest", "compute_ic",
     "compute_technical_indicator", "search_strategy", "search_signal_strategy",
+    "get_cross_section_qvm", "run_qvm_backtest",
 }
 
 

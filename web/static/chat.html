@@ -111,6 +111,9 @@
   tr:hover td{background:rgba(255,255,255,.02)}
   .table-scroll{overflow-x:auto}
 
+  /* 차트 이미지(base64 PNG) — 히스토그램/막대/산점도/라인. index.html의 .qchart를 이식. */
+  .qchart{max-width:100%;height:auto;display:block;margin-top:10px;border-radius:8px;border:1px solid var(--line)}
+
   /* 근거 데이터 재귀 렌더러(index.html renderValue/domainCard 패턴 이식). */
   table.kvt{width:100%;border-collapse:collapse;font-size:12.5px;margin:0}
   table.kvt th{text-align:left;color:var(--muted);font-weight:600;vertical-align:top;
@@ -330,6 +333,9 @@ function renderCenter(turn){
   let html = turn.status==='success'
     ? renderAnswerBody(turn.answer)
     : `<div class="err">${esc(turn.error||'실패')}</div>`;
+  if(turn.status==='success' && turn.chart_base64){
+    html += `<div class="card" style="margin-top:14px"><b>📈 ${esc(turn.chart_title||'차트')}</b><img class="qchart" src="data:image/png;base64,${turn.chart_base64}" alt="${esc(turn.chart_title||'차트')}"></div>`;
+  }
   if(turn.csv_available){
     html+=`<div class="answer-actions"><a class="chip" href="/api/chat/csv?session_id=${encodeURIComponent(sessionId)}&turn_index=${turn._index}" download>⬇ CSV 다운로드</a></div>`;
   }

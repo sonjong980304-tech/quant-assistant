@@ -198,7 +198,7 @@ def test_run_turn_does_not_call_sql_when_session_has_data():
     def fake_llm(prompt):
         return "```python\nresult = sorted(data, key=lambda r: r['pbr'])\n```"
 
-    def fake_execute_python(code, context, result_var):
+    def fake_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": True, "result": sorted(context["data"], key=lambda r: r["pbr"])}
 
     run_turn(session, "이제 오름차순으로", conn=None, llm_fn=fake_llm,
@@ -219,7 +219,7 @@ def test_followup_prompt_contains_only_summary_not_raw_values():
         captured_prompts.append(prompt)
         return "```python\nresult = data\n```"
 
-    def fake_execute_python(code, context, result_var):
+    def fake_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": True, "result": context["data"]}
 
     run_turn(session, "다시 보여줘", conn=None, llm_fn=fake_llm, execute_python_fn=fake_execute_python,
@@ -241,7 +241,7 @@ def test_followup_execution_context_receives_full_prior_data():
     def fake_llm(prompt):
         return "```python\nresult = data\n```"
 
-    def fake_execute_python(code, context, result_var):
+    def fake_execute_python(code, context, result_var, extra_vars=None):
         captured_contexts.append(context)
         return {"ok": True, "result": context["data"]}
 
@@ -313,7 +313,7 @@ def test_followup_failure_keeps_prior_current_data():
     def fake_llm(prompt):
         return "```python\nresult = data[0]['없는키']\n```"
 
-    def fake_execute_python(code, context, result_var):
+    def fake_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": False, "error": "KeyError: '없는키'"}
 
     turn = run_turn(session, "이상한 가공", conn=None, llm_fn=fake_llm, execute_python_fn=fake_execute_python,
@@ -334,7 +334,7 @@ def test_followup_failure_retries_as_new_turn_and_can_succeed():
     def fake_llm(prompt):
         return "```python\nresult = data.columns\n```"  # dict에 .columns 접근 시도 → 실패
 
-    def fake_execute_python(code, context, result_var):
+    def fake_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": False, "error": "AttributeError: 'dict' object has no attribute 'columns'"}
 
     def fake_verified(question, conn, llm_fn, **kwargs):
@@ -358,7 +358,7 @@ def test_failure_reason_not_included_in_next_turn_prompt():
     def failing_llm(prompt):
         return "```python\nresult = 1/0\n```"
 
-    def failing_execute_python(code, context, result_var):
+    def failing_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": False, "error": "ZeroDivisionError: division by zero"}
 
     run_turn(session, "실패할 질문", conn=None, llm_fn=failing_llm, execute_python_fn=failing_execute_python,
@@ -370,7 +370,7 @@ def test_failure_reason_not_included_in_next_turn_prompt():
         captured_prompts.append(prompt)
         return "```python\nresult = data\n```"
 
-    def next_execute_python(code, context, result_var):
+    def next_execute_python(code, context, result_var, extra_vars=None):
         return {"ok": True, "result": context["data"]}
 
     run_turn(session, "다음 질문", conn=None, llm_fn=next_llm, execute_python_fn=next_execute_python,
@@ -385,7 +385,7 @@ def test_success_after_two_failures_bases_on_last_success_not_failed_attempts():
     session.current_data = [{"code": "005930", "pbr": 1.2}]
 
     fail_llm = lambda prompt: "```python\nresult = 1/0\n```"
-    fail_exec = lambda code, context, result_var: {"ok": False, "error": "boom"}
+    fail_exec = lambda code, context, result_var, extra_vars=None: {"ok": False, "error": "boom"}
     classify_continue = lambda *a, **k: False
     run_turn(session, "실패1", conn=None, llm_fn=fail_llm, execute_python_fn=fail_exec, max_code_attempts=1,
               classify_fn=classify_continue, verified_fn=_uncertain_verified)
@@ -397,7 +397,7 @@ def test_success_after_two_failures_bases_on_last_success_not_failed_attempts():
     def ok_llm(prompt):
         return "```python\nresult = data\n```"
 
-    def ok_exec(code, context, result_var):
+    def ok_exec(code, context, result_var, extra_vars=None):
         captured_contexts.append(context)
         return {"ok": True, "result": context["data"]}
 
@@ -539,7 +539,7 @@ def test_run_turn_reports_progress_for_followup_per_attempt():
         calls["n"] += 1
         return "```python\nresult = data\n```"
 
-    def flaky_exec(code, context, result_var):
+    def flaky_exec(code, context, result_var, extra_vars=None):
         if calls["n"] == 1:
             return {"ok": False, "error": "일시적 오류"}
         return {"ok": True, "result": context["data"]}
@@ -568,3 +568,214 @@ def test_get_history_flags_csv_availability_per_turn():
     assert history[0]["csv_available"] is True
     assert history[1]["csv_available"] is False
     assert history[2]["csv_available"] is False
+
+
+# --------------------------------------------------------------------------
+# CSV 컬럼 필터 — 스크리닝 결과를 CSV로 내려받을 때는 식별자(stock_code,name)+요청 지표
+# (criteria 키)만 남기고 sector/market/quarter 등 무관 컬럼은 뺀다. 화면 표시(오른쪽 원본
+# 병기 패널, domain_evidence 원본)는 절대 안 건드리고 오직 "내려받는 CSV"만 좁힌다.
+# --------------------------------------------------------------------------
+def test_screening_csv_columns_single_metric():
+    from src.agents.conversation import _screening_csv_columns
+
+    evidence = {"kr": {"criteria": [{"key": "per", "direction": "low", "weight": 1.0}],
+                       "result": [{"stock_code": "005930", "name": "삼성전자", "per": 10.5}]}}
+    assert _screening_csv_columns(evidence) == ["stock_code", "name", "per"]
+
+
+def test_screening_csv_columns_multiple_metrics_preserve_order():
+    from src.agents.conversation import _screening_csv_columns
+
+    evidence = {"kr": {"criteria": [{"key": "per"}, {"key": "roe"}],
+                       "result": [{"stock_code": "005930"}]}}
+    # 순서: stock_code, name 다음에 criteria 순서(per, roe)
+    assert _screening_csv_columns(evidence) == ["stock_code", "name", "per", "roe"]
+
+
+def test_screening_csv_columns_works_for_us_domain():
+    from src.agents.conversation import _screening_csv_columns
+
+    evidence = {"us": {"criteria": [{"key": "pe"}], "result": [{"stock_code": "AAPL"}]}}
+    assert _screening_csv_columns(evidence) == ["stock_code", "name", "pe"]
+
+
+def test_screening_csv_columns_none_when_no_criteria():
+    from src.agents.conversation import _screening_csv_columns
+
+    # criteria 키가 아예 없음(단일종목 조회/백테스트 등)
+    assert _screening_csv_columns({"kr": {"result": [{"stock_code": "005930"}]}}) is None
+    # criteria가 빈 리스트
+    assert _screening_csv_columns({"kr": {"criteria": [], "result": [{"stock_code": "005930"}]}}) is None
+    # domain_evidence 자체가 None(follow-up 턴 등)
+    assert _screening_csv_columns(None) is None
+
+
+def test_extract_tabular_data_filters_to_criteria_columns():
+    from src.agents.conversation import _extract_tabular_data
+
+    domain_results = {"kr": {"criteria": [{"key": "per"}],
+                             "result": [{"stock_code": "005930", "name": "삼성전자", "per": 10.5,
+                                         "sector": "전기전자", "market": "KOSPI", "roe": 15.0}]}}
+    rows = _extract_tabular_data(domain_results)
+
+    assert rows == [{"stock_code": "005930", "name": "삼성전자", "per": 10.5}]
+    # 원본 domain_results(화면 표시용 병기 패널)는 절대 변경되지 않는다
+    assert set(domain_results["kr"]["result"][0].keys()) == {
+        "stock_code", "name", "per", "sector", "market", "roe"}
+
+
+def test_extract_tabular_data_keeps_all_columns_without_criteria():
+    from src.agents.conversation import _extract_tabular_data
+
+    # criteria 신호가 없으면(단일종목 조회 등) 무엇을 걸러야 할지 알 수 없으므로 전체 컬럼 유지
+    domain_results = {"kr": {"result": [{"stock_code": "005930", "name": "삼성전자", "close": 70000}]}}
+    rows = _extract_tabular_data(domain_results)
+
+    assert rows == [{"stock_code": "005930", "name": "삼성전자", "close": 70000}]
+
+
+def test_turn_to_csv_filters_columns_for_screening_turn():
+    """통합: run_turn으로 스크리닝 결과를 담은 뒤 turn_to_csv 헤더가 실제로 좁혀지는지."""
+    domain_results = {"kr": {"criteria": [{"key": "per"}],
+                             "result": [{"stock_code": "005930", "name": "삼성전자", "per": 10.5,
+                                         "sector": "전기전자", "market": "KOSPI", "quarter": "2024Q1"}]}}
+
+    def fake_verified(question, conn, llm_fn, **kwargs):
+        return {"uncertain": False, "conclusion": "PER 낮은 순", "domain_results": domain_results}
+
+    session = _fresh_session()
+    run_turn(session, "PER 낮은 10개 종목", conn=None, llm_fn="fake_llm", verified_fn=fake_verified)
+
+    csv_text = turn_to_csv(session, 0)
+    header = csv_text.splitlines()[0].lstrip("﻿")
+    assert header.split(",") == ["stock_code", "name", "per"]
+    assert "sector" not in header
+    assert "market" not in header
+    assert "quarter" not in header
+
+
+# --------------------------------------------------------------------------
+# 차트 배선(멀티턴, 히스토그램 기능) — 신규 턴은 answer_with_verification이 채운 차트를,
+# 이어가기 턴은 생성 코드가 chart_base64/chart_title 변수에 담은 것을 Turn/history로 옮긴다.
+# --------------------------------------------------------------------------
+def test_run_new_turn_carries_chart_fields_from_verified_fn():
+    def fake_verified(question, conn, llm_fn, **kwargs):
+        return {"uncertain": False, "conclusion": "히스토그램 답변",
+                "domain_results": {"backtest": {"result": {
+                    "field": "pbr", "bucket_edges": [0.0, 1.0, 2.0], "counts": [3, 4], "n": 7}}},
+                "chart_base64": "AAA", "chart_title": "pbr 분포 히스토그램"}
+
+    session = _fresh_session()
+    turn = run_turn(session, "코스피 PBR 히스토그램 그려줘", conn=None, llm_fn="fake",
+                    verified_fn=fake_verified)
+    assert turn.chart_base64 == "AAA"
+    assert turn.chart_title == "pbr 분포 히스토그램"
+
+
+def test_followup_python_prompt_includes_chart_guidance_when_flag_true():
+    import src.agents.conversation as conv
+
+    p = conv._followup_python_prompt("히스토그램 그려줘", "리스트[dict] 5개", wants_chart_flag=True)
+    assert "chart_base64" in p
+    assert "render_histogram_chart_base64" in p
+    assert "src.agents.charting" in p
+
+
+def test_followup_python_prompt_no_chart_guidance_by_default():
+    import src.agents.conversation as conv
+
+    p = conv._followup_python_prompt("오름차순으로 다시 정렬", "리스트[dict] 5개")
+    assert "chart_base64" not in p
+    assert "render_histogram_chart_base64" not in p
+
+
+def test_run_followup_step_passes_extra_vars_and_returns_chart_when_requested():
+    import src.agents.conversation as conv
+
+    captured = {}
+
+    def fake_llm(prompt):
+        assert "render_histogram_chart_base64" in prompt  # 차트 요청이라 안내가 포함됨
+        return "```python\nresult = data\nchart_base64 = 'PNG'\nchart_title = 'T'\n```"
+
+    def fake_exec(code, context, result_var, extra_vars=None):
+        captured["extra_vars"] = extra_vars
+        return {"ok": True, "result": context["data"],
+                "extra": {"chart_base64": "PNG", "chart_title": "T"}}
+
+    out = conv._run_followup_step("PBR 히스토그램 그려줘", [{"pbr": 1.2}], fake_llm,
+                                  execute_python_fn=fake_exec)
+    assert out["ok"] is True
+    assert captured["extra_vars"] == ["chart_base64", "chart_title"]
+    assert out["chart_base64"] == "PNG"
+    assert out["chart_title"] == "T"
+
+
+def test_run_followup_step_chart_fields_none_when_code_did_not_set_them():
+    import src.agents.conversation as conv
+
+    def fake_llm(prompt):
+        return "```python\nresult = data\n```"
+
+    def fake_exec(code, context, result_var, extra_vars=None):
+        # 차트 요청 아님 → 코드가 chart 변수를 안 만듦 → extra는 None
+        return {"ok": True, "result": context["data"],
+                "extra": {"chart_base64": None, "chart_title": None}}
+
+    out = conv._run_followup_step("그냥 오름차순 정렬", [{"pbr": 1.2}], fake_llm,
+                                  execute_python_fn=fake_exec)
+    assert out["ok"] is True
+    assert out.get("chart_base64") is None
+    assert out.get("chart_title") is None
+
+
+def test_run_turn_followup_success_keeps_pure_result_as_current_data():
+    """가장 중요한 회귀: 이어가기 성공 시 session.current_data는 순수 result만이어야 한다
+    (차트 envelope으로 바뀌면 다음 턴 체이닝 계약이 깨진다)."""
+    session = _fresh_session()
+    session.has_data = True
+    session.current_data = [{"pbr": 1.2}, {"pbr": 0.9}]
+
+    def fake_llm(prompt):
+        return "```python\nresult = sorted(data, key=lambda r: r['pbr'])\nchart_base64='PNG'\n```"
+
+    def fake_exec(code, context, result_var, extra_vars=None):
+        return {"ok": True, "result": sorted(context["data"], key=lambda r: r["pbr"]),
+                "extra": {"chart_base64": "PNG", "chart_title": "T"}}
+
+    turn = run_turn(session, "PBR 히스토그램으로 그려줘", conn=None, llm_fn=fake_llm,
+                    execute_python_fn=fake_exec, classify_fn=lambda *a, **k: False)
+    assert turn.chart_base64 == "PNG"
+    assert turn.chart_title == "T"
+    # current_data는 순수 result만(차트 필드가 섞인 dict가 아님)
+    assert session.current_data == [{"pbr": 0.9}, {"pbr": 1.2}]
+
+
+def test_get_history_includes_chart_fields():
+    session = _fresh_session()
+    session.turns = [Turn(question="q", status="success", answer="a",
+                          chart_base64="B64", chart_title="T")]
+    h = get_history(session)
+    assert h[0]["chart_base64"] == "B64"
+    assert h[0]["chart_title"] == "T"
+
+
+def test_normal_followup_without_chart_is_unchanged_regression():
+    """차트 요청 없는 일반 이어가기는 기존과 100% 동일 — chart 필드는 None."""
+    session = _fresh_session()
+    session.has_data = True
+    session.current_data = [{"pbr": 1.2}]
+
+    def fake_llm(prompt):
+        assert "render_histogram_chart_base64" not in prompt  # 차트 안내 없음
+        return "```python\nresult = data\n```"
+
+    def fake_exec(code, context, result_var, extra_vars=None):
+        return {"ok": True, "result": context["data"],
+                "extra": {"chart_base64": None, "chart_title": None}}
+
+    turn = run_turn(session, "그대로 다시 보여줘", conn=None, llm_fn=fake_llm,
+                    execute_python_fn=fake_exec, classify_fn=lambda *a, **k: False)
+    assert turn.status == "success"
+    assert turn.chart_base64 is None
+    assert turn.chart_title is None

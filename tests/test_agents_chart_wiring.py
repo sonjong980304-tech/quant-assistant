@@ -526,3 +526,138 @@ def test_answer_with_verification_no_chart_when_no_series_data():
     )
     assert res["uncertain"] is False
     assert res.get("chart_base64") is None
+
+
+# ── _is_histogram_shape / _extract_histogram_data — histogram_buckets 결과(균등폭 구간별
+#    빈도)를 히스토그램으로 인식. quantile_bucket_means(list, 분위별 평균)와 모양이 다르다. ──
+
+def test_is_histogram_shape_true_for_histogram_result():
+    import src.agents.supervisor as sup
+
+    res = {"field": "pbr", "num_buckets": 10,
+           "bucket_edges": [0.0, 1.0, 2.0], "counts": [3, 5], "n": 8}
+    assert sup._is_histogram_shape(res) is True
+
+
+def test_is_histogram_shape_false_for_screening_and_quantile_lists():
+    import src.agents.supervisor as sup
+
+    # 스크리닝 결과(종목 리스트)
+    assert sup._is_histogram_shape([{"stock_code": "005930", "pbr": 1.2}]) is False
+    # quantile_bucket_means 개별 원소(dict, bucket 키 있음)
+    assert sup._is_histogram_shape(
+        {"bucket": 1, "count": 10, "bucket_range": [0.0, 1.0], "mean_value": 5.0}
+    ) is False
+    # quantile_bucket_means 전체(list)
+    assert sup._is_histogram_shape(
+        [{"bucket": 1, "count": 10, "bucket_range": [0.0, 1.0], "mean_value": 5.0}]
+    ) is False
+
+
+def test_extract_histogram_data_recognizes_backtest_histogram_result():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"blocked": False, "result": {
+            "field": "pbr", "num_buckets": 3,
+            "bucket_edges": [0.0, 1.0, 2.0, 3.0], "counts": [10, 25, 7], "n": 42,
+        }}
+    }
+    out = sup._extract_histogram_data(domain_results)
+    assert out is not None
+    edges, counts, x_label, title = out
+    assert edges == [0.0, 1.0, 2.0, 3.0]
+    assert counts == [10, 25, 7]
+    assert x_label == "pbr"
+    assert "히스토그램" in title and "pbr" in title
+
+
+def test_extract_histogram_data_finds_histogram_nested_in_multi_output_dict():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"blocked": False, "result": {
+            "corr": {"correlation": 0.42, "n": 655},
+            "hist": {"field": "pbr", "num_buckets": 2,
+                     "bucket_edges": [0.0, 1.0, 2.0], "counts": [3, 4], "n": 7},
+        }}
+    }
+    out = sup._extract_histogram_data(domain_results)
+    assert out is not None
+    edges, counts, x_label, title = out
+    assert edges == [0.0, 1.0, 2.0]
+    assert counts == [3, 4]
+    assert x_label == "pbr"
+
+
+def test_extract_histogram_data_none_when_blocked():
+    import src.agents.supervisor as sup
+
+    domain_results = {"backtest": {"blocked": True, "result": {
+        "field": "pbr", "bucket_edges": [0.0, 1.0], "counts": [1], "n": 1}}}
+    assert sup._extract_histogram_data(domain_results) is None
+
+
+def test_build_charts_renders_histogram_png_when_present():
+    import src.agents.supervisor as sup
+
+    domain_results = {
+        "backtest": {"result": {
+            "field": "pbr", "num_buckets": 3,
+            "bucket_edges": [0.0, 1.0, 2.0, 3.0], "counts": [10, 25, 7], "n": 42,
+        }}
+    }
+    charts = sup._build_charts(domain_results, conn=None)
+    assert len(charts) == 1
+    chart_base64, title = charts[0]
+    assert base64.b64decode(chart_base64)[:8] == _PNG_MAGIC
+    assert "히스토그램" in title
+
+
+def test_build_charts_histogram_calls_render_with_correct_args(monkeypatch):
+    """render_histogram_chart_base64가 edges/counts/x_label/title 인자로 호출되는지 확인."""
+    import src.agents.supervisor as sup
+
+    captured = {}
+
+    def fake_render(edges, counts, x_label, title):
+        captured["args"] = (edges, counts, x_label, title)
+        return "ZmFrZQ=="  # 임의 base64
+
+    monkeypatch.setattr(sup, "render_histogram_chart_base64", fake_render)
+    domain_results = {
+        "backtest": {"result": {
+            "field": "pbr", "num_buckets": 2,
+            "bucket_edges": [0.0, 1.0, 2.0], "counts": [3, 4], "n": 7,
+        }}
+    }
+    charts = sup._build_charts(domain_results, conn=None)
+    assert len(charts) == 1
+    edges, counts, x_label, title = captured["args"]
+    assert edges == [0.0, 1.0, 2.0]
+    assert counts == [3, 4]
+    assert x_label == "pbr"
+    assert "히스토그램" in title
+
+
+def test_answer_with_verification_adds_histogram_chart_when_requested():
+    """'히스토그램 그려줘' + 백테스트 histogram 결과 → 성공 응답에 chart_base64(PNG) 배선."""
+    from src.agents.supervisor import answer_with_verification
+
+    bt = {"result": {"field": "pbr", "num_buckets": 3,
+                     "bucket_edges": [0.0, 1.0, 2.0, 3.0], "counts": [10, 25, 7], "n": 42}}
+
+    def stub_route(question, llm_fn):
+        return ["backtest"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"backtest": bt}
+
+    res = answer_with_verification(
+        "코스피 PBR을 20구간으로 나눠 히스토그램 그려줘", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+    )
+    assert res["uncertain"] is False
+    assert res.get("chart_base64")
+    assert base64.b64decode(res["chart_base64"])[:8] == _PNG_MAGIC
+    assert "히스토그램" in res["chart_title"]

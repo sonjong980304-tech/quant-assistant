@@ -153,6 +153,58 @@ def price_history_batch(conn, codes: list[str], asof: str, lookback_days: int) -
     return out
 
 
+def _latest_close_batch(conn, codes: list[str], cutoff: str) -> dict[str, float]:
+    """여러 종목의 'cutoff 이하 가장 가까운 거래일 종가'를 SQL 1회로 배치 조회한다.
+
+    _price_at(단일종목 스냅샷)의 배치판 — 종목별 개별 쿼리(N+1)를 피하려고 서브쿼리로
+    종목별 MAX(date)를 한 번에 구한 뒤 그 날짜의 종가를 JOIN한다(idx_price_code_d 활용).
+    momentum_12_1_batch가 시작/끝 두 컷오프에 각각 1회씩만 호출하므로, 전종목 모멘텀을
+    상수 회수(2회)의 SQL로 계산할 수 있다(종목 수에 비례한 반복 조회를 만들지 않는다).
+    """
+    out: dict[str, float] = {}
+    if not codes:
+        return out
+    placeholders = ",".join("?" for _ in codes)
+    rows = conn.execute(
+        f"SELECT p.stock_code AS stock_code, p.close AS close FROM prices p "
+        f"JOIN (SELECT stock_code, MAX(date) AS md FROM prices "
+        f"WHERE stock_code IN ({placeholders}) AND date<=? GROUP BY stock_code) m "
+        f"ON p.stock_code=m.stock_code AND p.date=m.md",
+        (*codes, cutoff),
+    ).fetchall()
+    for r in rows:
+        out[r["stock_code"]] = r["close"]
+    return out
+
+
+def momentum_12_1_batch(conn, codes: list[str], asof: str) -> dict[str, float | None]:
+    """12-1 모멘텀(최근 1개월 제외 12개월 수익률, %)을 전종목 배치로 계산한다.
+
+    12개월 전 종가 대비 '1개월 전' 종가의 수익률(%). 최근 1개월(asof~1개월전)을 제외하는
+    표준 12-1 모멘텀이다(단순 return_12m과 다름 — 사용자가 명시적으로 12-1을 선택).
+    각 컷오프(12개월전/1개월전)의 종가는 그 날짜 '이하' 가장 가까운 거래일 종가를 쓴다
+    (미래참조 없음, price_return_over_months/return_12m과 동일 규약). 시작 종가가 없거나
+    0 이하이면 계산 불가로 None(억지 추정하지 않음).
+
+    크로스섹션(수천 종목)에 쓰이므로 종목별 반복 SQL이 아니라 _latest_close_batch를 시작/끝
+    각 1회씩(총 2회)만 호출해 배치로 계산한다 — 기존 kr 스크리닝 지연 문제를 악화시키지 않는다.
+    """
+    out: dict[str, float | None] = {code: None for code in codes}
+    if not codes:
+        return out
+    start_px = _latest_close_batch(conn, codes, _months_before(asof, 12))
+    end_px = _latest_close_batch(conn, codes, _months_before(asof, 1))
+    for code in codes:
+        s, e = start_px.get(code), end_px.get(code)
+        out[code] = _div(e - s, s, pct=True) if (s and s > 0 and e is not None) else None
+    return out
+
+
+def momentum_12_1(conn, code: str, asof: str) -> float | None:
+    """단일종목 12-1 모멘텀(%). momentum_12_1_batch의 얇은 래퍼(로직 중복 방지)."""
+    return momentum_12_1_batch(conn, [code], asof).get(code)
+
+
 def _is_alive(conn, code: str, asof: str) -> bool:
     row = conn.execute("SELECT delisting_date FROM delisting WHERE stock_code=?", (code,)).fetchone()
     if row and row["delisting_date"]:
@@ -188,6 +240,7 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "gross_profit": "매출총이익(원화 절대값, TTM 합산)",
     "total_assets": "총자산(원화 절대값, 해당분기 잔액)",
     "gp_a": "매출총이익/총자산(GPA, %, TTM 매출총이익 ÷ 해당분기 총자산). 수익성 팩터(높을수록 우수)",
+    "cfo_ratio": "영업활동현금흐름/총자산(CFO비율, %, TTM 영업현금흐름 ÷ 해당분기 총자산). 질(Quality) 팩터(높을수록 우수)",
     "earnings_yield": "이익수익률(EY, %, 마법공식 EBIT ÷ 기업가치EV). 밸류 팩터(높을수록 저평가·우수)",
     "roc": "투하자본수익률(ROC, %, 마법공식 EBIT ÷ 투하자본IC). 수익성 팩터(높을수록 우수)",
     # "총자산"(total_assets)과 혼동되지 않게 시가총액임을 명시한다 — 실서버 재현 버그:
@@ -229,6 +282,7 @@ def metrics_at(conn, asof: str) -> list[dict]:
         assets = _fin(conn, code, q, "total_assets")
         ni_ttm = _sum_ttm(conn, code, q, "net_income")               # 연결 전체 (ROA용)
         gp_ttm = _sum_ttm(conn, code, q, "gross_profit")             # GPA(수익성 팩터) 분자
+        ocf_ttm = _sum_ttm(conn, code, q, "operating_cashflow")      # CFO비율(질 팩터) 분자(TTM 영업현금흐름)
         # PER·ROE 분자는 지배주주 귀속 순이익. 미수집 시 연결 순이익으로 폴백.
         ctrl_ni_ttm = _sum_ttm(conn, code, q, "controlling_net_income")
         if ctrl_ni_ttm is None:
@@ -327,6 +381,9 @@ def metrics_at(conn, asof: str) -> list[dict]:
             "gross_profit": gp_ttm,
             "total_assets": assets,
             "gp_a": _div(gp_ttm, assets, pct=True) if (gp_ttm is not None and assets and assets > 0) else None,
+            # CFO비율 = TTM 영업활동현금흐름 ÷ 해당분기 총자산(%). gp_a와 동일 패턴. 음수(현금소진)는
+            # 유효한 저품질 신호이므로 그대로 인정(부호 보존) — 분모 총자산>0만 요구한다.
+            "cfo_ratio": _div(ocf_ttm, assets, pct=True) if (ocf_ttm is not None and assets and assets > 0) else None,
             "earnings_yield": earnings_yield,
             "roc": roc,
             "roc_estimated": roc_estimated,

@@ -16,6 +16,8 @@ from src.backtest.data_access import (
     _is_alive,
     _months_before,
     _one_year_before,
+    momentum_12_1,
+    momentum_12_1_batch,
     price_return_over_months,
 )
 from src.db import init_db
@@ -179,3 +181,88 @@ def test_price_return_over_months_all_none_when_code_has_no_data(tmp_path):
     assert r["start_date"] is None
     assert r["start_close"] is None
     assert r["return_pct"] is None
+
+
+# ── momentum_12_1(): 12-1 모멘텀(최근 1개월 제외 12개월 수익률) ─────────────────
+# 12개월 전 종가 대비 1개월 전 종가의 수익률(%). 최근 1개월(asof~1개월전)은 제외한다
+# (단순 12M return_12m과 다름 — 사용자가 명시적으로 12-1을 선택). 배치 버전이 크로스섹션
+# (수천 종목)에 쓰이므로 종목별 반복 SQL이 아니라 상수 회수 배치 SQL로 동작해야 한다.
+
+
+class _CountingConn:
+    """conn.execute 호출 횟수를 세는 얇은 래퍼(배치 SQL 성능 회귀 가드용)."""
+
+    def __init__(self, real):
+        self._real = real
+        self.execute_calls = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_calls += 1
+        return self._real.execute(*args, **kwargs)
+
+
+def test_momentum_12_1_manual_value(tmp_path):
+    conn = _conn(tmp_path)
+    # asof=2026-07-16 → 1개월전=2026-06-16, 12개월전=2025-07-16.
+    # 최근 1개월(asof 종가 150)은 반드시 제외되고, 1개월전(130)/12개월전(100)로 계산.
+    _seed_prices(
+        conn,
+        "000001",
+        [("2025-07-16", 100.0), ("2026-06-16", 130.0), ("2026-07-16", 150.0)],
+    )
+    m = momentum_12_1(conn, "000001", "2026-07-16")
+    assert m == pytest.approx(30.0)  # (130-100)/100*100, asof(150)은 제외
+
+
+def test_momentum_12_1_nearest_prior_trading_day(tmp_path):
+    conn = _conn(tmp_path)
+    # 목표일이 휴장이면 그 이하 가장 가까운 거래일 종가를 쓴다.
+    _seed_prices(
+        conn,
+        "000001",
+        [("2025-07-10", 100.0), ("2026-06-12", 120.0), ("2026-07-16", 999.0)],
+    )
+    m = momentum_12_1(conn, "000001", "2026-07-16")
+    assert m == pytest.approx(20.0)  # (120-100)/100*100
+
+
+def test_momentum_12_1_none_when_insufficient_history(tmp_path):
+    conn = _conn(tmp_path)
+    _seed_prices(conn, "000001", [("2026-07-16", 150.0)])  # 과거 없음
+    assert momentum_12_1(conn, "000001", "2026-07-16") is None
+
+
+def test_momentum_12_1_batch_matches_single(tmp_path):
+    conn = _conn(tmp_path)
+    _seed_prices(conn, "AAA", [("2025-07-16", 100.0), ("2026-06-16", 130.0), ("2026-07-16", 150.0)])
+    _seed_prices(conn, "BBB", [("2025-07-16", 50.0), ("2026-06-16", 40.0), ("2026-07-16", 45.0)])
+    _seed_prices(conn, "CCC", [("2026-07-16", 10.0)])  # 과거 없음 → None
+    batch = momentum_12_1_batch(conn, ["AAA", "BBB", "CCC"], "2026-07-16")
+    assert batch["AAA"] == pytest.approx(momentum_12_1(conn, "AAA", "2026-07-16"))
+    assert batch["BBB"] == pytest.approx(momentum_12_1(conn, "BBB", "2026-07-16"))
+    assert batch["AAA"] == pytest.approx(30.0)
+    assert batch["BBB"] == pytest.approx(-20.0)  # (40-50)/50*100
+    assert batch["CCC"] is None
+
+
+def test_momentum_12_1_batch_uses_constant_sql_calls(tmp_path):
+    """배치 SQL 성능 회귀 가드: execute 호출 횟수가 종목 수에 비례하지 않아야 한다."""
+    conn = _conn(tmp_path)
+    for i in range(8):
+        _seed_prices(
+            conn, f"S{i}",
+            [("2025-07-16", 100.0 + i), ("2026-06-16", 120.0 + i), ("2026-07-16", 150.0 + i)],
+        )
+
+    c2 = _CountingConn(conn)
+    momentum_12_1_batch(c2, ["S0", "S1"], "2026-07-16")
+    c8 = _CountingConn(conn)
+    momentum_12_1_batch(c8, [f"S{i}" for i in range(8)], "2026-07-16")
+    # 2종목이든 8종목이든 execute 호출 횟수가 동일(상수) — N에 비례하지 않는다
+    assert c2.execute_calls == c8.execute_calls
+    assert c8.execute_calls <= 2  # 시작/끝 컷오프 각 1회 배치 SQL
+
+
+def test_momentum_12_1_batch_empty_codes(tmp_path):
+    conn = _conn(tmp_path)
+    assert momentum_12_1_batch(conn, [], "2026-07-16") == {}

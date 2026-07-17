@@ -264,3 +264,53 @@ def test_source_has_no_primitive_ops_whitelist():
 
 def test_max_timeout_default_is_120():
     assert MAX_TIMEOUT == 120.0
+
+
+# ── 보조 반환값 채널(extra_vars) — result 외에 chart_base64 등 보조 변수도 함께 회수 ──────
+def test_execute_python_extra_vars_captures_additional_variables():
+    """extra_vars로 지정한 변수들을 result와 별개로 회수한다. 코드가 안 채운 변수는 None."""
+    res = execute_python("result = 1\nfoo = 2", extra_vars=["foo", "bar"])
+    assert res["ok"] is True
+    assert res["result"] == 1
+    assert res["extra"] == {"foo": 2, "bar": None}  # bar는 코드가 설정 안 함 → None
+
+
+def test_execute_python_extra_vars_default_none_returns_empty_extra():
+    """extra_vars 미지정(기본값)이면 기존 동작 그대로 + extra는 빈 dict(회귀)."""
+    res = execute_python("result = 42")
+    assert res["ok"] is True
+    assert res["result"] == 42
+    assert res["error"] is None
+    assert res["extra"] == {}
+
+
+def test_execute_python_extra_is_empty_dict_on_failure():
+    """코드 실행 실패 시 extra는 빈 dict."""
+    res = execute_python("result = 1 / 0", extra_vars=["foo"])
+    assert res["ok"] is False
+    assert "ZeroDivisionError" in res["error"]
+    assert res["extra"] == {}
+
+
+def test_execute_python_child_supports_extra_vars_param():
+    """_execute_python_child가 extra_vars 파라미터로 3-tuple(ok, value, extra)를 보낸다."""
+    import multiprocessing as mp
+
+    from src.agents.exec_runtime import _execute_python_child
+
+    ctx = mp.get_context("spawn")
+    parent, child = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_execute_python_child,
+        args=("result = 5\nfoo = 9", {}, "result", child, 30, 1024 * 1024 * 1024, ["foo", "baz"]),
+    )
+    proc.start()
+    child.close()
+    try:
+        status, value, extra = parent.recv()
+    finally:
+        proc.join()
+        parent.close()
+    assert status == "ok"
+    assert value == 5
+    assert extra == {"foo": 9, "baz": None}

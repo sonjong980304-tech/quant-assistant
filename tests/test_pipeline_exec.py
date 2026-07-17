@@ -27,12 +27,50 @@ from src.backtest.pipeline_exec import (
 def test_dispatch_table_is_fixed_dict_with_all_primitives():
     assert set(PRIMITIVE_OPS.keys()) == {
         "get_cross_section", "zscore", "neutralize", "winsorize", "combine", "regress",
-        "correlation", "quantile_bucket_means", "remove_outliers", "scatter_data",
-        "optimize_weights", "run_backtest", "run_signal_backtest", "compute_ic",
-        "compute_technical_indicator", "search_strategy", "search_signal_strategy",
+        "correlation", "quantile_bucket_means", "histogram_buckets", "remove_outliers",
+        "scatter_data", "optimize_weights", "run_backtest", "run_signal_backtest",
+        "compute_ic", "compute_technical_indicator", "search_strategy", "search_signal_strategy",
+        # QVM 멀티팩터(신규)
+        "invert_field", "winsorize_pct", "sector_zscore_with_fallback", "composite_score",
+        "drop_missing_factors", "compute_qvm_scores", "get_cross_section_qvm", "run_qvm_backtest",
     }
     # 값이 실제 호출 가능한 함수여야 한다
     assert all(callable(v) for v in PRIMITIVE_OPS.values())
+
+
+def test_qvm_primitives_registered_in_primitive_ops():
+    """QVM 프리미티브가 고정 dict 디스패치에 등록돼 파이프라인에서 호출 가능해야 한다."""
+    for op in (
+        "invert_field", "winsorize_pct", "sector_zscore_with_fallback", "composite_score",
+        "drop_missing_factors", "compute_qvm_scores", "get_cross_section_qvm", "run_qvm_backtest",
+    ):
+        assert op in PRIMITIVE_OPS
+        assert callable(PRIMITIVE_OPS[op])
+
+
+def test_qvm_conn_needing_ops_registered():
+    from src.backtest.pipeline_exec import _NEEDS_CONN
+
+    # DB 연결이 필요한 QVM 연산만 자동주입 대상
+    assert "get_cross_section_qvm" in _NEEDS_CONN
+    assert "run_qvm_backtest" in _NEEDS_CONN
+
+
+def test_qvm_pure_ops_not_conn_needing():
+    from src.backtest.pipeline_exec import _NEEDS_CONN
+
+    # rows(순수 데이터)만 받는 QVM 저수준 연산은 conn 자동주입 대상이 아니다
+    for op in (
+        "invert_field", "winsorize_pct", "sector_zscore_with_fallback",
+        "composite_score", "drop_missing_factors", "compute_qvm_scores",
+    ):
+        assert op not in _NEEDS_CONN
+
+
+def test_histogram_buckets_registered_in_primitive_ops():
+    """히스토그램 프리미티브가 고정 dict 디스패치에 등록돼 파이프라인에서 호출 가능해야 한다."""
+    assert "histogram_buckets" in PRIMITIVE_OPS
+    assert callable(PRIMITIVE_OPS["histogram_buckets"])
 
 
 def test_winsorize_op_is_not_registered_as_conn_needing():

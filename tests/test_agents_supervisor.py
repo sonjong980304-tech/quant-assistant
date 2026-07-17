@@ -97,6 +97,23 @@ def test_route_prompt_mentions_correlation_and_quantile_for_llm_routing():
     assert "상관관계" in prompt or "분위수" in prompt
 
 
+def test_route_question_fallback_without_llm_detects_histogram_as_backtest():
+    """히스토그램(분포도) 질문은 '백테스트'/'전략' 단어가 없어도 backtest로 라우팅돼야 한다 —
+    histogram_buckets 프리미티브(get_cross_section 기반)로만 계산 가능하다. 시장 키워드가
+    없는 질문은 backtest 단독, '코스피' 등 kr 키워드가 섞이면 kr+backtest 복합으로 간다."""
+    # kr/us 시장 키워드가 없으면 backtest 단독 라우팅
+    assert route_question("PBR 분포도 그려줘", None) == ["backtest"]
+    assert route_question("show me the histogram of pbr", None) == ["backtest"]
+    # '코스피'가 섞이면(기존 kr 키워드) kr도 함께 걸리되 backtest는 반드시 포함된다
+    assert "backtest" in route_question("코스피 PBR을 히스토그램으로 보여줘", None)
+
+
+def test_route_prompt_mentions_histogram_for_llm_routing():
+    """LLM 우선 라우팅 경로도 인식하도록 _route_prompt의 backtest 설명에 히스토그램/분포가 포함."""
+    prompt = supervisor_mod._route_prompt("아무 질문")
+    assert "히스토그램" in prompt or "분포" in prompt
+
+
 def test_route_question_fallback_without_llm_detects_common_kr_company_nicknames():
     """실사용 재현: LLM 라우팅이 일시 실패해 휴리스틱으로 폴백했을 때, '코스피'/'삼성' 같은
     시장 키워드 없이 개별 종목 약칭만 있는 질문("하이닉스 12개월 누적수익률")이 빈 라우팅으로

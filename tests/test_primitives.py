@@ -15,6 +15,7 @@ from src.backtest.primitives import (
     combine,
     compute_ic_primitive,
     get_cross_section,
+    histogram_buckets,
     neutralize,
     optimize_weights,
     regress,
@@ -756,3 +757,55 @@ def test_compute_ic_primitive_rejects_unknown_rebalance_frequency():
             max_date_fn=lambda conn: "2026-12-31",
             callbacks_fn=_fake_callbacks({}, {}),
         )
+
+
+# --------------------------------------------------------------------------
+# histogram_buckets — 값 범위를 동일 "폭" 구간으로 나눠 구간별 개수(quantile_bucket_means의
+# 동일 "개수" 분위수와 대비). 진짜 히스토그램 정의(구간별 표본수는 다를 수 있음).
+# --------------------------------------------------------------------------
+def test_histogram_buckets_uniform_distribution_edge_and_count_lengths():
+    rows = [{"pbr": float(i)} for i in range(100)]  # 0..99 균등
+    res = histogram_buckets(rows, "pbr", num_buckets=10)
+    assert res["field"] == "pbr"
+    assert res["num_buckets"] == 10
+    assert len(res["bucket_edges"]) == 11  # 구간 n개 → 경계는 n+1개
+    assert len(res["counts"]) == 10        # 구간 개수만큼
+    assert sum(res["counts"]) == res["n"] == 100  # 전 표본이 어딘가에 배정됨
+
+
+def test_histogram_buckets_max_value_included_in_last_bucket():
+    """값이 딱 최댓값(hi)인 표본이 경계 넘침 보정으로 마지막 구간에 정상 포함되는지."""
+    rows = [{"pbr": 0.0}, {"pbr": 5.0}, {"pbr": 10.0}]
+    res = histogram_buckets(rows, "pbr", num_buckets=2)
+    assert res["bucket_edges"] == [0.0, 5.0, 10.0]
+    # v=0→[0,5) 첫 구간, v=5·v=10(=hi, 보정)→[5,10] 마지막 구간
+    assert res["counts"] == [1, 2]
+    assert sum(res["counts"]) == 3
+    assert res["counts"][-1] == 2  # 최댓값 10.0이 마지막 구간에 포함됨
+
+
+def test_histogram_buckets_excludes_none_values():
+    rows = [{"pbr": 1.0}, {"pbr": None}, {"pbr": 2.0}, {"pbr": 3.0}]
+    res = histogram_buckets(rows, "pbr", num_buckets=2)
+    assert res["n"] == 3  # None 1건은 조용히 제외
+    assert sum(res["counts"]) == 3
+
+
+def test_histogram_buckets_all_same_value_returns_single_bucket_without_zerodiv():
+    """전부 동일값이면 구간을 나눌 수 없어(폭=0) 0으로 나누기 없이 단일 구간으로 반환."""
+    rows = [{"pbr": 5.0} for _ in range(4)]
+    res = histogram_buckets(rows, "pbr", num_buckets=10)
+    assert res["num_buckets"] == 1
+    assert res["counts"] == [4]
+    assert res["bucket_edges"] == [5.0, 5.0]
+    assert res["n"] == 4
+
+
+def test_histogram_buckets_rejects_num_buckets_below_one():
+    with pytest.raises(ValueError):
+        histogram_buckets([{"pbr": 1.0}], "pbr", num_buckets=0)
+
+
+def test_histogram_buckets_rejects_when_no_valid_samples():
+    with pytest.raises(ValueError):
+        histogram_buckets([{"pbr": None}, {"pbr": None}], "pbr", num_buckets=5)

@@ -32,7 +32,7 @@ import pandas as pd
 
 from src.agents.exec_fallback import _extract_python_code, _is_meaningfully_empty
 from src.agents.exec_runtime import execute_python
-from src.agents.supervisor import answer_with_verification
+from src.agents.supervisor import answer_with_verification, wants_chart
 
 
 @dataclass
@@ -49,6 +49,10 @@ class Turn:
     # 안 썼어도 신규 턴이 성공하면 항상 채운다 — 저장된 파이프라인으로만 성공한 경우에도
     # "새 SQL/코드 없음"이 아니라 실제 근거 데이터를 오른쪽 패널에 그대로 병기하기 위함이다.
     domain_evidence: dict | None = None
+    # 차트(base64 PNG)와 제목 — 신규 턴은 answer_with_verification이 채워 반환한 것을, 이어가기
+    # 턴은 생성 코드가 chart_base64/chart_title 변수에 담은 것을 그대로 옮겨온다(없으면 None).
+    chart_base64: str | None = None
+    chart_title: str | None = None
 
 
 @dataclass
@@ -118,18 +122,37 @@ def _classify_topic(question: str, prior_data, llm_fn: Callable[[str], str] | No
     return "NEW" in raw and "CONTINUE" not in raw
 
 
-def _followup_python_prompt(question: str, prior_summary: str, code_error: str | None = None) -> str:
+_CHART_GUIDANCE = (
+    "\n\n이 질문은 차트/시각화를 요청하고 있습니다. src.agents.charting 모듈의 아래 함수 중 "
+    "질문에 맞는 것을 import해서 호출하고, 반환된 base64 PNG 문자열을 `chart_base64`라는 "
+    "변수에, 제목 문자열을 `chart_title`이라는 변수에 각각 담으세요(코드 안에서 "
+    "`from src.agents.charting import render_histogram_chart_base64` 처럼 직접 import).\n"
+    "- render_histogram_chart_base64(bucket_edges, counts, x_label, title): 히스토그램(분포). "
+    "구간 경계/개수는 직접 계산하세요(예: numpy.histogram(values, bins=N) 사용 가능 — "
+    "bucket_edges는 리스트로 변환: list(edges), counts도 list(counts)).\n"
+    "- render_bar_chart_base64(labels, values, x_label, y_label, title): 막대그래프.\n"
+    "- render_scatter_chart_base64(x, y, labels, x_label, y_label, title): 산점도.\n"
+    "- render_line_chart_base64(dates, series, title, ylabel): 시계열 라인차트.\n"
+    "`result` 변수(원래 요구되는 가공된 데이터)는 차트와 별개로 그대로 채우세요 — 둘 다 필요합니다."
+)
+
+
+def _followup_python_prompt(
+    question: str, prior_summary: str, code_error: str | None = None,
+    wants_chart_flag: bool = False,
+) -> str:
     retry_note = (
         f"\n\n[직전 코드 실행 실패] 방금 작성한 코드가 다음 이유로 실패했습니다: {code_error}\n"
         "같은 실수를 반복하지 말고 원인을 고쳐 다시 작성하세요."
         if code_error else ""
     )
+    chart_note = _CHART_GUIDANCE if wants_chart_flag else ""
     return (
         "직전 턴에서 만든 데이터가 `data`라는 이름의 변수로 이미 주어집니다"
         f"(구조: {prior_summary}). 이 데이터를 가공해 새 질문에 정확히 답하는 Python 코드를 "
         "작성하세요. pandas 등 필요한 라이브러리는 코드 안에서 직접 import 하세요. "
         "최종 답은 반드시 `result` 변수에 담으세요(리스트/딕트 등 JSON 직렬화 가능한 값)."
-        f"{retry_note}\n\n질문: {question}\nPython 코드:"
+        f"{chart_note}{retry_note}\n\n질문: {question}\nPython 코드:"
     )
 
 
@@ -153,12 +176,15 @@ def _run_followup_step(
 
     execute_python_fn = execute_python_fn or execute_python
     summary = _summarize_data_shape(prior_data)
+    # 질문에 명시적으로 차트/시각화를 요청했을 때만 프롬프트에 차트 안내를 덧붙인다(신규 턴의
+    # wants_chart 판단과 동일한 결정론적 키워드 방식). 원본 question으로 판단한다.
+    wants_chart_flag = wants_chart(question)
     code: str | None = None
     code_error: str | None = None
     for attempt in range(max_code_attempts):
         if on_progress:
             on_progress(f"이전 데이터를 이어서 가공할 Python 코드 생성 중 (시도 {attempt + 1}/{max_code_attempts})")
-        code_raw = llm_fn(_followup_python_prompt(question, summary, code_error)) or ""
+        code_raw = llm_fn(_followup_python_prompt(question, summary, code_error, wants_chart_flag)) or ""
         code = _extract_python_code(code_raw)
         if not code:
             code_error = "LLM이 Python 코드를 생성하지 못했습니다."
@@ -168,7 +194,12 @@ def _run_followup_step(
 
         if on_progress:
             on_progress("생성된 코드 실행 중")
-        py_result = execute_python_fn(code, context={"data": prior_data}, result_var="result")
+        # extra_vars는 항상 전달한다 — 코드가 chart_base64/chart_title을 안 채웠으면 None이
+        # 회수될 뿐 무해하고(execute_python 계약), 차트를 만든 경우엔 그 값을 함께 꺼내온다.
+        py_result = execute_python_fn(
+            code, context={"data": prior_data}, result_var="result",
+            extra_vars=["chart_base64", "chart_title"],
+        )
         if not py_result.get("ok"):
             code_error = f"Python 실행 실패: {py_result.get('error')}"
             if on_progress:
@@ -184,15 +215,54 @@ def _run_followup_step(
 
         if on_progress:
             on_progress("완료")
-        return {"ok": True, "result": result, "code": code, "error": None}
+        extra = py_result.get("extra", {})
+        return {
+            "ok": True, "result": result, "code": code, "error": None,
+            "chart_base64": extra.get("chart_base64"),
+            "chart_title": extra.get("chart_title"),
+        }
 
     return {"ok": False, "result": None, "code": code, "error": code_error}
+
+
+def _screening_csv_columns(domain_evidence: dict) -> list[str] | None:
+    """스크리닝 결과를 CSV로 내려받을 때 남길 컬럼(식별자 + 실제 요청된 지표)만 골라낸다.
+
+    domain_evidence(도메인별 원본 결과 dict — 예: {"kr": {...}} / {"us": {...}})를 훑어
+    criteria(요청된 지표 키 목록, 예: [{"key":"per",...}])가 있는 스크리닝 결과를 찾으면
+    ["stock_code", "name"] + criteria 키들(중복 제거, 순서 유지)을 반환한다. sector/market/
+    quarter나 criteria에 없는 다른 지표는 CSV에서 빼기 위한 화이트리스트다.
+
+    criteria가 없으면(단일종목 조회/백테스트/follow-up 등 필터 신호 없음) None을 반환 —
+    "필터링하지 않음"의 신호다. 이 함수는 CSV 다운로드에만 쓰이고, 화면 표시용
+    domain_evidence 원본은 절대 건드리지 않는다(원본 데이터 병기 패널은 그대로 유지)."""
+    if not isinstance(domain_evidence, dict):
+        return None
+    for value in domain_evidence.values():
+        if not isinstance(value, dict):
+            continue
+        criteria = value.get("criteria")
+        if not isinstance(criteria, list) or not criteria:
+            continue
+        columns: list[str] = []
+        candidates = ["stock_code", "name"] + [
+            c.get("key") for c in criteria if isinstance(c, dict)
+        ]
+        for col in candidates:
+            if col and col not in columns:
+                columns.append(col)
+        return columns
+    return None
 
 
 def _extract_tabular_data(domain_results: dict):
     """domain_results(도메인별 원본 결과 dict)에서 CSV로 내려받을 수 있는 표 데이터를 하나
     찾는다. 여러 도메인이 섞인 복합질문이면 처음 찾은 표를 쓴다(질문당 CSV 1개, _build_charts
-    의 "질문당 차트" 관례와 동일한 단순화). 표가 하나도 없으면(단일값 조회 등) None."""
+    의 "질문당 차트" 관례와 동일한 단순화). 표가 하나도 없으면(단일값 조회 등) None.
+
+    스크리닝 결과(criteria 존재)면 _screening_csv_columns가 준 컬럼만 남긴 새 표를 만들어
+    반환한다 — 원본 domain_results는 변경하지 않아(화면 표시용 domain_evidence 원본 유지)
+    오직 CSV로 내려받는 표만 좁아진다. criteria가 없으면 기존처럼 가공 없이 그대로 반환."""
     if not isinstance(domain_results, dict):
         return None
     for value in domain_results.values():
@@ -200,6 +270,12 @@ def _extract_tabular_data(domain_results: dict):
             continue
         candidate = value.get("result")
         if isinstance(candidate, list) and candidate and isinstance(candidate[0], dict):
+            columns = _screening_csv_columns(domain_results)
+            if columns:
+                return [
+                    {col: row[col] for col in columns if col in row}
+                    for row in candidate
+                ]
             return candidate
     return None
 
@@ -246,6 +322,8 @@ def _run_new_turn(
             data=_extract_tabular_data(domain_results),
             sql=free_exec.get("sql"), code=free_exec.get("code"),
             domain_evidence=domain_results or None,
+            chart_base64=result.get("chart_base64"),
+            chart_title=result.get("chart_title"),
         )
         if on_progress:
             on_progress("완료")
@@ -292,8 +370,13 @@ def run_turn(
         question, session.current_data, llm_fn, execute_python_fn, max_code_attempts, on_progress
     )
     if followup.get("ok"):
+        # 다음 턴이 이어받는 맥락은 순수 result만이어야 한다(차트 유무와 무관 — 검증된 체이닝
+        # 계약). chart_base64/chart_title은 화면 표시용으로만 Turn에 담고 current_data엔 넣지 않는다.
         session.current_data = followup["result"]
-        turn = Turn(question=question, status="success", answer=followup["result"], code=followup.get("code"))
+        turn = Turn(
+            question=question, status="success", answer=followup["result"], code=followup.get("code"),
+            chart_base64=followup.get("chart_base64"), chart_title=followup.get("chart_title"),
+        )
         session.turns.append(turn)
         return turn
 
@@ -318,6 +401,8 @@ def get_history(session: ConversationSession) -> list[dict]:
             "sql": turn.sql,
             "code": turn.code,
             "domain_evidence": turn.domain_evidence,
+            "chart_base64": turn.chart_base64,
+            "chart_title": turn.chart_title,
             "csv_available": turn.status == "success" and _to_dataframe(_turn_csv_source(turn)) is not None,
         }
         for turn in session.turns

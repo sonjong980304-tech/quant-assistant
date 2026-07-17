@@ -343,6 +343,44 @@ def quantile_bucket_means(rows: list[dict], bucket_field: str, value_field: str,
 
 
 # --------------------------------------------------------------------------
+# 5d. histogram_buckets — field 값을 균등폭 구간으로 나눠 구간별 개수(진짜 히스토그램)
+# --------------------------------------------------------------------------
+def histogram_buckets(rows: list[dict], field: str, num_buckets: int = 10) -> dict:
+    """rows에서 field 값을 뽑아 num_buckets개의 균등폭 구간으로 나눠 구간별 개수를 센다.
+
+    quantile_bucket_means(동일 "개수"로 나누는 분위수)와 달리 이건 값의 범위를 동일 "폭"으로
+    나눈다(구간별 표본수는 다를 수 있음 — 진짜 히스토그램 정의). None 값은 조용히 제외한다
+    (다른 프리미티브와 동일 관례).
+
+    반환: {"field": field, "num_buckets": 실제사용된구간수, "bucket_edges": [n+1개, 오름차순],
+           "counts": [n개], "n": 유효표본수}
+    각 구간은 [edges[i], edges[i+1]) 반열림이며, 마지막 구간만 최댓값을 포함하는 닫힌구간이다.
+    """
+    if num_buckets < 1:
+        raise ValueError(f"num_buckets는 1 이상이어야 합니다(현재 {num_buckets})")
+    vals = [r[field] for r in rows if r.get(field) is not None]
+    n = len(vals)
+    if n == 0:
+        raise ValueError(f"유효 표본이 0개라 히스토그램을 만들 수 없습니다(field={field})")
+
+    lo, hi = min(vals), max(vals)
+    if lo == hi:
+        # 전부 동일값 → 폭이 0이라 구간을 나눌 수 없다(0으로 나누기 방지). 단일 구간으로 반환.
+        return {"field": field, "num_buckets": 1, "bucket_edges": [lo, hi], "counts": [n], "n": n}
+
+    width = (hi - lo) / num_buckets
+    counts = [0] * num_buckets
+    for v in vals:
+        idx = int((v - lo) / width)
+        if idx == num_buckets:  # v == hi일 때 경계 넘침 → 마지막 구간으로 보정
+            idx = num_buckets - 1
+        counts[idx] += 1
+    bucket_edges = [lo + i * width for i in range(num_buckets)] + [hi]
+    return {"field": field, "num_buckets": num_buckets, "bucket_edges": bucket_edges,
+            "counts": counts, "n": n}
+
+
+# --------------------------------------------------------------------------
 # 6. optimize_weights — Riskfolio-Lib 3종 최적화만 감싼 래퍼
 # --------------------------------------------------------------------------
 _OPTIMIZE_METHODS = ("max_sharpe", "min_variance", "risk_parity")
@@ -949,3 +987,307 @@ def search_strategy(
         reverse=True,
     )
     return results
+
+
+# --------------------------------------------------------------------------
+# 11. QVM(Quality-Value-Momentum) 멀티팩터 — 저수준 5종 + 조립 compute_qvm_scores
+# --------------------------------------------------------------------------
+# 사용자 확정 파이프라인: invert(가치 역수) → winsorize_pct(1%/99%) → 섹터 z-score(<5표본
+# 전체폴백) → 카테고리 합성(등가중, 결측 제외) → 결측필터(raw 7개 중 3개 이상 결측 제외)
+# → 2차 z-score → 최종점수 (z_Q+z_V+z_M)/3. 저수준 함수는 모두 순수 함수(원본 rows 불변,
+# 새 dict 반환)이며 기존 winsorize(IQR)/neutralize는 절대 건드리지 않고 별도로 추가한다.
+_VALUE_INVERT_NAMES = {"per": "ep", "pbr": "bp", "psr": "sp"}
+
+
+def invert_field(rows: list[dict], field: str, out_field: str) -> list[dict]:
+    """가치 팩터 역수 변환: row[field]가 None이거나 <=0이면 out_field=None, 아니면 1/field.
+
+    E/P=1/PER, B/P=1/PBR, S/P=1/PSR처럼 "낮을수록 좋은" 가치지표를 "높을수록 좋은" 방향으로
+    뒤집는다. PER은 SoT상 이미 적자면 None이므로 그 None이 자연히 전파된다. 원본 field는 보존.
+    """
+    out = []
+    for r in rows:
+        v = r.get(field)
+        nr = dict(r)
+        nr[out_field] = (1.0 / v) if (v is not None and v > 0) else None
+        out.append(nr)
+    return out
+
+
+def winsorize_pct(rows: list[dict], field: str, lower_pct: float = 0.01, upper_pct: float = 0.99) -> list[dict]:
+    """유효값의 lower_pct/upper_pct 분위수(numpy.percentile) 밖을 경계로 눌러 붙인다(행 삭제 없음).
+
+    기존 winsorize(IQR·k 방식)와 별개의 새 함수 — QVM 1%/99% 윈저라이즈 전용(기존 winsorize는
+    다른 용도로 계속 쓰이므로 절대 수정하지 않는다). None은 그대로 유지하고 분위 계산에서
+    제외한다. '{field}_winsorized' 신규 필드를 추가한다.
+    """
+    import numpy as np
+
+    vals = [r[field] for r in rows if r.get(field) is not None]
+    if not vals:
+        return [dict(r, **{f"{field}_winsorized": r.get(field)}) for r in rows]
+    lo, hi = np.percentile(vals, [lower_pct * 100.0, upper_pct * 100.0])
+    out = []
+    for r in rows:
+        v = r.get(field)
+        nr = dict(r)
+        nr[f"{field}_winsorized"] = None if v is None else float(min(max(v, lo), hi))
+        out.append(nr)
+    return out
+
+
+def sector_zscore_with_fallback(
+    rows: list[dict], field: str, sector_field: str = "sector", min_sector_n: int = 5
+) -> list[dict]:
+    """섹터 내 z-score. 섹터 표본이 min_sector_n 미만이면 전체 유니버스 z-score로 폴백한다.
+
+    neutralize(method='zscore')에는 표본부족 폴백이 없어(1표본이면 None) 별도로 추가한다
+    (neutralize는 다른 곳에서 쓰여 하위호환을 깨면 안 되므로 건드리지 않는다). 섹터 표본수가
+    충분하면 그 섹터 평균/표준편차로, 부족하면 전체 유니버스 평균/표준편차로 각 종목 값을
+    표준화한다. 표준편차 0(전부 동일값)이면 0으로 나눗셈을 피해 0.0으로 둔다. None은 None 유지.
+    '{field}_zscore' 신규 필드를 추가한다.
+    """
+    import numpy as np
+
+    by_sector: dict = {}
+    universe_vals: list = []
+    for r in rows:
+        v = r.get(field)
+        if v is None:
+            continue
+        universe_vals.append(v)
+        by_sector.setdefault(r.get(sector_field), []).append(v)
+
+    def _stats(vals):
+        arr = np.asarray(vals, dtype=float)
+        return float(arr.mean()), float(arr.std())
+
+    uni_mean, uni_std = _stats(universe_vals) if universe_vals else (0.0, 0.0)
+    sector_stats = {s: _stats(vs) for s, vs in by_sector.items() if len(vs) >= min_sector_n}
+
+    out = []
+    for r in rows:
+        v = r.get(field)
+        nr = dict(r)
+        if v is None:
+            nr[f"{field}_zscore"] = None
+        else:
+            mean, std = sector_stats.get(r.get(sector_field), (uni_mean, uni_std))
+            nr[f"{field}_zscore"] = ((v - mean) / std) if std else 0.0
+        out.append(nr)
+    return out
+
+
+def composite_score(
+    rows: list[dict], fields: list[str], out_field: str, weights: list[float] | None = None
+) -> list[dict]:
+    """fields의 z-score 값들을 가중평균해 out_field에 담는다(결측 제외 재정규화).
+
+    각 row에서 값이 있는(None 아닌) 필드들만, 그 필드의 가중치 비율로 재정규화한 가중평균을
+    낸다("존재하는 필드들의 가중치 합으로 나눈 가중평균"). weights 미지정시 등가중. 나열된
+    필드가 전부 결측이면 out_field=None. 카테고리 합성(Q/V/M)과 최종 카테고리 결합에 공용으로 쓴다.
+    """
+    ws = list(weights) if weights is not None else [1.0] * len(fields)
+    if len(ws) != len(fields):
+        raise ValueError("weights 길이가 fields 길이와 다릅니다")
+    out = []
+    for r in rows:
+        num = 0.0
+        den = 0.0
+        for f, w in zip(fields, ws):
+            v = r.get(f)
+            if v is not None:
+                num += v * w
+                den += w
+        nr = dict(r)
+        nr[out_field] = (num / den) if den else None
+        out.append(nr)
+    return out
+
+
+def drop_missing_factors(rows: list[dict], fields: list[str], max_missing: int) -> list[dict]:
+    """fields 중 None인 개수가 max_missing을 초과하는 row를 제외하고 나머지를 반환한다."""
+    return [r for r in rows if sum(1 for f in fields if r.get(f) is None) <= max_missing]
+
+
+def _universe_zscore(rows: list[dict], in_field: str, out_field: str) -> list[dict]:
+    """유니버스 전체 평균/표준편차로 in_field를 z-score 표준화해 out_field에 담는다(2차 표준화).
+
+    combine()/zscore()는 '선정+정렬'까지 하는 함수라 '전체 row에 값만 얹기' 용도로는 의미가
+    어긋나므로, 여기서 numpy로 직접 z-score만 계산한다. None은 None 유지, 표준편차 0이면 0.0.
+    """
+    import numpy as np
+
+    vals = [r[in_field] for r in rows if r.get(in_field) is not None]
+    if not vals:
+        return [dict(r, **{out_field: None}) for r in rows]
+    arr = np.asarray(vals, dtype=float)
+    mean, std = float(arr.mean()), float(arr.std())
+    out = []
+    for r in rows:
+        v = r.get(in_field)
+        nr = dict(r)
+        nr[out_field] = None if v is None else (((v - mean) / std) if std else 0.0)
+        out.append(nr)
+    return out
+
+
+def compute_qvm_scores(
+    rows: list[dict],
+    quality_fields=("roe", "gp_a", "cfo_ratio"),
+    value_source_fields=("per", "pbr", "psr"),
+    momentum_field: str = "momentum_12_1",
+    sector_field: str = "sector",
+    min_sector_n: int = 5,
+    winsorize_lower: float = 0.01,
+    winsorize_upper: float = 0.99,
+    max_missing: int = 3,
+    category_weights=(1 / 3, 1 / 3, 1 / 3),
+) -> list[dict]:
+    """사용자 확정 QVM 파이프라인을 그대로 조립해 각 종목의 최종 qvm_score를 계산한다.
+
+    순서: ① 가치 역수(per→ep 등) ② 각 raw 팩터 1%/99% winsorize ③ 섹터 z-score(<5표본
+    전체폴백) ④ 카테고리 합성(Q/V/M 각 등가중, 결측 제외) ⑤ 결측필터(raw 7개 중 결측이
+    max_missing개 이상이면 제외 — 사용자 rule6: 3개 이상 결측 제외) ⑥ 카테고리 합성점수 2차
+    z-score ⑦ 최종 = 카테고리 z-score 가중평균(category_weights, 결측 카테고리는 제외 재정규화).
+
+    반환 row에는 투명성을 위해 원본 필드 + 역수(ep/bp/sp) + 각 팩터의 _winsorized/_zscore
+    중간값 + quality_z/value_z/momentum_z(2차 표준화 카테고리 점수) + qvm_score(최종)를 모두 담는다.
+
+    max_missing은 '결측이 이 개수 이상이면 제외'(사용자 rule6 표현)로 해석한다 — 내부적으로는
+    drop_missing_factors(초과 시 제외)에 max_missing-1을 넘긴다(3 이상 제외 = 2 초과 제외).
+    """
+    quality_fields = list(quality_fields)
+    value_source_fields = list(value_source_fields)
+
+    # ① 가치 역수 변환(per→ep, pbr→bp, psr→sp)
+    value_fields = [_VALUE_INVERT_NAMES.get(f, f"{f}_inv") for f in value_source_fields]
+    for src, inv in zip(value_source_fields, value_fields):
+        rows = invert_field(rows, src, inv)
+
+    raw_factors = quality_fields + value_fields + [momentum_field]
+
+    # ② 각 raw 팩터 1%/99% winsorize → ③ 섹터 z-score(<5표본 전체폴백)
+    z_fields = []
+    for f in raw_factors:
+        rows = winsorize_pct(rows, f, winsorize_lower, winsorize_upper)
+        wf = f"{f}_winsorized"
+        rows = sector_zscore_with_fallback(rows, wf, sector_field, min_sector_n)
+        z_fields.append(f"{wf}_zscore")
+
+    nq, nv = len(quality_fields), len(value_fields)
+    quality_z_fields = z_fields[:nq]
+    value_z_fields = z_fields[nq:nq + nv]
+    momentum_z_fields = z_fields[nq + nv:]
+
+    # ④ 카테고리 합성(내부 팩터 z-score 등가중, 결측 제외)
+    rows = composite_score(rows, quality_z_fields, "quality_composite")
+    rows = composite_score(rows, value_z_fields, "value_composite")
+    rows = composite_score(rows, momentum_z_fields, "momentum_composite")
+
+    # ⑤ 결측필터(raw 팩터 중 결측이 max_missing개 이상이면 제외)
+    rows = drop_missing_factors(rows, raw_factors, max_missing - 1)
+
+    # ⑥ 카테고리 합성점수 2차 z-score(유니버스 전체)
+    rows = _universe_zscore(rows, "quality_composite", "quality_z")
+    rows = _universe_zscore(rows, "value_composite", "value_z")
+    rows = _universe_zscore(rows, "momentum_composite", "momentum_z")
+
+    # ⑦ 최종 점수 = 카테고리 z-score 가중평균(결측 카테고리 제외 재정규화)
+    rows = composite_score(
+        rows, ["quality_z", "value_z", "momentum_z"], "qvm_score",
+        weights=list(category_weights),
+    )
+    return rows
+
+
+def get_cross_section_qvm(
+    conn, asof, markets=None, metrics_fn: Callable | None = None, momentum_fn: Callable | None = None
+) -> list[dict]:
+    """QVM용 크로스섹션: get_cross_section 결과에 12-1 모멘텀(momentum_12_1)을 배치로 병합한다.
+
+    momentum_12_1_batch로 전종목 모멘텀을 상수 회수 배치 SQL로 계산해 각 row에 얹는다
+    (종목별 반복 SQL 금지 — kr 스크리닝 지연 문제를 악화시키지 않는다). metrics_fn/momentum_fn은
+    테스트 주입용(기본은 실제 DB 기반). compute_qvm_scores의 입력으로 그대로 넘긴다.
+    """
+    from .data_access import momentum_12_1_batch as _momentum_batch
+
+    rows = get_cross_section(conn, asof, markets=markets, metrics_fn=metrics_fn)
+    momentum_fn = momentum_fn or _momentum_batch
+    codes = [r["stock_code"] for r in rows]
+    mom = momentum_fn(conn, codes, asof)
+    out = []
+    for r in rows:
+        nr = dict(r)
+        nr["momentum_12_1"] = mom.get(r["stock_code"])
+        out.append(nr)
+    return out
+
+
+def run_qvm_backtest(
+    conn,
+    start_year: int,
+    end_year: int,
+    quality_fields=None,
+    value_source_fields=None,
+    momentum_field: str = "momentum_12_1",
+    min_sector_n: int = 5,
+    winsorize_lower: float = 0.01,
+    winsorize_upper: float = 0.99,
+    max_missing: int = 3,
+    category_weights=(1 / 3, 1 / 3, 1 / 3),
+    n: int = 20,
+    rebalance: str = "quarterly",
+    markets=None,
+    with_benchmark: bool = True,
+    callbacks_fn: Callable | None = None,
+    benchmark_fn_factory: Callable | None = None,
+    dates_fn: Callable | None = None,
+    max_date_fn: Callable | None = None,
+    backtest_fn: Callable | None = None,
+    cross_section_fn: Callable | None = None,
+    compute_fn: Callable | None = None,
+) -> dict:
+    """QVM 전략 리밸런싱 백테스트. 엔진/선정/성과 코드는 건드리지 않고 metrics_fn만 감싼다.
+
+    각 리밸런싱 시점 t마다 get_cross_section_qvm(모멘텀 포함) → compute_qvm_scores로 qvm_score를
+    미리 계산해 row에 얹은 뒤, 그 점수를 criteria=[{"key":"qvm_score","direction":"high"}] 단일
+    기준으로 run_backtest_primitive(=engine.run_backtest)에 넘긴다. 반환은 기존 백테스트와 동일
+    스키마({dates, navs, benchmark, performance, holdings}). *_fn 인자는 테스트 주입용(DI).
+    """
+    from .data_access import build_callbacks as _build_callbacks
+
+    base_callbacks_fn = callbacks_fn or _build_callbacks
+    _base_metrics_fn, price_fn = base_callbacks_fn(conn)
+    cross_section_fn = cross_section_fn or get_cross_section_qvm
+    compute_fn = compute_fn or compute_qvm_scores
+
+    qkwargs = {
+        "momentum_field": momentum_field, "min_sector_n": min_sector_n,
+        "winsorize_lower": winsorize_lower, "winsorize_upper": winsorize_upper,
+        "max_missing": max_missing, "category_weights": category_weights,
+    }
+    if quality_fields is not None:
+        qkwargs["quality_fields"] = quality_fields
+    if value_source_fields is not None:
+        qkwargs["value_source_fields"] = value_source_fields
+
+    # 시점별 캐시: 엔진과 벤치마크가 같은 시점 metrics_fn을 각각 호출하므로, QVM 크로스섹션
+    # 재계산(전종목 metrics_at + 모멘텀)을 시점당 1번으로 줄인다(build_callbacks의 캐시 관례와 동일).
+    _qvm_cache: dict = {}
+
+    def qvm_metrics_fn(t):
+        if t not in _qvm_cache:
+            rows = cross_section_fn(conn, t, markets=markets)
+            _qvm_cache[t] = compute_fn(rows, **qkwargs)
+        return _qvm_cache[t]
+
+    return run_backtest_primitive(
+        conn, start_year, end_year,
+        criteria=[{"key": "qvm_score", "direction": "high", "weight": 1.0}],
+        combine="zscore", n=n, sectors=None, markets=markets, rebalance=rebalance,
+        with_benchmark=with_benchmark,
+        callbacks_fn=lambda _conn: (qvm_metrics_fn, price_fn),
+        benchmark_fn_factory=benchmark_fn_factory, dates_fn=dates_fn,
+        max_date_fn=max_date_fn, backtest_fn=backtest_fn,
+    )

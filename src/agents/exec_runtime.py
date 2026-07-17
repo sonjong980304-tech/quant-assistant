@@ -151,11 +151,15 @@ def execute_sql(
 
 
 def _execute_python_child(
-    code: str, context: dict, result_var: str, conn, cpu_seconds: int, memory_bytes: int
+    code: str, context: dict, result_var: str, conn, cpu_seconds: int, memory_bytes: int,
+    extra_vars: list[str] | None = None,
 ) -> None:
     """execute_python의 자식 프로세스 진입점(모듈 top-level 함수여야 spawn으로 pickle 가능).
 
-    conn(multiprocessing.Pipe 자식 끝)으로 ("ok", value) 또는 ("error", message)를 보낸다.
+    conn(multiprocessing.Pipe 자식 끝)으로 3-tuple을 보낸다: 성공 시 ("ok", value, extra),
+    실패 시 ("error", message, {}). extra는 extra_vars로 지정한 보조 변수({이름: 값})로,
+    코드가 그 변수를 설정하지 않았으면 None이다(예: chart_base64를 안 만든 경우).
+    extra_vars 미지정(기본 None)이면 extra는 빈 dict — 기존 동작과 동일하다.
     """
     try:
         import resource
@@ -175,9 +179,10 @@ def _execute_python_child(
     namespace: dict = dict(context)
     try:
         exec(code, namespace)  # noqa: S102 — 신뢰불가 코드의 임의 실행(사용자 승인 트레이드오프)
-        conn.send(("ok", namespace.get(result_var)))
+        extra = {name: namespace.get(name) for name in (extra_vars or [])}
+        conn.send(("ok", namespace.get(result_var), extra))
     except Exception as e:  # noqa: BLE001 — 신뢰불가 코드가 어떤 예외든 던질 수 있어 광범위 포착
-        conn.send(("error", f"{type(e).__name__}: {e}"))
+        conn.send(("error", f"{type(e).__name__}: {e}", {}))
     finally:
         conn.close()
 
@@ -189,6 +194,7 @@ def execute_python(
     result_var: str = "result",
     cpu_seconds: int = DEFAULT_CPU_SECONDS,
     memory_bytes: int = DEFAULT_MEMORY_BYTES,
+    extra_vars: list[str] | None = None,
 ) -> dict:
     """LLM이 생성한 Python 코드를 별도 프로세스에서 실행한다(고정 화이트리스트 없음).
 
@@ -207,9 +213,14 @@ def execute_python(
         cpu_seconds: 자식 프로세스 CPU 시간 상한(RLIMIT_CPU, 실측상 신뢰성 있게 동작).
         memory_bytes: 자식 프로세스 가상메모리 상한(RLIMIT_AS) — 플랫폼이 지원하면 적용,
             아니면(macOS 등) 조용히 무시된다.
+        extra_vars: result_var 외에 추가로 회수할 보조 변수명 리스트(예: ["chart_base64",
+            "chart_title"]). 코드가 설정하지 않은 변수는 반환 extra에서 None이다. 미지정
+            (기본 None)이면 extra는 빈 dict이며 기존 동작과 완전히 동일하다.
 
     Returns:
-        {"ok": bool, "result": Any, "error": str | None}
+        {"ok": bool, "result": Any, "error": str | None, "extra": dict}
+        · extra: extra_vars로 요청한 보조 변수({이름: 값}, 코드가 안 채웠으면 None). 성공
+          시에만 값이 담기고, 실패/타임아웃/비정상종료 시에는 빈 dict다.
     """
     ctx = dict(context or {})
     mp_ctx = multiprocessing.get_context("spawn")
@@ -217,11 +228,12 @@ def execute_python(
     try:
         process = mp_ctx.Process(
             target=_execute_python_child,
-            args=(code, ctx, result_var, child_conn, cpu_seconds, memory_bytes),
+            args=(code, ctx, result_var, child_conn, cpu_seconds, memory_bytes, extra_vars),
         )
         process.start()
     except Exception as e:  # noqa: BLE001 — context 직렬화 실패 등 프로세스 기동 자체의 실패
-        return {"ok": False, "result": None, "error": f"실행 프로세스 기동 실패: {type(e).__name__}: {e}"}
+        return {"ok": False, "result": None,
+                "error": f"실행 프로세스 기동 실패: {type(e).__name__}: {e}", "extra": {}}
     finally:
         child_conn.close()  # 부모 쪽 자식-끝 핸들은 즉시 닫는다(자식이 자기 것을 따로 들고 있음)
 
@@ -230,21 +242,21 @@ def execute_python(
         process.kill()  # 스레드와 달리 진짜로 강제 종료된다(방치되지 않음)
         process.join()
         parent_conn.close()
-        return {"ok": False, "result": None, "error": "timeout"}
+        return {"ok": False, "result": None, "error": "timeout", "extra": {}}
 
     try:
         # 이 시점에서 자식은 이미 종료됐다(process.join 완료) — recv()는 남은 버퍼를
         # 읽거나 즉시 EOFError를 내며, 블로킹으로 멈추지 않는다. CPU/메모리 상한 초과로
         # 시그널에 의해 즉사하면(SIGXCPU 등) 메시지를 보낼 기회 없이 파이프만 닫히므로
         # EOFError를 "메시지 없이 종료"로 처리한다.
-        status, value = parent_conn.recv()
+        status, value, extra = parent_conn.recv()
     except EOFError:
         return {
             "ok": False, "result": None,
-            "error": f"실행 프로세스가 비정상 종료됨(exitcode={process.exitcode})",
+            "error": f"실행 프로세스가 비정상 종료됨(exitcode={process.exitcode})", "extra": {},
         }
     finally:
         parent_conn.close()
     if status == "ok":
-        return {"ok": True, "result": value, "error": None}
-    return {"ok": False, "result": None, "error": value}
+        return {"ok": True, "result": value, "error": None, "extra": extra}
+    return {"ok": False, "result": None, "error": value, "extra": {}}

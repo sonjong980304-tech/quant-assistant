@@ -42,11 +42,12 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
 
 아래 질문을 프리미티브 조립 JSON 파이프라인으로 변환하세요. 파이썬 코드 금지, JSON만 출력.
 
-[사용 가능한 프리미티브 17종 — 이 외의 함수는 존재하지 않습니다]
+[사용 가능한 프리미티브 26종 — 이 외의 함수는 존재하지 않습니다]
 1. get_cross_section(asof, markets) : 특정 시점의 전종목 횡단면 지표 스냅샷(list of rows) 반환.
    각 row 필드: stock_code,name,sector,market,quarter,close,market_cap,per,pbr,psr,
    roe,roa,operating_margin,net_margin,debt_ratio,revenue_growth,op_growth,ni_growth,return_12m,
-   gross_profit,total_assets,gp_a,earnings_yield,roc,roc_estimated.
+   gross_profit,total_assets,gp_a,cfo_ratio,earnings_yield,roc,roc_estimated.
+   · cfo_ratio: 영업활동현금흐름(TTM) ÷ 총자산(%) — CFO비율(질/수익성 팩터, 높을수록 우수).
    · return_12m: 직전 12개월 가격 수익률(%) = (기준시점 종가 - 12개월전 종가)/12개월전 종가.
      "최근 12개월 수익률/가격 모멘텀이 가장 좋은 종목" 류 질문은 매출성장(revenue_growth)이
      아니라 반드시 이 return_12m을 direction='high'로 써야 합니다.
@@ -179,6 +180,35 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
     산점도(예: "이익수익률과 투하자본수익률 산점도")의 마지막 단계로 씁니다. x·y 두 좌표가
     모두 있는 종목만 포함됩니다(하나라도 None이면 제외). x_field/y_field는 get_cross_section
     필드 중에서만 고릅니다.
+18. histogram_buckets(rows, field, num_buckets) : field(예: pbr) 값을 num_buckets개의 균등폭
+    구간으로 나눠(quantile_bucket_means의 "동일 개수" 분위수와 다름 — 이건 "동일 폭" 구간)
+    구간별 표본 개수를 센다. "히스토그램"/"분포"/"구간별 빈도" 질문에 씁니다. num_buckets
+    미지정시 10. 반환 {{bucket_edges:[n+1개], counts:[n개], n}}. field는 get_cross_section
+    필드 중에서만 고릅니다.
+19. get_cross_section_qvm(asof, markets) : get_cross_section과 같지만 각 종목에 12-1 모멘텀
+    (momentum_12_1: 최근 1개월 제외 12개월 수익률%)을 배치로 얹어 반환합니다. "퀄리티 밸류
+    모멘텀(QVM)" 전략 스크리닝은 get_cross_section 대신 반드시 이걸로 시작해 compute_qvm_scores로
+    넘깁니다. conn은 실행기가 자동 주입.
+20. compute_qvm_scores(rows, quality_fields, value_source_fields, momentum_field, min_sector_n,
+    winsorize_lower, winsorize_upper, max_missing, category_weights) : get_cross_section_qvm의 rows에
+    사용자 확정 QVM 파이프라인을 적용해 각 종목에 qvm_score(최종 점수)를 얹어 반환합니다.
+    내부 순서: 가치역수(E/P·B/P·S/P) → 1%/99% winsorize → 섹터 z-score(<5표본 전체폴백)
+    → 카테고리 합성(Quality=roe/gp_a/cfo_ratio, Value=E/P·B/P·S/P, Momentum=12-1) → 결측필터
+    (raw 7개 중 3개 이상 결측 제외) → 2차 z-score → 최종점수(등가중). 파라미터는 모두 선택이며
+    기본값이 사용자 확정값입니다(category_weights로 Q/V/M 가중치 변경 가능). 결과 rows를
+    combine(criteria=[{{"key":"qvm_score","direction":"high"}}], n=원하는수)으로 넘겨 상위 종목을 뽑습니다.
+21. run_qvm_backtest(start_year, end_year, n, rebalance, markets, quality_fields,
+    value_source_fields, category_weights, with_benchmark) : QVM 전략으로 리밸런싱 백테스트를
+    실행합니다(19·20을 매 리밸런싱 시점에 적용해 qvm_score 상위 n종목을 동일가중 보유). "QVM/
+    퀄리티밸류모멘텀 전략으로 백테스트/리밸런싱" 질문에 씁니다. rebalance='monthly'|'quarterly'|
+    'semiannual'|'annual', n=편입 종목수(기본 20). 반환 {{dates, navs, benchmark, performance,
+    holdings}} — run_backtest와 동일 형식. conn은 실행기가 자동 주입.
+22~26. (QVM 저수준 빌딩블록 — 보통은 20번 compute_qvm_scores가 내부에서 자동으로 조립하므로
+    직접 쓸 필요가 없습니다) invert_field(rows, field, out_field: 가치지표 역수 1/field),
+    winsorize_pct(rows, field, lower_pct, upper_pct: 1%/99% 분위 클리핑),
+    sector_zscore_with_fallback(rows, field, min_sector_n: 섹터 z-score, 표본부족시 전체폴백),
+    composite_score(rows, fields, out_field, weights: z-score 가중평균, 결측 제외),
+    drop_missing_factors(rows, fields, max_missing: 결측 초과 행 제거).
 
 [JSON 형식]
 - {{"pipeline": [{{"op": "이름", "params": {{...}}, "out": "결과이름"}}, ...]}}
@@ -257,6 +287,21 @@ A: {{"pipeline": [
     "constraints": [{{"metric": "mdd", "op": ">=", "value": -30.0}}, {{"metric": "total_return", "op": ">=", "value": 35.0}}],
     "rank_by": "total_return"
   }}, "out": "found"}}
+]}}
+Q: 코스피 PBR을 100구간으로 쪼개서 히스토그램 그려줘
+A: {{"pipeline": [
+  {{"op": "get_cross_section", "params": {{"asof": "{today}", "markets": ["KOSPI"]}}, "out": "xs"}},
+  {{"op": "histogram_buckets", "params": {{"rows": {{"$ref": "xs"}}, "field": "pbr", "num_buckets": 100}}, "out": "hist"}}
+]}}
+Q: 퀄리티 밸류 모멘텀 전략으로 상위 20종목 뽑아줘
+A: {{"pipeline": [
+  {{"op": "get_cross_section_qvm", "params": {{"asof": "{today}"}}, "out": "xs"}},
+  {{"op": "compute_qvm_scores", "params": {{"rows": {{"$ref": "xs"}}}}, "out": "scored"}},
+  {{"op": "combine", "params": {{"rows": {{"$ref": "scored"}}, "criteria": [{{"key": "qvm_score", "direction": "high", "weight": 1.0}}], "method": "zscore", "n": 20}}, "out": "picked"}}
+]}}
+Q: 퀄리티 밸류 모멘텀 전략으로 2024년부터 2026년까지 분기별 리밸런싱 백테스트해줘
+A: {{"pipeline": [
+  {{"op": "run_qvm_backtest", "params": {{"start_year": 2024, "end_year": 2026, "n": 20, "rebalance": "quarterly"}}, "out": "bt"}}
 ]}}
 
 질문: {question}

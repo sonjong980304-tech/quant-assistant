@@ -453,7 +453,7 @@ function downloadCsv(id){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
-function renderValue(v,key){
+function renderValue(v,key,csvColumns){
   if(v==null) return '<span style="color:#8b93a7">—</span>';
   if(Array.isArray(v)){
     if(!v.length) return '<span style="color:#8b93a7">[]</span>';
@@ -461,19 +461,36 @@ function renderValue(v,key){
     if(key!=='criteria'&&v.every(x=>x!==null&&typeof x==='object'&&!Array.isArray(x))){
       // 배열의 모든 원소가 dict → CSV로 내려받을 수 있게 버튼 병기(AC4: 표시 자체는 가공 없이 그대로)
       // criteria는 실제 데이터가 아니라 스크리닝 조건 메타데이터(소량)라 CSV 대상에서 제외.
-      const csvId=_csvSeq++; _csvRegistry[csvId]=v;
+      // csvColumns가 있으면(스크리닝 결과) 화면 표시는 원본 v 그대로 두고, "내려받는 CSV"에만
+      // 식별자+요청 지표 컬럼만 남긴 배열을 등록한다 — 요청 안 한 sector/market/quarter 등을 뺀다.
+      const csvRows = csvColumns
+        ? v.map(row=>{ const o={}; csvColumns.forEach(c=>{ if(row&&Object.prototype.hasOwnProperty.call(row,c)) o[c]=row[c]; }); return o; })
+        : v;
+      const csvId=_csvSeq++; _csvRegistry[csvId]=csvRows;
       return `<div><button type="button" class="sm ghost" onclick="downloadCsv(${csvId})">⬇ CSV 다운로드</button></div>`+
-        v.map(x=>`<div class="kvblock">${renderValue(x,key)}</div>`).join('');
+        v.map(x=>`<div class="kvblock">${renderValue(x,key,csvColumns)}</div>`).join('');
     }
-    return v.map(x=>`<div class="kvblock">${renderValue(x,key)}</div>`).join('');
+    return v.map(x=>`<div class="kvblock">${renderValue(x,key,csvColumns)}</div>`).join('');
   }
   if(typeof v==='object'){
     const entries=Object.entries(v);
     if(!entries.length) return '<span style="color:#8b93a7">{}</span>';
     return `<table class="kvt"><tbody>${entries.map(([k,val])=>
-      `<tr><th>${esc(k)}</th><td>${renderValue(val,k)}</td></tr>`).join('')}</tbody></table>`;
+      `<tr><th>${esc(k)}</th><td>${renderValue(val,k,csvColumns)}</td></tr>`).join('')}</tbody></table>`;
   }
   return fmtCell(v);
+}
+function _screeningCsvColumns(result){
+  // 스크리닝 결과(criteria=요청 지표 목록 + result=종목 리스트 array-of-dict)면 CSV로 남길
+  // 컬럼(["stock_code","name", ...요청 지표])을 반환, 아니면 null(=필터링 안 함, 기존 동작).
+  // both_extremes({highest,lowest})나 criteria 없는 도메인(단일종목/매크로/백테스트)은 null.
+  if(!result||typeof result!=='object') return null;
+  const criteria=result.criteria, rows=result.result;
+  if(!Array.isArray(criteria)||!criteria.length) return null;
+  if(!Array.isArray(rows)||!rows.length||rows[0]===null||typeof rows[0]!=='object'||Array.isArray(rows[0])) return null;
+  const cols=[];
+  ['stock_code','name'].concat(criteria.map(c=>c&&c.key)).forEach(c=>{ if(c&&!cols.includes(c)) cols.push(c); });
+  return cols;
 }
 function domainCard(domain,result){
   const label=DOMAIN_LABELS[domain]||domain;
@@ -481,10 +498,12 @@ function domainCard(domain,result){
   const src=result&&result.financial&&result.financial.source;
   const srcBadge=src?`<span class="badge b-ver">재무 출처 ${esc(src)}</span>`:'';
   const hasErr=result&&(result.error||(Array.isArray(result.errors)&&result.errors.length));
+  // 스크리닝 결과면 CSV 다운로드 컬럼을 식별자+요청 지표로 좁힌다(화면 표시는 그대로).
+  const csvColumns=_screeningCsvColumns(result);
   return `<div class="card">
     <b>📦 ${esc(label)} 도메인</b> <span class="meta" style="font-weight:400">· 원본 데이터(가공 없음)</span>
     <div style="margin:8px 0">${srcBadge}${hasErr?'<span class="badge b-warn">일부 오류</span>':''}</div>
-    ${renderValue(result)}
+    ${renderValue(result,undefined,csvColumns)}
   </div>`;
 }
 function renderQuery(s){

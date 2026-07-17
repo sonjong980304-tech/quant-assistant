@@ -215,3 +215,42 @@ def render_bar_chart_base64(
     fig.savefig(buf, format="png", dpi=110)
     plt.close(fig)  # 메모리 누수 방지(다른 차트 함수와 동일)
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def render_histogram_chart_base64(
+    bucket_edges: list[float],
+    counts: list[int],
+    x_label: str,
+    title: str,
+) -> str:
+    """히스토그램(균등폭 구간별 빈도)을 base64 PNG로 렌더링한다. render_bar_chart_base64와
+    달리 구간이 연속값 범위라 막대 사이 간격 없이(width=구간폭, align='edge') 이어 붙인다.
+
+    render_line/scatter/bar_chart_base64와 동일한 지연 import/Agg 백엔드/_configure_korean_font/
+    plt.close 관례를 그대로 따른다. histogram_buckets 프리미티브가 돌려준 bucket_edges(n+1개)/
+    counts(n개)를 그대로 받아 그린다.
+    """
+    import base64
+    import io
+
+    import matplotlib  # 지연 import — 다른 차트 함수와 동일(서버 시작 속도/의존성 격리)
+
+    matplotlib.use("Agg")  # 헤드리스 백엔드
+    _configure_korean_font(matplotlib)
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    n = len(counts)
+    widths = [bucket_edges[i + 1] - bucket_edges[i] for i in range(n)]
+    ax.bar(bucket_edges[:-1], counts, width=widths, align="edge",
+           color="#4C72B0", edgecolor="white", linewidth=0.3)
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("빈도")
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110)
+    plt.close(fig)  # 메모리 누수 방지(다른 차트 함수와 동일)
+    return base64.b64encode(buf.getvalue()).decode()

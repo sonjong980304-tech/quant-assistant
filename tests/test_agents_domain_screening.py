@@ -757,6 +757,25 @@ def test_answer_kr_screening_passes_sector_neutral_true_to_combine():
     assert captured.get("sector_neutral") is True
 
 
+def test_answer_kr_screening_overrides_llm_true_when_question_lacks_keyword():
+    """실사용 재현 버그: LLM이 '정렬 후 다시 확인' 같은 서술만 보고 sector_neutral=True로
+    과잉추론해도, 질문 원문에 명시적 표현이 없으면 최종적으로 False로 강제된다."""
+    llm = _json_llm({
+        "criteria": [{"key": "per", "direction": "low"}], "top_n": 2, "sector_neutral": True,
+    })
+    captured = {}
+
+    def fake_combine(rows, criteria, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    answer_kr_screening(
+        "PER 낮은 2개 종목을 알려주고 그 결과를 다시 한번 확인해줘", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
+    )
+    assert captured.get("sector_neutral") is False
+
+
 def test_answer_kr_screening_defaults_sector_neutral_false_to_combine():
     llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 2})
     captured = {}
@@ -788,3 +807,126 @@ def test_answer_us_screening_passes_sector_neutral_true_to_combine():
         cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
     )
     assert captured.get("sector_neutral") is True
+
+
+# ── 극값(최댓값/최솟값/최고/최저) 질문 → 스크리닝 경로 인식·처리 ─────────────────────
+# 배경: "국내 주식의 PBR의 최댓값과 최솟값을 알려줘"처럼 종목명 없이 지표의 극값만 묻는
+# 질문은 (a) find_stock_code가 실패해 단일종목 경로가 막히고 (b) 개수/랭킹 신호가 없어
+# 스크리닝 판정도 못 해 exec_fallback으로 새어 실패했다. "최댓값 1개"는 "그 지표 상위 1개
+# (top_n=1) 스크리닝"과 동치이므로, 기존 스크리닝 인프라를 그대로 재사용해 처리한다.
+
+def test_is_screening_question_heuristic_recognizes_extreme_value_questions():
+    # 종목명이 없고 극값 표현만 있는 질문 자체가 스크리닝으로 판정돼야 한다.
+    assert kr._is_screening_question_heuristic("국내 주식의 PBR의 최댓값과 최솟값을 알려줘")
+    assert kr._is_screening_question_heuristic("PBR 최댓값 알려줘")
+    assert kr._is_screening_question_heuristic("PBR 최솟값 알려줘")
+    assert kr._is_screening_question_heuristic("ROE가 가장 높은 종목")
+
+
+def test_is_screening_question_heuristic_extreme_expansion_no_false_positive_regression():
+    # 회귀: 극값 표현이 없는 단일종목 질문은 여전히 스크리닝이 아니다(오탐 방지).
+    assert not kr._is_screening_question_heuristic("삼성전자 PER 알려줘")
+    assert not kr._is_screening_question_heuristic("삼성전자 PER이랑 주가 같이 알려줘")
+    assert not kr._is_screening_question_heuristic("005930 주가 알려줘")
+
+
+def test_heuristic_screening_spec_extreme_max_is_top1_high():
+    spec = kr._heuristic_screening_spec("PBR 최댓값 알려줘", domain="KR")
+    assert spec is not None
+    assert spec["top_n"] == 1
+    assert spec["criteria"][0]["direction"] == "high"
+    assert spec["criteria"][0]["key"] == "pbr"
+    assert spec.get("both_extremes") is False
+
+
+def test_heuristic_screening_spec_extreme_min_is_top1_low():
+    spec = kr._heuristic_screening_spec("PBR 최솟값 알려줘", domain="KR")
+    assert spec is not None
+    assert spec["top_n"] == 1
+    assert spec["criteria"][0]["direction"] == "low"
+    assert spec.get("both_extremes") is False
+
+
+def test_heuristic_screening_spec_both_extremes_sets_flag_and_dual_criteria():
+    spec = kr._heuristic_screening_spec("PBR의 최댓값과 최솟값을 알려줘", domain="KR")
+    assert spec is not None
+    assert spec["both_extremes"] is True
+    assert spec["top_n"] == 1
+    directions = {c["direction"] for c in spec["criteria"]}
+    assert directions == {"high", "low"}
+    assert all(c["key"] == "pbr" for c in spec["criteria"])
+
+
+def test_heuristic_screening_spec_explicit_count_still_wins_over_extreme():
+    # 회귀: 명시 숫자(10)가 있으면 극값 표현이 있어도 top_n=1로 덮어쓰지 않는다.
+    spec = kr._heuristic_screening_spec("PBR 최댓값 상위 10개", domain="KR")
+    assert spec is not None
+    assert spec["top_n"] == 10
+
+
+def test_screening_intent_prompt_mentions_extreme_value_guidance():
+    prompt = kr._screening_intent_prompt("아무 질문")
+    assert "최댓값" in prompt
+
+
+def test_screening_prompt_mentions_both_extremes_and_top1_guidance():
+    prompt = kr._screening_prompt("PBR 최댓값과 최솟값", kr._KR_SCREEN_FIELDS, (), domain="KR")
+    assert "both_extremes" in prompt
+    assert "최댓값" in prompt
+
+
+def test_answer_kr_screening_both_extremes_returns_highest_and_lowest():
+    """both_extremes 스펙이면 direction별 top_n=1 결과를 highest/lowest로 나란히 반환한다."""
+    llm = _json_llm({
+        "criteria": [{"key": "per", "direction": "high"}, {"key": "per", "direction": "low"}],
+        "top_n": 1, "both_extremes": True,
+    })
+    result = answer_kr_screening(
+        "PER의 최댓값과 최솟값을 알려줘", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    assert result["both_extremes"] is True
+    assert isinstance(result["result"], dict)
+    assert [r["name"] for r in result["result"]["highest"]] == ["고PER다"]  # per 최댓값
+    assert [r["name"] for r in result["result"]["lowest"]] == ["저PER가"]   # per 최솟값
+
+
+def test_answer_kr_screening_both_extremes_heuristic_fallback_without_llm():
+    """LLM 없이도(휴리스틱 폴백) 최댓값+최솟값 질문이 highest/lowest로 처리된다."""
+    result = answer_kr_screening(
+        "PER의 최댓값과 최솟값을 알려줘", conn=None, llm_fn=None,
+        cross_section_fn=_fake_rows, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    assert result["both_extremes"] is True
+    assert [r["name"] for r in result["result"]["highest"]] == ["고PER다"]
+    assert [r["name"] for r in result["result"]["lowest"]] == ["저PER가"]
+
+
+def test_answer_kr_screening_single_extreme_returns_flat_list_backward_compat():
+    """하위호환: 최댓값만(양극단 아님) 요청이면 기존처럼 result는 평평한 list다."""
+    result = answer_kr_screening(
+        "PER 최댓값 알려줘", conn=None, llm_fn=None,
+        cross_section_fn=_fake_rows, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    assert result["both_extremes"] is False
+    assert isinstance(result["result"], list)
+    assert [r["name"] for r in result["result"]] == ["고PER다"]  # per 최댓값 1개
+
+
+def test_answer_us_screening_both_extremes_symmetric():
+    """US 경로도 공용 _run_screening을 타므로 both_extremes가 대칭 동작한다."""
+    llm = _json_llm({
+        "criteria": [{"key": "per", "direction": "high"}, {"key": "per", "direction": "low"}],
+        "top_n": 1, "both_extremes": True,
+    })
+    result = answer_us_screening(
+        "PER의 최댓값과 최솟값", conn=None, llm_fn=llm,
+        cross_section_fn=_fake_rows, asof="2026-07-14",
+    )
+    assert result["errors"] == []
+    assert result["both_extremes"] is True
+    assert [r["name"] for r in result["result"]["highest"]] == ["고PER다"]
+    assert [r["name"] for r in result["result"]["lowest"]] == ["저PER가"]

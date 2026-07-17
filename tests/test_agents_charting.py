@@ -12,6 +12,7 @@ import struct
 
 from src.agents.charting import (
     render_bar_chart_base64,
+    render_histogram_chart_base64,
     render_line_chart_base64,
     render_scatter_chart_base64,
 )
@@ -124,4 +125,29 @@ def test_render_bar_chart_base64_many_bars_limits_xticks():
     labels = [f"그룹{i}" for i in range(30)]
     values = [float(i) for i in range(30)]
     b64 = render_bar_chart_base64(labels, values, "그룹", "값", "대량 막대그래프")
+    _assert_valid_png(b64)
+
+
+# ── 히스토그램(histogram) 렌더링 — 구간이 연속값 범위라 막대 간격 없이(align='edge') 이어 붙임.
+#    histogram_buckets 프리미티브의 bucket_edges(n+1개)/counts(n개)를 그대로 받는다. ──────
+
+def test_render_histogram_chart_base64_returns_valid_png_with_korean_title():
+    """한글 제목/축라벨 케이스 — 다른 차트 함수와 동일 폰트 폴백을 재사용해야 한다."""
+    b64 = render_histogram_chart_base64(
+        [0.0, 1.0, 2.0, 3.0, 4.0], [10, 25, 18, 7], "PBR", "PBR 분포 히스토그램",
+    )
+    _assert_valid_png(b64)
+
+
+def test_render_histogram_chart_base64_many_buckets():
+    """구간이 많아도(예: 100구간) 예외 없이 유효 PNG."""
+    edges = [float(i) for i in range(101)]
+    counts = [i % 7 for i in range(100)]
+    b64 = render_histogram_chart_base64(edges, counts, "값", "대량 구간 히스토그램")
+    _assert_valid_png(b64)
+
+
+def test_render_histogram_chart_base64_single_bucket():
+    """단일 구간(전부 동일값 케이스)이어도 예외 없이 유효 PNG."""
+    b64 = render_histogram_chart_base64([5.0, 5.0], [4], "값", "단일 구간")
     _assert_valid_png(b64)
