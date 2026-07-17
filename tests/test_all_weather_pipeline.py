@@ -12,24 +12,10 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from src.allweather.data import SAMSUNG_CODE
 from src.allweather.pipeline import run_all_weather_pipeline
 from src.db import init_db
 
-
-def _seed_samsung(db: str) -> pd.DatetimeIndex:
-    conn = sqlite3.connect(db)
-    dates = pd.date_range("2014-01-01", periods=10 * 252, freq="B")
-    rng = np.random.default_rng(2)
-    px = 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.008, size=len(dates))))
-    for d, p in zip(dates, px):
-        conn.execute(
-            "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
-            (SAMSUNG_CODE, d.strftime("%Y-%m-%d"), float(p), 3e14),
-        )
-    conn.commit()
-    conn.close()
-    return dates
+_DATES = pd.date_range("2014-01-01", periods=10 * 252, freq="B")
 
 
 def _fake_yf(dates):
@@ -65,7 +51,7 @@ def test_pipeline_persists_all_metrics_and_sends_telegram(tmp_path):
     # AC10 + AC12: DB에 비중/MDD/CAGR/누적수익률/샤프 저장 + 텔레그램 전송.
     db = str(tmp_path / "pipe.db")
     init_db(db)
-    dates = _seed_samsung(db)
+    dates = _DATES
     sent = []
     run_all_weather_pipeline(
         db_path=db, fetch_yf=_fake_yf(dates), fetch_irx=_fake_irx(dates),
@@ -91,7 +77,7 @@ def test_pipeline_appends_history_two_runs(tmp_path):
     # AC16: 두 번 실행하면 이력 2행.
     db = str(tmp_path / "pipe2.db")
     init_db(db)
-    dates = _seed_samsung(db)
+    dates = _DATES
     for _ in range(2):
         run_all_weather_pipeline(
             db_path=db, fetch_yf=_fake_yf(dates), fetch_irx=_fake_irx(dates),
@@ -110,7 +96,7 @@ def test_pipeline_second_run_message_has_delta(tmp_path):
     # AC13: 직전 달 저장값이 있으면 두 번째 실행 알림에 델타(%p)가 들어간다.
     db = str(tmp_path / "pipe3.db")
     init_db(db)
-    dates = _seed_samsung(db)
+    dates = _DATES
     msgs = []
     run_all_weather_pipeline(
         db_path=db, fetch_yf=_fake_yf(dates), fetch_irx=_fake_irx(dates),
@@ -130,7 +116,7 @@ def test_pipeline_defaults_send_fn_to_send_telegram(tmp_path, monkeypatch):
     # send_fn 미주입 시 allweather.notify.send_telegram이 기본값으로 쓰인다.
     db = str(tmp_path / "pipe4.db")
     init_db(db)
-    dates = _seed_samsung(db)
+    dates = _DATES
     import src.allweather.pipeline as pl
 
     sent = []

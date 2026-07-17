@@ -3,7 +3,7 @@
 .omc/specs/brainstorming-all-weather-portfolio.md AC10/AC12/AC13/AC16 참고.
 
 네 단계를 한 번에 엮는 얇은 오케스트레이터(macro_pipeline과 동일 정신):
-  1) 데이터   : build_price_panel — 삼성전자(DB) + QQQ/TLT/411060.KS(yfinance)
+  1) 데이터   : build_price_panel — QQQ/삼성전자/TLT(yfinance) + 411060.KS(GLD×환율 합성+실데이터 스플라이스)
   2) 계산     : run_walk_forward — 매 리밸런싱 시점 몬테카를로 재계산(look-ahead 없음)
   3) 저장     : persist_snapshot — all_weather_snapshot에 이력 append(AC16)
   4) 알림     : send_telegram — 직전 달 대비 비중 델타 포함(AC12/AC13)
@@ -46,7 +46,7 @@ def run_all_weather_pipeline(
     init_db(db_path)
     conn = connect(db_path)
     try:
-        panel = build_price_panel(conn, fetch_fn=fetch_yf)
+        panel = build_price_panel(fetch_fn=fetch_yf)
         irx = fetch_irx_series(fetch_fn=fetch_irx)
         snapshot = run_walk_forward(
             panel, irx, monte_carlo_fn=monte_carlo_fn, n_simulations=n_simulations, today=today,
