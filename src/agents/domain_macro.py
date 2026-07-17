@@ -44,11 +44,16 @@ _EXPLANATION = (
 )
 
 
-def _macro_payload(question: str, row: dict | None) -> dict:
+def _macro_payload(question: str, row: dict | None, error: str | None = None) -> dict:
     """macro_signal 최신 행(dict 또는 None)을 응답 dict로 변환.
 
     web/app.py의 _signal_payload(row)와 같은 정신(이력 없으면 available=False + 전
     필드 None)이되, 이 에이전트 고유의 question/explanation 필드를 더한다.
+
+    error: DB 조회 자체가 실패한 경우(execute_sql이 ok=False 반환)에만 채워진다.
+    row=None이라도 error가 없으면 '진짜로 아직 신호가 계산 안 됨'(빈 테이블)이고,
+    error가 있으면 '조회가 실패해서 알 수 없음'이다 — 둘을 같은 available=False로
+    뭉뚱그리되 error 필드로 구분해 사용자에게 조회 실패임을 숨기지 않는다.
     """
     if row is None:
         return {
@@ -61,6 +66,7 @@ def _macro_payload(question: str, row: dict | None) -> dict:
             "vix": {"value": None, "band": None},
             "created_at": None,
             "explanation": _EXPLANATION,
+            "error": error,
         }
     return {
         "available": True,
@@ -72,6 +78,7 @@ def _macro_payload(question: str, row: dict | None) -> dict:
         "vix": {"value": row["vix_value"], "band": row["vix_band"]},
         "created_at": row["created_at"],
         "explanation": _EXPLANATION,
+        "error": None,
     }
 
 
@@ -89,13 +96,22 @@ def answer_macro_question(
     macro_signal이 비어 있으면(파이프라인이 아직 한 번도 안 돈 경우) 예외를 던지지 않고
     available=False인 명시적 상태를 반환한다.
 
+    execute_sql(HA-1 실행기)은 SQL 오류(스키마 오류, 타임아웃, 잠김 등)를 예외로 던지지
+    않고 {"ok": False, "error": ...}로 반환한다. 이를 "아직 신호 없음"(빈 테이블)과 같은
+    available=False로 뭉뚱그리면 진짜 조회 실패를 조용히 숨기게 되므로, ok=False인 경우는
+    별도로 판별해 error 필드에 실패 사유를 담는다(row 유무와 무관하게 조회 자체가 실패했다는
+    뜻).
+
     반환: {"available", "question", "as_of", "overall", "spread", "cnn", "vix",
-           "created_at", "explanation"}. HA-10(총괄 에이전트)이 이 함수를
-           answer_macro_question(question, conn) 형태로 호출한다.
+           "created_at", "explanation", "error"}. error는 조회 실패 시에만 문자열이고,
+           그 외(정상 조회 — 신호 있음/빈 테이블 모두 포함)에는 None이다. HA-10(총괄
+           에이전트)이 이 함수를 answer_macro_question(question, conn) 형태로 호출한다.
     """
     execute_sql_fn = execute_sql_fn or execute_sql
     result = execute_sql_fn(_LATEST_SIGNAL_SQL, conn)
-    row = result["rows"][0] if result.get("ok") and result.get("rows") else None
+    if not result.get("ok"):
+        return _macro_payload(question, None, error=result.get("error") or "매크로 신호 조회 실패")
+    row = result["rows"][0] if result.get("rows") else None
     return _macro_payload(question, row)
 
 

@@ -91,6 +91,38 @@ def test_answer_macro_question_empty_table_is_graceful(tmp_path):
     assert res["cnn"] == {"value": None, "band": None}
     assert res["vix"] == {"value": None, "band": None}
     assert res["created_at"] is None
+    assert res["error"] is None  # 진짜 빈 결과는 조회 실패가 아니므로 error 없음
+
+
+def test_answer_macro_question_query_failure_is_distinguished_from_no_signal(tmp_path):
+    """DB 조회 자체가 실패한 경우(execute_sql이 ok=False 반환)를 '아직 신호 없음'과 구분해야 한다.
+
+    HA-1 실행기(execute_sql)는 sqlite 예외를 내부에서 잡아 {"ok": False, "error": ...}로
+    반환한다(예외를 던지지 않음). 이 경우를 빈 테이블과 똑같이 available=False로만 답하면
+    사용자는 '아직 계산 안 됐나보다'로 오해하게 된다 — 진짜 조회 실패임을 알 수 있어야 한다.
+    """
+    db = str(tmp_path / "fail.db")
+    init_db(db)
+    _seed_signals(db)
+
+    def failing_execute_sql(sql, conn, **kwargs):
+        return {
+            "ok": False,
+            "columns": [],
+            "rows": [],
+            "row_count": 0,
+            "error": "OperationalError: database is locked",
+        }
+
+    conn = connect_readonly(db)
+    try:
+        res = answer_macro_question("신호?", conn, execute_sql_fn=failing_execute_sql)
+    finally:
+        conn.close()
+
+    assert res["available"] is False
+    assert res["error"] is not None
+    assert "database is locked" in res["error"]
 
 
 # ---------- HA-1 실행기 경유 강제 (conn.execute() 직접 호출 금지) ----------
