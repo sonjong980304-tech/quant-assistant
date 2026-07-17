@@ -700,14 +700,33 @@ def synthesize_conclusion(
     나열한 결정론적 요약으로 폴백한다. 이 함수는 domain_results 를 **읽기만** 하며 원본을
     바꾸지 않는다(원본은 answer_with_verification 이 그대로 병기한다).
     """
+    text = ""
     if llm_fn is not None:
         try:
             text = (llm_fn(_synthesize_prompt(question, domain_results)) or "").strip()
         except Exception:  # noqa: BLE001 — LLM 실패는 결정론 요약으로 폴백
             text = ""
-        if text:
-            return text
-    return _deterministic_summary(question, domain_results)
+    if not text:
+        text = _deterministic_summary(question, domain_results)
+    # 백테스트 리밸런싱 구간별 보유종목·구간수익률은 LLM 재량과 무관하게 최종 결론에 항상
+    # 덧붙인다(domain_backtest가 만든 결정론적 텍스트를 그대로 병기 — 요구: "항상 포함").
+    rebalance_block = _backtest_rebalance_block(domain_results)
+    if rebalance_block:
+        text = f"{text}\n\n{rebalance_block}"
+    return text
+
+
+def _backtest_rebalance_block(domain_results: dict) -> str | None:
+    """domain_backtest가 붙인 결정론적 rebalance_summary 텍스트를 꺼낸다(없으면 None).
+
+    다중 리밸런싱 백테스트일 때만 존재하는 순수 추가 필드다(단일 리밸런싱/비백테스트엔 없음).
+    문자열이라 _truncate_for_prompt에 잘리지 않고, 여기서 결론 텍스트에 직접 병기하므로
+    LLM이 보유종목/구간수익률을 언급하지 않아도 최종 답변에 반드시 포함된다."""
+    bt = domain_results.get("backtest") if isinstance(domain_results, dict) else None
+    if not isinstance(bt, dict):
+        return None
+    summary = bt.get("rebalance_summary")
+    return summary if isinstance(summary, str) and summary.strip() else None
 
 
 def _synthesize_prompt(question: str, domain_results: dict) -> str:

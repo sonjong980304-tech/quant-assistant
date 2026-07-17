@@ -495,6 +495,46 @@ def test_synthesize_prompt_keeps_full_list_up_to_requested_top_n():
     assert "...(총" not in prompt
 
 
+# ── 백테스트 리밸런싱 구간별 보유종목·구간수익률은 LLM 재량과 무관하게 최종 결론에
+#    '항상' 포함돼야 한다(요구: "반기마다 어떤 종목이 있었는지·반기별 수익률도 같이 항상").
+#    domain_backtest가 만든 결정론적 rebalance_summary 텍스트를 supervisor가 결론에 직접
+#    덧붙인다 — LLM이 홀딩스를 언급하지 않아도 보장된다. ──────────────────────────────
+_REBALANCE_SUMMARY = (
+    "리밸런싱 구간별 보유종목·구간수익률:\n"
+    "- 2025-06-30: 000001, 000002 (구간수익률 +5.00%)\n"
+    "- 2025-12-31: 000003 (구간수익률 -2.00%)"
+)
+
+
+def test_synthesize_conclusion_always_appends_backtest_rebalance_summary():
+    def terse_llm(prompt: str) -> str:
+        # LLM이 보유종목/구간수익률을 전혀 언급하지 않는 요약을 내도(재량),
+        return "백테스트를 수행했습니다."
+
+    domain_results = {
+        "backtest": {
+            "blocked": False, "error": None,
+            "result": {"performance": {"cagr": 5.0}, "holdings": [{"date": "x"}, {"date": "y"}]},
+            "hard": [], "warnings": [], "data": [],
+            "rebalance_summary": _REBALANCE_SUMMARY,
+        }
+    }
+    conclusion = synthesize_conclusion("반기 리밸런싱 백테스트", domain_results, terse_llm)
+    # 결정론적 리밸런싱 블록이 통째로 최종 결론에 포함돼야 한다.
+    assert _REBALANCE_SUMMARY in conclusion
+    assert "000001" in conclusion and "000003" in conclusion
+    assert "+5.00%" in conclusion and "-2.00%" in conclusion
+
+
+def test_synthesize_conclusion_no_rebalance_block_when_field_absent():
+    """rebalance_summary가 없으면(단일 리밸런싱/비백테스트) 결론에 블록을 덧붙이지 않는다(회귀)."""
+    domain_results = {
+        "backtest": {"blocked": False, "result": {"performance": {"cagr": 5.0}}, "hard": [], "warnings": []}
+    }
+    conclusion = synthesize_conclusion("buy&hold 백테스트", domain_results, lambda p: "LLM결론")
+    assert conclusion == "LLM결론"
+
+
 def test_verify_prompt_still_truncates_rows_beyond_top_n():
     """top_n을 넘는 초과분(비정상 상황 방어)까지 무제한으로 다 보여주진 않는다 —
     top_n개까지만 보장하고, 그 이상은 여전히 축약 대상이다."""

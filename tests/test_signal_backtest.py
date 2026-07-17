@@ -71,8 +71,11 @@ def test_golden_cross_entry_and_dead_cross_exit_timing_and_nav():
     assert out["benchmark"] is None
     # 보유수익은 j=4(110/100), j=5(121/110)에서만 → nav 1→1.1→1.21, 그 전엔 평탄.
     assert out["navs"] == pytest.approx([1.0, 1.0, 1.0, 1.0, 1.1, 1.21])
-    # 보유 종목 집합이 바뀐 날(j=4, 현금→AAA)만 holdings에 기록.
-    assert out["holdings"] == [{"date": "2026-01-08", "codes": ["AAA"]}]
+    # 보유 종목 집합이 바뀐 날(j=4, 현금→AAA)만 holdings에 기록. 구간수익률(j=4,5 보유:
+    # 1.1×1.1-1)도 함께 저장된다.
+    assert out["holdings"] == [
+        {"date": "2026-01-08", "codes": ["AAA"], "period_return": pytest.approx(0.21)}
+    ]
     assert "cagr" in out["performance"] and "mdd" in out["performance"]
 
 
@@ -119,7 +122,36 @@ def test_multi_code_equal_weight_when_both_held():
     )
     # j=2,3에서 두 종목 보유: 각 날 평균수익 = (0.1+0.2)/2 = 0.15 → 1.15, 1.3225.
     assert out["navs"] == pytest.approx([1.0, 1.0, 1.15, 1.3225])
-    assert {"date": "2026-01-06", "codes": ["AAA", "BBB"]} in out["holdings"]
+    entry = next(h for h in out["holdings"] if h["date"] == "2026-01-06")
+    assert entry["codes"] == ["AAA", "BBB"]
+    # 단일 보유구간(전 구간 보유) → 구간수익률 = 최종 nav-1 = 0.3225.
+    assert entry["period_return"] == pytest.approx(0.3225)
+
+
+def test_holdings_log_records_period_return_per_segment():
+    """각 보유구간(리밸런싱 구간)의 실제 포트폴리오 수익률이 holdings 항목에 저장된다.
+    비용 0이면 구간수익률들을 곱한 값이 최종 nav와 일치해야 한다(불변식)."""
+    import math
+
+    # AAA는 전 구간 보유(항상 >100), BBB는 뒤늦게 편입(j>=3부터 >100) → 보유집합이 바뀌며 2개 구간.
+    dates7 = _DATES6 + ["2026-01-12"]
+    aaa = [200.0, 200.0, 200.0, 220.0, 242.0, 242.0, 266.2]
+    bbb = [50.0, 50.0, 50.0, 150.0, 165.0, 181.5, 199.65]
+    hist = {"AAA": list(zip(dates7, aaa)), "BBB": list(zip(dates7, bbb))}
+    entry = {"left": {"kind": "price"}, "op": ">", "right": {"kind": "const", "value": 100.0}}
+    exit_ = {"left": {"kind": "price"}, "op": "<", "right": {"kind": "const", "value": 0.0}}
+    out = run_signal_backtest(
+        conn=None, stock_codes=["AAA", "BBB"], start_date=dates7[0], end_date=dates7[-1],
+        entry_rule=entry, exit_rule=exit_,
+        params={"fee_rate": 0.0, "tax_rate": 0.0, "slippage_rate": 0.0},
+        price_history_fn=_history_fn_factory(hist),
+        indicator_series_fn=lambda *a, **k: None,  # price/const만 쓰므로 지표 불필요
+    )
+    holdings = out["holdings"]
+    assert len(holdings) >= 2                            # 보유집합이 바뀌어 여러 구간 발생
+    assert all("period_return" in h for h in holdings)   # 모든 구간에 구간수익률 저장
+    prod = math.prod(1 + h["period_return"] for h in holdings)
+    assert prod == pytest.approx(out["navs"][-1])        # 비용0 → 구간수익률 누적곱 = 최종 nav
 
 
 def test_rejects_empty_stock_codes():

@@ -220,17 +220,28 @@ def run_signal_backtest(
     holdings_log: list[dict] = []
     turnovers: list[float] = []
     prev_set = _owned_set(0)
+    # 현재 보유구간의 holdings 항목과 그 구간 보유수익 누적곱((1+구간수익률)). 보유집합이
+    # 바뀌거나 시뮬레이션이 끝날 때 seg_factor-1을 그 항목의 period_return으로 확정한다
+    # (nav 계산식은 그대로 — 구간수익률은 순수 추가 필드다).
+    cur_entry: dict | None = None
+    seg_factor = 1.0
     if prev_set:
-        holdings_log.append({"date": master[0], "codes": sorted(prev_set)})
+        cur_entry = {"date": master[0], "codes": sorted(prev_set)}
+        holdings_log.append(cur_entry)
 
     for i in range(1, len(master)):
         cur_set = _owned_set(i)
         if cur_set != prev_set:  # 보유 집합이 바뀐 날 = 체결(리밸런싱) → 거래비용 차감
+            if cur_entry is not None:  # 직전 구간 마감 → 구간수익률 확정
+                cur_entry["period_return"] = seg_factor - 1.0
+            seg_factor = 1.0
+            cur_entry = None
             turn = _turnover(prev_set, cur_set)
             turnovers.append(turn)
             nav *= (1 - turn * cost_per_turn)
             if cur_set:
-                holdings_log.append({"date": master[i], "codes": sorted(cur_set)})
+                cur_entry = {"date": master[i], "codes": sorted(cur_set)}
+                holdings_log.append(cur_entry)
         # 그날 보유 종목의 균등가중 수익(close[i]/close[i-1]-1).
         rets = []
         for c in cur_set:
@@ -240,8 +251,13 @@ def run_signal_backtest(
                 rets.append(p1 / p0 - 1)
         period_ret = sum(rets) / len(rets) if (cur_set and rets) else 0.0
         nav *= (1 + period_ret)
+        if cur_entry is not None:  # 이날 보유수익을 현재 구간에 누적
+            seg_factor *= (1 + period_ret)
         navs.append(nav)
         prev_set = cur_set
+
+    if cur_entry is not None:  # 마지막(열린) 보유구간 마감
+        cur_entry["period_return"] = seg_factor - 1.0
 
     perf = performance(navs, _PERIODS_PER_YEAR_DAILY, benchmark=None)
     perf["avg_turnover"] = round(sum(turnovers) / len(turnovers) * 100, 1) if turnovers else 0.0

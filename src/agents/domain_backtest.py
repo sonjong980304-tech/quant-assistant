@@ -396,6 +396,124 @@ def _infer_requested_count(steps: list[dict]) -> int | None:
     return found
 
 
+def _infer_qvm_asof(steps: list[dict]) -> str | None:
+    """steps에서 get_cross_section_qvm(또는 get_cross_section)의 asof 파라미터를 찾는다.
+
+    compute_qvm_scores 자체는 asof를 모른다(그 앞 단계인 get_cross_section_qvm의
+    파라미터로만 존재) — _infer_requested_count와 동일한 관례로 steps(JSON)를 실행 없이
+    정적으로 스캔한다. 여러 단계에 있으면 마지막(파이프라인상 더 뒤) 값을 우선한다."""
+    found: str | None = None
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        if step.get("op") in ("get_cross_section_qvm", "get_cross_section"):
+            params = step.get("params")
+            if isinstance(params, dict) and isinstance(params.get("asof"), str):
+                found = params["asof"]
+    return found
+
+
+def _find_qvm_scored_rows(result) -> list[dict] | None:
+    """result(파이프라인 leaf 산출물)에서 compute_qvm_scores가 채점한 rows를 찾는다.
+
+    qvm_summary 계산용 — compute_qvm_scores가 각 row에 남기는 내부 마커
+    '_qvm_excluded_count'로 식별한다(combine 등 후속 선정 단계도 원본 dict 참조를 그대로
+    넘기므로, top_n으로 걸러진 뒤에도 이 마커는 살아남는다 — select_stocks._filter_valid가
+    새 dict를 만들지 않기 때문). result이 list(단일 leaf, 흔한 경우)든 dict(다중 leaf,
+    {"out이름": 값})든 찾아낸다. 못 찾으면 None(QVM 파이프라인이 아니거나, 결측필터로
+    전부 제외돼 마커를 남길 행이 하나도 없던 경우)."""
+
+    def _matches(v) -> bool:
+        return (
+            isinstance(v, list) and len(v) > 0
+            and all(isinstance(r, dict) for r in v)
+            and "_qvm_excluded_count" in v[0]
+        )
+
+    if _matches(result):
+        return result
+    if isinstance(result, dict):
+        for v in result.values():
+            if _matches(v):
+                return v
+    return None
+
+
+def _build_qvm_summary(steps: list[dict], result) -> dict | None:
+    """QVM 스크리닝 파이프라인이면 사용자 요청 [출력] 절의 요약 3종(asof/excluded_count/
+    sector_distribution)을 만든다. steps에 compute_qvm_scores 단계가 없으면(QVM 파이프라인이
+    아님) None을 반환해 result_payload에 아무 것도 추가하지 않는다(하위호환 — kr/us의
+    top_n과 동일한 관례).
+
+    excluded_count/sector_distribution은 _find_qvm_scored_rows로 찾은 '최종 결과 rows'
+    (combine으로 top_n까지 걸러졌으면 그 이후 rows, 그런 단계가 없으면 compute_qvm_scores의
+    전체 스코어 유니버스)에서 계산한다 — 있는 그대로의 최종 결과셋을 그대로 반영하므로
+    top_n 반영 여부와 무관하게 자연스럽게 동작한다."""
+    if not any(isinstance(s, dict) and s.get("op") == "compute_qvm_scores" for s in steps or []):
+        return None
+    rows = _find_qvm_scored_rows(result)
+    if rows is None:
+        return None
+    sector_distribution: dict = {}
+    for r in rows:
+        sector = r.get("sector")
+        sector_distribution[sector] = sector_distribution.get(sector, 0) + 1
+    return {
+        "asof": _infer_qvm_asof(steps),
+        "excluded_count": rows[0]["_qvm_excluded_count"],
+        "sector_distribution": sector_distribution,
+    }
+
+
+def _extract_backtest_holdings(result) -> list | None:
+    """result(파이프라인 leaf 산출물)에서 백테스트 holdings 리스트를 찾는다.
+
+    단일 백테스트면 result은 {dates,navs,...,holdings} dict라 바로 꺼내고, 다중 leaf
+    (dict of {out이름: 값})면 holdings를 가진 dict를 찾아 그 안에서 꺼낸다. 못 찾으면 None.
+    """
+    def _holdings_of(v):
+        if isinstance(v, dict) and isinstance(v.get("holdings"), list):
+            return v["holdings"]
+        return None
+
+    direct = _holdings_of(result)
+    if direct is not None:
+        return direct
+    if isinstance(result, dict):
+        for v in result.values():
+            found = _holdings_of(v)
+            if found is not None:
+                return found
+    return None
+
+
+def _build_rebalance_summary(result) -> str | None:
+    """다중 리밸런싱 백테스트면 리밸런싱 시점별 보유종목+구간수익률을 사람이 읽기 좋은
+    결정론적 텍스트로 만든다(top_n/qvm_summary와 동일한 순수 추가 필드 관례).
+
+    holdings가 2개 이상(실제로 여러 번 리밸런싱한 경우)일 때만 만든다 — buy&hold(단일
+    리밸런싱)엔 구간별 서술이 의미가 없어 None을 반환한다(하위호환: 키 자체가 안 붙음).
+    supervisor가 이 텍스트를 최종 결론에 그대로 덧붙여 LLM 요약 재량과 무관하게 '항상'
+    포함을 보장한다(사용자 요구: "반기마다 어떤 종목이 있었는지·반기별 수익률도 같이 항상").
+    """
+    holdings = _extract_backtest_holdings(result)
+    if not holdings or len(holdings) < 2:
+        return None
+    lines = ["리밸런싱 구간별 보유종목·구간수익률:"]
+    for h in holdings:
+        if not isinstance(h, dict):
+            continue
+        date_str = h.get("date", "?")
+        names = h.get("names") or h.get("codes") or []
+        held = ", ".join(str(x) for x in names) if names else "(보유 없음)"
+        pr = h.get("period_return")
+        if isinstance(pr, (int, float)):
+            lines.append(f"- {date_str}: {held} (구간수익률 {pr * 100:+.2f}%)")
+        else:
+            lines.append(f"- {date_str}: {held}")
+    return "\n".join(lines)
+
+
 def answer_backtest_question(
     question: str,
     steps: list[dict],
@@ -439,6 +557,10 @@ def answer_backtest_question(
         {"blocked": bool, "error": str|None, "result": dict|None, "hard": [...],
          "warnings": [...], "data": list[dict]}
         하드차단 시 result=None(결과 폐기), 통과 시 result=백테스트 결과 + warnings=triggered.
+        result이 list이고 steps에 combine 등 선정형 n 파라미터가 있으면 top_n도 더한다.
+        steps에 compute_qvm_scores 단계가 있으면(QVM 스크리닝) qvm_summary={"asof":
+        str|None, "excluded_count": int, "sector_distribution": {섹터명: 종목수}}도 더한다
+        (QVM 파이프라인이 아니면 이 키 자체가 없다 — 하위호환).
     """
     run_pipeline_fn = run_pipeline_fn or run_pipeline
     run_audit_fn = run_audit_fn or run_backtest_with_audit
@@ -496,4 +618,10 @@ def answer_backtest_question(
         requested_n = _infer_requested_count(steps)
         if requested_n is not None:
             result_payload["top_n"] = requested_n
+    qvm_summary = _build_qvm_summary(steps, audit.get("result"))
+    if qvm_summary is not None:
+        result_payload["qvm_summary"] = qvm_summary
+    rebalance_summary = _build_rebalance_summary(audit.get("result"))
+    if rebalance_summary is not None:
+        result_payload["rebalance_summary"] = rebalance_summary
     return result_payload

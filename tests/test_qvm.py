@@ -343,6 +343,54 @@ def test_compute_qvm_momentum_missing_category_none_but_scored():
 
 
 # ==========================================================================
+# 작업 6: compute_qvm_scores — 결측필터 제외 종목 수 마커('_qvm_excluded_count')
+#
+# 사용자 요청 [출력] 절("결측/제외된 종목 수, 섹터 분포 요약")을 위해 domain_backtest.py의
+# qvm_summary가 이 마커로 excluded_count를 복원한다. compute_qvm_scores의 반환 '형태'
+# (list[dict])는 그대로이므로 기존 호출부/테스트는 영향받지 않는다(추가 키만 붙음).
+# ==========================================================================
+def test_compute_qvm_excluded_count_marker_zero_when_nothing_dropped():
+    rows = _qvm_universe()
+    out = compute_qvm_scores(rows)
+    assert len(out) == len(rows)
+    assert all(r["_qvm_excluded_count"] == 0 for r in out)
+
+
+def test_compute_qvm_excluded_count_marker_counts_dropped_rows():
+    rows = _qvm_universe()
+    # 가치 3팩터 전부 결측 → rule6(3개 이상 결측)으로 1개 제외
+    rows.append({
+        "stock_code": "MISS3", "name": "결측3", "sector": "화학",
+        "roe": 10.0, "gp_a": 10.0, "cfo_ratio": 5.0,
+        "per": None, "pbr": None, "psr": None, "momentum_12_1": 5.0,
+    })
+    out = compute_qvm_scores(rows)
+    assert "MISS3" not in {r["stock_code"] for r in out}
+    # 살아남은 모든 행에 동일한 제외 카운트(1)가 마커로 남는다
+    assert all(r["_qvm_excluded_count"] == 1 for r in out)
+
+
+def test_compute_qvm_excluded_count_marker_survives_combine_top_n():
+    """combine()으로 top_n을 뽑아도(select_stocks가 원본 dict 참조를 그대로 넘기므로)
+    마커가 살아남아야 domain_backtest.answer_backtest_question이 top_n 반영 여부와
+    무관하게 excluded_count를 복원할 수 있다."""
+    from src.backtest.primitives import combine
+
+    rows = _qvm_universe()
+    rows.append({
+        "stock_code": "MISS3", "name": "결측3", "sector": "화학",
+        "roe": 10.0, "gp_a": 10.0, "cfo_ratio": 5.0,
+        "per": None, "pbr": None, "psr": None, "momentum_12_1": 5.0,
+    })
+    scored = compute_qvm_scores(rows)
+    picked = combine(
+        scored, criteria=[{"key": "qvm_score", "direction": "high", "weight": 1.0}], n=3,
+    )
+    assert len(picked) == 3
+    assert all(r["_qvm_excluded_count"] == 1 for r in picked)
+
+
+# ==========================================================================
 # 작업 2 배선: get_cross_section_qvm — 크로스섹션 + 배치 모멘텀 병합
 # ==========================================================================
 def test_get_cross_section_qvm_merges_momentum():

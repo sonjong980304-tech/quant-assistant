@@ -619,3 +619,145 @@ def test_answer_backtest_question_no_top_n_key_when_steps_lack_n_param():
     )
     assert out["blocked"] is False
     assert "top_n" not in out
+
+
+# ── qvm_summary — QVM 스크리닝 결과에 asof/excluded_count/sector_distribution 부착 ──
+# 사용자 요청 [출력] 절: "마지막에: 사용한 데이터 기준일, 결측/제외된 종목 수, 섹터 분포
+# 요약"을 답하기 위한 배선. compute_qvm_scores가 각 row에 남기는 내부 마커
+# '_qvm_excluded_count'(primitives.py)로 excluded_count를 복원하고, asof는 steps의
+# get_cross_section_qvm 파라미터에서 정적으로 추출한다(_infer_requested_count와 동일 관례).
+_QVM_STEPS_WITH_COMBINE = [
+    {"op": "get_cross_section_qvm", "params": {"asof": "2026-07-10"}, "out": "xs"},
+    {"op": "compute_qvm_scores", "params": {"rows": {"$ref": "xs"}}, "out": "scored"},
+    {
+        "op": "combine",
+        "params": {"rows": {"$ref": "scored"}, "criteria": [], "n": 3},
+        "out": "picked",
+    },
+]
+
+
+def _qvm_scored_rows(sectors: list[str], excluded_count: int = 2) -> list[dict]:
+    """compute_qvm_scores가 실제로 반환할 법한 모양(각 row에 _qvm_excluded_count 마커
+    포함)의 fixture. run_pipeline_fn이 이 마커 붙은 rows를 그대로 돌려주도록 주입해
+    실제 DB/LLM 없이 answer_backtest_question의 qvm_summary 배선만 검증한다."""
+    return [
+        {"stock_code": f"S{i}", "sector": sector, "qvm_score": float(i),
+         "_qvm_excluded_count": excluded_count}
+        for i, sector in enumerate(sectors)
+    ]
+
+
+def test_answer_backtest_question_builds_qvm_summary_with_top_n():
+    """combine으로 top_n(3개)까지 걸러진 뒤에도 qvm_summary가 마커를 그대로 복원한다."""
+    rows = _qvm_scored_rows(["화학", "화학", "금융"], excluded_count=2)
+    out = answer_backtest_question(
+        "퀄리티 밸류 모멘텀 상위 3종목", _QVM_STEPS_WITH_COMBINE,
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: rows,
+    )
+    assert out["blocked"] is False
+    assert out["qvm_summary"] == {
+        "asof": "2026-07-10",
+        "excluded_count": 2,
+        "sector_distribution": {"화학": 2, "금융": 1},
+    }
+
+
+def test_answer_backtest_question_builds_qvm_summary_without_top_n():
+    """AC4: combine/n 없이 compute_qvm_scores 단계만 있는(전체 유니버스 요청) 파이프라인도
+    qvm_summary가 자연스럽게 동작해야 한다(top_n 키는 붙지 않아도 된다)."""
+    steps = [
+        {"op": "get_cross_section_qvm", "params": {"asof": "2026-07-11"}, "out": "xs"},
+        {"op": "compute_qvm_scores", "params": {"rows": {"$ref": "xs"}}, "out": "scored"},
+    ]
+    rows = _qvm_scored_rows(["화학", "IT", "IT"], excluded_count=0)
+    out = answer_backtest_question(
+        "퀄리티 밸류 모멘텀 전체 유니버스 점수", steps,
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: rows,
+    )
+    assert out["blocked"] is False
+    assert "top_n" not in out  # combine/n 단계가 없으므로 top_n은 여전히 안 붙는다
+    assert out["qvm_summary"] == {
+        "asof": "2026-07-11",
+        "excluded_count": 0,
+        "sector_distribution": {"화학": 1, "IT": 2},
+    }
+
+
+def test_answer_backtest_question_no_qvm_summary_when_not_qvm_pipeline(tmp_path):
+    """회귀: compute_qvm_scores 단계가 없는 일반 파이프라인은 qvm_summary 키 자체가
+    없어야 한다(무관한 경로에 새 필드가 영향을 주지 않는지 확인 — top_n의 하위호환 관례와 동일)."""
+    conn = _writable_conn(tmp_path)
+    out = answer_backtest_question(
+        "저PER 20개 종목 분기 리밸런싱 백테스트",
+        [{"op": "run_backtest", "params": {}, "out": "bt"}],
+        conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
+    )
+    assert out["blocked"] is False
+    assert "qvm_summary" not in out
+
+
+# ── rebalance_summary — 다중 리밸런싱 백테스트면 시점별 보유종목+구간수익률을 결정론적
+#    텍스트로 결과 payload에 첨부한다(top_n/qvm_summary와 동일한 순수 추가 필드 관례).
+#    "반기별이면 반기마다 어떤 종목이 있었는지와 반기별 수익률도 같이 항상 답한다"는 요구를
+#    LLM 요약 재량이 아니라 결정론적으로 보장하기 위한 배선. ──────────────────────────
+_BT_MULTI_REBALANCE = {
+    "dates": ["2025-06-30", "2025-12-31", "2026-06-30"],
+    "navs": [1.0, 1.05, 1.1],
+    "benchmark": None,
+    "performance": {"cagr": 5.0, "avg_turnover": 0.3},
+    "holdings": [
+        {"date": "2025-06-30", "codes": ["000001", "000002"], "period_return": 0.05},
+        {"date": "2025-12-31", "codes": ["000003"], "period_return": -0.02},
+    ],
+}
+
+
+def test_answer_backtest_question_builds_rebalance_summary_for_multi_rebalance(tmp_path):
+    conn = _writable_conn(tmp_path)
+    out = answer_backtest_question(
+        "저PER 20개 종목 반기 리밸런싱 백테스트",
+        [{"op": "run_backtest", "params": {}, "out": "bt"}],
+        conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_MULTI_REBALANCE),
+    )
+    assert out["blocked"] is False
+    summary = out["rebalance_summary"]
+    assert isinstance(summary, str)
+    # 각 리밸런싱 시점의 종목과 구간수익률(부호·퍼센트)이 모두 결정론적으로 담겨야 한다.
+    assert "2025-06-30" in summary and "2025-12-31" in summary
+    assert "000001" in summary and "000002" in summary and "000003" in summary
+    assert "+5.00%" in summary        # 0.05 → +5.00%
+    assert "-2.00%" in summary        # -0.02 → -2.00%
+
+
+def test_answer_backtest_question_no_rebalance_summary_for_single_holding(tmp_path):
+    """단일 리밸런싱(buy&hold, holdings 1개)이면 구간별 서술이 의미 없으므로 필드 자체가 없다."""
+    conn = _writable_conn(tmp_path)
+    out = answer_backtest_question(
+        "삼성전자 buy&hold 백테스트",
+        [{"op": "run_backtest", "params": {}, "out": "bt"}],
+        conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),  # holdings 1개
+    )
+    assert out["blocked"] is False
+    assert "rebalance_summary" not in out
+
+
+def test_answer_backtest_question_no_rebalance_summary_when_blocked(tmp_path):
+    """하드차단(결과 폐기)이면 rebalance_summary도 붙지 않는다."""
+    conn = _writable_conn(tmp_path)
+    conn.execute("INSERT INTO delisting(stock_code, name, delisting_date) VALUES (?,?,?)",
+                 ("000001", "죽은회사", "2020-01-01"))
+    conn.commit()
+    out = answer_backtest_question(
+        "저PER 반기 리밸런싱 백테스트",
+        [{"op": "run_backtest", "params": {}, "out": "bt"}],
+        conn, llm_fn=_json_llm(True, "x"), market="KR",
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_MULTI_REBALANCE),
+    )
+    assert out["blocked"] is True
+    assert "rebalance_summary" not in out

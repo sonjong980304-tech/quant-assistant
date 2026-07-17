@@ -63,6 +63,7 @@ def run_backtest(
         codes = [r["stock_code"] for r in selected]
         holdings_log.append({"date": t, "codes": codes})
         if not codes:
+            holdings_log[-1]["period_return"] = 0.0  # 편입 종목 없음 → 구간수익 0
             navs.append(nav)
             out_dates.append(t_next)
             if bench is not None:
@@ -85,6 +86,7 @@ def run_backtest(
             if p0 and p1 and p0 > 0:
                 rets.append(p1 / p0 - 1)
         period_ret = sum(rets) / len(rets) if rets else 0.0
+        holdings_log[-1]["period_return"] = period_ret  # 이 리밸런싱 구간의 보유 수익률(순수 추가)
         nav *= (1 + period_ret)
 
         navs.append(nav)

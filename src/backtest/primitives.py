@@ -1175,6 +1175,10 @@ def compute_qvm_scores(
 
     반환 row에는 투명성을 위해 원본 필드 + 역수(ep/bp/sp) + 각 팩터의 _winsorized/_zscore
     중간값 + quality_z/value_z/momentum_z(2차 표준화 카테고리 점수) + qvm_score(최종)를 모두 담는다.
+    각 행에는 결측필터로 제외된 종목 수를 담은 내부 마커 '_qvm_excluded_count'도 동일하게
+    붙는다(요약 정보 노출용 — src/agents/domain_backtest.py의 qvm_summary가 이 마커로
+    excluded_count를 복원한다. combine() 등 후속 선정 단계도 원본 dict 참조를 그대로
+    넘기므로 top_n으로 걸러진 뒤에도 이 마커는 살아남는다).
 
     max_missing은 '결측이 이 개수 이상이면 제외'(사용자 rule6 표현)로 해석한다 — 내부적으로는
     drop_missing_factors(초과 시 제외)에 max_missing-1을 넘긴다(3 이상 제외 = 2 초과 제외).
@@ -1208,7 +1212,9 @@ def compute_qvm_scores(
     rows = composite_score(rows, momentum_z_fields, "momentum_composite")
 
     # ⑤ 결측필터(raw 팩터 중 결측이 max_missing개 이상이면 제외)
+    n_before_missing_filter = len(rows)
     rows = drop_missing_factors(rows, raw_factors, max_missing - 1)
+    excluded_count = n_before_missing_filter - len(rows)
 
     # ⑥ 카테고리 합성점수 2차 z-score(유니버스 전체)
     rows = _universe_zscore(rows, "quality_composite", "quality_z")
@@ -1220,6 +1226,9 @@ def compute_qvm_scores(
         rows, ["quality_z", "value_z", "momentum_z"], "qvm_score",
         weights=_normalize_category_weights(category_weights),
     )
+    # 결측필터 제외 종목 수를 각 행에 마커로 남긴다(반환 '형태'는 여전히 list[dict] 그대로).
+    for r in rows:
+        r["_qvm_excluded_count"] = excluded_count
     return rows
 
 

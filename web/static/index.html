@@ -619,9 +619,12 @@ function renderBacktest(d){
         ?`${added.length?`<span style="color:#4ade80">＋ ${added.map(esc).join(', ')}</span> `:''}`
           +`${removed.length?`<span style="color:#f87171">－ ${removed.map(esc).join(', ')}</span>`:''}`
         :'<span class="meta">변동 없음</span>');
+    const pr=h.period_return;                                  // 이 리밸런싱 구간의 보유수익률(소수)
+    const ret=(pr!=null&&!isNaN(pr))
+      ?` · <span style="color:${pr>=0?'#4ade80':'#f87171'}">구간수익률 ${pr>=0?'+':''}${(pr*100).toFixed(2)}%</span>`:'';
     return `<div style="padding:8px 0;border-bottom:1px solid #222">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
-        <b style="font-size:13px">${esc(h.date)}</b><span style="font-size:12px">${change}</span></div>
+        <b style="font-size:13px">${esc(h.date)}</b><span style="font-size:12px">${change}${ret}</span></div>
       <div class="chips" style="margin-top:6px">${chips}</div></div>`;
   }).join('');
   document.getElementById('bt_result').innerHTML=`
