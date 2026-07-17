@@ -37,6 +37,7 @@ import re
 from datetime import date
 from typing import Callable
 
+from src.agents.chart_agent import build_chart_freeform
 from src.agents.charting import (
     render_bar_chart_base64,
     render_histogram_chart_base64,
@@ -817,6 +818,7 @@ def answer_with_verification(
     steps: list[dict] | None = None,
     on_progress: Callable[[str, str], None] | None = None,
     fallback_fn: Callable | None = None,
+    chart_fallback_fn: Callable | None = None,
 ) -> dict:
     """총괄 오케스트레이션: route→dispatch→verify, 실패 시 정확히 max_retries회까지 재시도.
 
@@ -859,6 +861,7 @@ def answer_with_verification(
     verify_fn = verify_fn or verify_answer
     synthesize_fn = synthesize_fn or synthesize_conclusion
     fallback_fn = fallback_fn or run_free_exec_fallback
+    chart_fallback_fn = chart_fallback_fn or build_chart_freeform
 
     # on_progress가 없으면(대부분의 기존 호출부) 하위 함수에 그 키워드 자체를 안 넘긴다 —
     # 주입되는 fake route_fn/dispatch_fn(테스트)이 on_progress 파라미터를 몰라도 깨지지 않는다.
@@ -919,6 +922,14 @@ def answer_with_verification(
             # 붙인다(모든 질문에 자동으로 붙이지 않음). 그릴 데이터가 없으면 차트 필드 없이 텍스트만.
             if wants_chart(question):
                 charts = _build_charts(domain_results, conn)
+                if not charts:
+                    # _build_charts는 산점도/분위수막대/히스토그램/시계열 3케이스에만 대응하는
+                    # 결정론적(LLM 미사용) 패턴매칭이다. 스크리닝 리스트처럼 이 4가지 어디에도
+                    # 안 맞는 데이터는 chart_fallback_fn(차트 서브에이전트, matplotlib 자유선택)
+                    # 으로 보강한다. 그래도 실패하면(None) 차트 없이 텍스트 응답만(에러 아님).
+                    fallback_chart = chart_fallback_fn(question, domain_results, llm_fn)
+                    if fallback_chart:
+                        charts = [(fallback_chart["chart_base64"], fallback_chart.get("chart_title"))]
                 if charts:
                     result["chart_base64"], result["chart_title"] = charts[0]
                     result["charts"] = [

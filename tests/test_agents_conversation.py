@@ -672,59 +672,79 @@ def test_run_new_turn_carries_chart_fields_from_verified_fn():
     assert turn.chart_title == "pbr 분포 히스토그램"
 
 
-def test_followup_python_prompt_includes_chart_guidance_when_flag_true():
+def test_followup_python_prompt_no_chart_guidance():
+    """데이터가공 프롬프트는 차트를 언급하지 않는다 — 차트는 chart_agent가 별도로 담당
+    (charting.py 4개 헬퍼로 제한하던 예전 방식을 chart_agent의 matplotlib 자유선택으로
+    통합하면서, 데이터가공 코드생성 프롬프트에서 차트 안내 자체를 뺐다)."""
     import src.agents.conversation as conv
 
-    p = conv._followup_python_prompt("히스토그램 그려줘", "리스트[dict] 5개", wants_chart_flag=True)
-    assert "chart_base64" in p
-    assert "render_histogram_chart_base64" in p
-    assert "src.agents.charting" in p
-
-
-def test_followup_python_prompt_no_chart_guidance_by_default():
-    import src.agents.conversation as conv
-
-    p = conv._followup_python_prompt("오름차순으로 다시 정렬", "리스트[dict] 5개")
+    p = conv._followup_python_prompt("히스토그램 그려줘", "리스트[dict] 5개")
     assert "chart_base64" not in p
     assert "render_histogram_chart_base64" not in p
 
 
-def test_run_followup_step_passes_extra_vars_and_returns_chart_when_requested():
+def test_run_followup_step_calls_chart_fn_separately_when_chart_requested():
+    """차트 요청이면 데이터가공(result)과 별개로 chart_fn(차트 서브에이전트)을 호출한다."""
     import src.agents.conversation as conv
 
-    captured = {}
+    chart_calls = []
 
     def fake_llm(prompt):
-        assert "render_histogram_chart_base64" in prompt  # 차트 요청이라 안내가 포함됨
-        return "```python\nresult = data\nchart_base64 = 'PNG'\nchart_title = 'T'\n```"
+        return "```python\nresult = data\n```"  # 데이터가공 코드는 차트를 전혀 모른다
 
-    def fake_exec(code, context, result_var, extra_vars=None):
-        captured["extra_vars"] = extra_vars
-        return {"ok": True, "result": context["data"],
-                "extra": {"chart_base64": "PNG", "chart_title": "T"}}
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": context["data"]}
+
+    def fake_chart_fn(question, data, llm_fn, execute_python_fn=None):
+        chart_calls.append((question, data))
+        return {"chart_base64": "PNG", "chart_title": "T"}
 
     out = conv._run_followup_step("PBR 히스토그램 그려줘", [{"pbr": 1.2}], fake_llm,
-                                  execute_python_fn=fake_exec)
+                                  execute_python_fn=fake_exec, chart_fn=fake_chart_fn)
     assert out["ok"] is True
-    assert captured["extra_vars"] == ["chart_base64", "chart_title"]
+    assert out["result"] == [{"pbr": 1.2}]
     assert out["chart_base64"] == "PNG"
     assert out["chart_title"] == "T"
+    assert chart_calls == [("PBR 히스토그램 그려줘", [{"pbr": 1.2}])]
 
 
-def test_run_followup_step_chart_fields_none_when_code_did_not_set_them():
+def test_run_followup_step_does_not_call_chart_fn_without_keyword():
+    """차트 키워드가 없으면 chart_fn을 아예 호출하지 않는다."""
     import src.agents.conversation as conv
 
     def fake_llm(prompt):
         return "```python\nresult = data\n```"
 
-    def fake_exec(code, context, result_var, extra_vars=None):
-        # 차트 요청 아님 → 코드가 chart 변수를 안 만듦 → extra는 None
-        return {"ok": True, "result": context["data"],
-                "extra": {"chart_base64": None, "chart_title": None}}
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": context["data"]}
+
+    def fake_chart_fn(question, data, llm_fn, execute_python_fn=None):
+        raise AssertionError("차트 키워드가 없으면 chart_fn을 호출하면 안 된다")
 
     out = conv._run_followup_step("그냥 오름차순 정렬", [{"pbr": 1.2}], fake_llm,
-                                  execute_python_fn=fake_exec)
+                                  execute_python_fn=fake_exec, chart_fn=fake_chart_fn)
     assert out["ok"] is True
+    assert out.get("chart_base64") is None
+    assert out.get("chart_title") is None
+
+
+def test_run_followup_step_chart_failure_does_not_affect_result():
+    """차트 생성이 실패(None)해도 데이터가공 result는 그대로 성공 반환된다(서로 독립)."""
+    import src.agents.conversation as conv
+
+    def fake_llm(prompt):
+        return "```python\nresult = sorted(data, key=lambda r: r['pbr'])\n```"
+
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": sorted(context["data"], key=lambda r: r["pbr"])}
+
+    def fake_chart_fn(question, data, llm_fn, execute_python_fn=None):
+        return None
+
+    out = conv._run_followup_step("PBR 오름차순 그래프로 정리해줘", [{"pbr": 1.2}, {"pbr": 0.9}],
+                                  fake_llm, execute_python_fn=fake_exec, chart_fn=fake_chart_fn)
+    assert out["ok"] is True
+    assert out["result"] == [{"pbr": 0.9}, {"pbr": 1.2}]
     assert out.get("chart_base64") is None
     assert out.get("chart_title") is None
 

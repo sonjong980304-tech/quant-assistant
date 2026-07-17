@@ -661,3 +661,114 @@ def test_answer_with_verification_adds_histogram_chart_when_requested():
     assert res.get("chart_base64")
     assert base64.b64decode(res["chart_base64"])[:8] == _PNG_MAGIC
     assert "히스토그램" in res["chart_title"]
+
+
+# ── chart_agent 폴백 배선 — _build_charts(결정론적 4케이스)가 아무것도 못 찾았을 때만
+#    build_chart_freeform(LLM 자유선택 서브에이전트)을 보강으로 시도한다. 실사용 재현 버그:
+#    "종목 20개 + 각각 수익률 하나씩"인 스크리닝 리스트는 산점도/분위수막대/히스토그램/
+#    시계열 3케이스 중 어디에도 안 맞아 _build_charts가 빈 리스트를 내고, 그래서 진짜
+#    이미지가 전혀 안 만들어졌다(최종답변 LLM이 텍스트 ASCII 막대로 대신 지어낸 부작용). ──
+
+def test_answer_with_verification_uses_chart_fallback_when_build_charts_empty():
+    """_build_charts가 못 찾는 스크리닝 리스트 모양 → chart_fallback_fn이 보강으로 호출된다."""
+    from src.agents.supervisor import answer_with_verification
+
+    screening = {"result": [
+        {"stock_code": "005930", "name": "삼성전자", "return_12m": 12.3},
+        {"stock_code": "000660", "name": "SK하이닉스", "return_12m": 45.6},
+    ]}
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": screening}
+
+    captured = {}
+
+    def fake_chart_fallback(question, domain_results, llm_fn):
+        captured["question"] = question
+        captured["domain_results"] = domain_results
+        return {"chart_base64": "PNG", "chart_title": "수익률 막대그래프"}
+
+    res = answer_with_verification(
+        "코스피 상위 종목 수익률 그래프로 그려줘", conn=None, llm_fn="fake-llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res["uncertain"] is False
+    assert res["chart_base64"] == "PNG"
+    assert res["chart_title"] == "수익률 막대그래프"
+    assert captured["question"] == "코스피 상위 종목 수익률 그래프로 그려줘"
+    assert captured["domain_results"] == {"kr": screening}
+
+
+def test_answer_with_verification_does_not_call_chart_fallback_when_build_charts_already_found():
+    """_build_charts가 이미 그렸으면(기존 3케이스) 폴백을 아예 호출하지 않는다(회귀 방지)."""
+    from src.agents.supervisor import answer_with_verification
+
+    bt = {"result": {"dates": ["a", "b"], "navs": [1.0, 1.1]}}
+
+    def stub_route(question, llm_fn):
+        return ["backtest"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"backtest": bt}
+
+    def fake_chart_fallback(question, domain_results, llm_fn):
+        raise AssertionError("_build_charts가 이미 찾았으면 폴백을 호출하면 안 된다")
+
+    res = answer_with_verification(
+        "이 전략 백테스트 그래프로 보여줘", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res.get("chart_base64")
+    assert base64.b64decode(res["chart_base64"])[:8] == _PNG_MAGIC
+
+
+def test_answer_with_verification_no_chart_fallback_without_keyword():
+    """wants_chart(question)이 False면 _build_charts도 폴백도 아예 시도하지 않는다."""
+    from src.agents.supervisor import answer_with_verification
+
+    screening = {"result": [{"stock_code": "005930", "name": "삼성전자", "return_12m": 12.3}]}
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": screening}
+
+    def fake_chart_fallback(question, domain_results, llm_fn):
+        raise AssertionError("차트 키워드가 없으면 폴백을 시도하면 안 된다")
+
+    res = answer_with_verification(
+        "코스피 상위 종목 수익률 알려줘", conn=None, llm_fn="fake-llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res.get("chart_base64") is None
+
+
+def test_answer_with_verification_chart_fallback_returning_none_leaves_no_chart():
+    """폴백도 실패(None)하면 차트 없이 텍스트 응답만(에러 아님)."""
+    from src.agents.supervisor import answer_with_verification
+
+    screening = {"result": [{"stock_code": "005930", "name": "삼성전자", "return_12m": 12.3}]}
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": screening}
+
+    def fake_chart_fallback(question, domain_results, llm_fn):
+        return None
+
+    res = answer_with_verification(
+        "코스피 상위 종목 수익률 그래프로 그려줘", conn=None, llm_fn="fake-llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res["uncertain"] is False
+    assert res.get("chart_base64") is None

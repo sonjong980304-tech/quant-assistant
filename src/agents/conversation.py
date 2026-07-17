@@ -30,6 +30,7 @@ from typing import Callable
 
 import pandas as pd
 
+from src.agents.chart_agent import build_chart_freeform
 from src.agents.exec_fallback import _extract_python_code, _is_meaningfully_empty
 from src.agents.exec_runtime import execute_python
 from src.agents.supervisor import answer_with_verification, wants_chart
@@ -122,37 +123,27 @@ def _classify_topic(question: str, prior_data, llm_fn: Callable[[str], str] | No
     return "NEW" in raw and "CONTINUE" not in raw
 
 
-_CHART_GUIDANCE = (
-    "\n\n이 질문은 차트/시각화를 요청하고 있습니다. src.agents.charting 모듈의 아래 함수 중 "
-    "질문에 맞는 것을 import해서 호출하고, 반환된 base64 PNG 문자열을 `chart_base64`라는 "
-    "변수에, 제목 문자열을 `chart_title`이라는 변수에 각각 담으세요(코드 안에서 "
-    "`from src.agents.charting import render_histogram_chart_base64` 처럼 직접 import).\n"
-    "- render_histogram_chart_base64(bucket_edges, counts, x_label, title): 히스토그램(분포). "
-    "구간 경계/개수는 직접 계산하세요(예: numpy.histogram(values, bins=N) 사용 가능 — "
-    "bucket_edges는 리스트로 변환: list(edges), counts도 list(counts)).\n"
-    "- render_bar_chart_base64(labels, values, x_label, y_label, title): 막대그래프.\n"
-    "- render_scatter_chart_base64(x, y, labels, x_label, y_label, title): 산점도.\n"
-    "- render_line_chart_base64(dates, series, title, ylabel): 시계열 라인차트.\n"
-    "`result` 변수(원래 요구되는 가공된 데이터)는 차트와 별개로 그대로 채우세요 — 둘 다 필요합니다."
-)
-
-
 def _followup_python_prompt(
     question: str, prior_summary: str, code_error: str | None = None,
-    wants_chart_flag: bool = False,
 ) -> str:
+    """데이터가공 코드생성 프롬프트 — 차트는 언급하지 않는다.
+
+    예전에는 차트 요청 시 이 프롬프트에 _CHART_GUIDANCE(charting.py 4개 헬퍼 중 택1)를
+    끼워 넣어 데이터가공+차트를 한 번의 LLM 호출로 처리했지만, 이제 차트는 chart_agent.
+    build_chart_freeform이 별도 LLM 호출로 전담한다(matplotlib 전체에서 자유선택 —
+    4개로 제한하지 않음, 스크리닝 경로와도 공유). _run_followup_step 참고.
+    """
     retry_note = (
         f"\n\n[직전 코드 실행 실패] 방금 작성한 코드가 다음 이유로 실패했습니다: {code_error}\n"
         "같은 실수를 반복하지 말고 원인을 고쳐 다시 작성하세요."
         if code_error else ""
     )
-    chart_note = _CHART_GUIDANCE if wants_chart_flag else ""
     return (
         "직전 턴에서 만든 데이터가 `data`라는 이름의 변수로 이미 주어집니다"
         f"(구조: {prior_summary}). 이 데이터를 가공해 새 질문에 정확히 답하는 Python 코드를 "
         "작성하세요. pandas 등 필요한 라이브러리는 코드 안에서 직접 import 하세요. "
         "최종 답은 반드시 `result` 변수에 담으세요(리스트/딕트 등 JSON 직렬화 가능한 값)."
-        f"{chart_note}{retry_note}\n\n질문: {question}\nPython 코드:"
+        f"{retry_note}\n\n질문: {question}\nPython 코드:"
     )
 
 
@@ -163,6 +154,7 @@ def _run_followup_step(
     execute_python_fn: Callable | None = None,
     max_code_attempts: int = 2,
     on_progress: Callable[[str], None] | None = None,
+    chart_fn: Callable | None = None,
 ) -> dict:
     """이전 턴 결과(prior_data)를 `data` 변수로 실행 컨텍스트에 주입해 Python만 재실행한다.
 
@@ -170,21 +162,23 @@ def _run_followup_step(
     감지(_is_meaningfully_empty) 패턴을 그대로 재사용한다 — 새 재시도 로직을 만들지 않는다.
     on_progress는 이 함수가 직접 구현한 로직이라 시도(attempt) 단위로 세밀하게 보고할 수
     있다(exec_fallback.py는 건드리지 않으므로 신규 턴 쪽은 run_turn에서 굵은 단위로 보고).
+
+    차트는 데이터가공(result)과 완전히 별개의 LLM 호출로 chart_fn(기본=chart_agent.
+    build_chart_freeform, 스크리닝 경로와 공유하는 서브에이전트)이 전담한다 — 데이터가공이
+    실패해도 재시도하지만, 차트 생성 실패는 result 성공을 절대 막지 않는다(부가 기능).
     """
     if llm_fn is None:
         return {"ok": False, "result": None, "code": None, "error": "llm_fn 없음"}
 
     execute_python_fn = execute_python_fn or execute_python
+    chart_fn = chart_fn or build_chart_freeform
     summary = _summarize_data_shape(prior_data)
-    # 질문에 명시적으로 차트/시각화를 요청했을 때만 프롬프트에 차트 안내를 덧붙인다(신규 턴의
-    # wants_chart 판단과 동일한 결정론적 키워드 방식). 원본 question으로 판단한다.
-    wants_chart_flag = wants_chart(question)
     code: str | None = None
     code_error: str | None = None
     for attempt in range(max_code_attempts):
         if on_progress:
             on_progress(f"이전 데이터를 이어서 가공할 Python 코드 생성 중 (시도 {attempt + 1}/{max_code_attempts})")
-        code_raw = llm_fn(_followup_python_prompt(question, summary, code_error, wants_chart_flag)) or ""
+        code_raw = llm_fn(_followup_python_prompt(question, summary, code_error)) or ""
         code = _extract_python_code(code_raw)
         if not code:
             code_error = "LLM이 Python 코드를 생성하지 못했습니다."
@@ -194,12 +188,7 @@ def _run_followup_step(
 
         if on_progress:
             on_progress("생성된 코드 실행 중")
-        # extra_vars는 항상 전달한다 — 코드가 chart_base64/chart_title을 안 채웠으면 None이
-        # 회수될 뿐 무해하고(execute_python 계약), 차트를 만든 경우엔 그 값을 함께 꺼내온다.
-        py_result = execute_python_fn(
-            code, context={"data": prior_data}, result_var="result",
-            extra_vars=["chart_base64", "chart_title"],
-        )
+        py_result = execute_python_fn(code, context={"data": prior_data}, result_var="result")
         if not py_result.get("ok"):
             code_error = f"Python 실행 실패: {py_result.get('error')}"
             if on_progress:
@@ -213,13 +202,18 @@ def _run_followup_step(
                 on_progress(f"빈 결과라 재시도 준비 중: {code_error}")
             continue
 
+        chart = None
+        if wants_chart(question):
+            if on_progress:
+                on_progress("차트 생성 중")
+            chart = chart_fn(question, prior_data, llm_fn, execute_python_fn=execute_python_fn)
+
         if on_progress:
             on_progress("완료")
-        extra = py_result.get("extra", {})
         return {
             "ok": True, "result": result, "code": code, "error": None,
-            "chart_base64": extra.get("chart_base64"),
-            "chart_title": extra.get("chart_title"),
+            "chart_base64": chart.get("chart_base64") if chart else None,
+            "chart_title": chart.get("chart_title") if chart else None,
         }
 
     return {"ok": False, "result": None, "code": code, "error": code_error}
