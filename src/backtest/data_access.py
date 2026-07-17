@@ -229,6 +229,8 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "roa": "총자산이익률(ROA, %)",
     "operating_margin": "영업이익률(%, 해당분기)",
     "net_margin": "순이익률(%, 해당분기)",
+    "gross_margin": "매출총이익률(%, 해당분기, 매출총이익 ÷ 매출액). GPA(gp_a=매출총이익÷총자산)와 분모가 다른 별개 지표(높을수록 우수)",
+    "cogs_ratio": "매출원가율(%, 해당분기, 매출원가 ÷ 매출액). 원가효율(낮을수록 우수)",
     "debt_ratio": "부채비율(%)",
     "revenue_growth": "매출 성장률(YoY, %)",
     "op_growth": "영업이익 성장률(YoY, %)",
@@ -292,6 +294,9 @@ def metrics_at(conn, asof: str) -> list[dict]:
         op_q = _fin(conn, code, q, "operating_profit")
         rev_q = _fin(conn, code, q, "revenue")
         ni_q = _fin(conn, code, q, "net_income")
+        # 매출총이익률·매출원가율 입력 — 마진(operating_margin/net_margin)과 동일하게 단일분기.
+        gp_q = _fin(conn, code, q, "gross_profit")     # 매출총이익(단일분기 원본 계정)
+        cogs_q = _fin(conn, code, q, "cost_of_sales")  # 매출원가(단일분기 원본 계정)
 
         # 마법공식(EY/ROC) 입력 — 손익계산서 항목은 TTM(4분기 합), 재무상태표 항목은 시점 스냅샷.
         tax_ttm = _sum_ttm(conn, code, q, "tax_expense")          # 법인세비용(TTM)
@@ -324,6 +329,26 @@ def metrics_at(conn, asof: str) -> list[dict]:
         op_margin = _div(op_q, rev_q, pct=True) if (rev_q and rev_q > 0 and op_q is not None and op_q < rev_q) else None
         # 순이익률도 단일분기 기준 (적자면 음수=유효)
         net_margin = _div(ni_q, rev_q, pct=True) if (rev_q and rev_q > 0 and ni_q is not None) else None
+
+        # ── 매출총이익률(gross_margin)/매출원가율(cogs_ratio) — 단일분기, 분모=매출액 ──
+        # GPA(gp_a=매출총이익÷총자산)와 분모가 완전히 다른 별개 지표다(혼동 금지). 원본 계정
+        # (매출총이익/매출원가)을 우선 쓰고, 없으면 항등식(매출액=매출원가+매출총이익)으로 유도한다:
+        # 매출총이익이 없으면 매출액-매출원가로, 매출원가가 없으면 매출액-매출총이익으로 유도하고
+        # '{metric}_estimated'로 근사 여부를 노출한다(마법공식 roc_estimated 패턴 그대로).
+        gp_for_margin = gp_q if gp_q is not None else (
+            (rev_q - cogs_q) if (rev_q is not None and cogs_q is not None) else None
+        )
+        gross_margin = _div(gp_for_margin, rev_q, pct=True) if (
+            rev_q and rev_q > 0 and gp_for_margin is not None
+        ) else None
+        gross_margin_estimated = (gp_q is None) if gross_margin is not None else None
+        cogs_for_ratio = cogs_q if cogs_q is not None else (
+            (rev_q - gp_q) if (rev_q is not None and gp_q is not None) else None
+        )
+        cogs_ratio = _div(cogs_for_ratio, rev_q, pct=True) if (
+            rev_q and rev_q > 0 and cogs_for_ratio is not None
+        ) else None
+        cogs_ratio_estimated = (cogs_q is None) if cogs_ratio is not None else None
 
         # 12개월 가격 수익률(모멘텀). 기준시점 종가 대비 정확히 1년 전(가장 가까운 이전 거래일)
         # 종가의 변화율(%). 미래참조 금지: _price_at은 date<=기준일만 보므로 asof 이후 종가를
@@ -372,6 +397,10 @@ def metrics_at(conn, asof: str) -> list[dict]:
             "roa": _div(ni_ttm, assets, pct=True) if (ni_ttm and assets and assets > 0) else None,
             "operating_margin": op_margin,
             "net_margin": net_margin,
+            "gross_margin": gross_margin,
+            "gross_margin_estimated": gross_margin_estimated,
+            "cogs_ratio": cogs_ratio,
+            "cogs_ratio_estimated": cogs_ratio_estimated,
             # 절대값(원화, 단일분기 — TTM 아님). "영업이익 가장 높은 기업"처럼 절대값 랭킹
             # 질문에 답하려면 마진 계산에만 쓰던 이 변수들을 출력에도 그대로 노출해야 한다
             # (이미 DB에서 조회해 메모리에 있는 값 — 새 계산/새 컬럼 없음).

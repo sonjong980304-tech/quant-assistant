@@ -122,6 +122,8 @@ METRIC_FIELD_DESCRIPTIONS_US: dict[str, str] = {
     "roe": "자기자본이익률(ROE, %)",
     "operating_margin": "영업이익률(%, 해당분기)",
     "net_margin": "순이익률(%, 해당분기)",
+    "gross_margin": "매출총이익률(%, 해당분기, 매출총이익 ÷ 매출액, 높을수록 우수)",
+    "cogs_ratio": "매출원가율(%, 해당분기, 매출원가 ÷ 매출액, 낮을수록 우수)",
     "return_12m": "최근 12개월 주가 수익률(모멘텀, %)",
     "operating_profit": "영업이익(달러 절대값, 해당분기, TTM 아님)",
     "revenue": "매출액(달러 절대값, 해당분기, TTM 아님)",
@@ -154,6 +156,10 @@ def metrics_at_us(conn, asof: str) -> list[dict]:
         rev_q = _us_item(conn, code, q, "income_stmt", "Total Revenue")
         op_q = _us_item(conn, code, q, "income_stmt", "Operating Income")
         ni_q = _us_item(conn, code, q, "income_stmt", "Net Income")
+        # 매출총이익률·매출원가율 입력(단일분기 원본 항목). yfinance item_key(prompts.py 매핑):
+        # 매출총이익=Gross Profit, 매출원가=Cost Of Revenue.
+        gp_q = _us_item(conn, code, q, "income_stmt", "Gross Profit")
+        cogs_q = _us_item(conn, code, q, "income_stmt", "Cost Of Revenue")
         equity = _us_item(conn, code, q, "balance_sheet", "Stockholders Equity")
         ni_ttm = _ttm_net_income(conn, code, q)
 
@@ -172,6 +178,23 @@ def metrics_at_us(conn, asof: str) -> list[dict]:
         # 순이익률: 단일분기(적자면 음수=유효).
         net_margin = _div(ni_q, rev_q, pct=True) if (rev_q and rev_q > 0 and ni_q is not None) else None
 
+        # 매출총이익률/매출원가율(KR data_access.metrics_at과 동일 정의/근사 규약). 원본 계정을
+        # 우선 쓰고 없으면 항등식(매출=매출원가+매출총이익)으로 유도, {metric}_estimated로 표시.
+        gp_for_margin = gp_q if gp_q is not None else (
+            (rev_q - cogs_q) if (rev_q is not None and cogs_q is not None) else None
+        )
+        gross_margin = _div(gp_for_margin, rev_q, pct=True) if (
+            rev_q and rev_q > 0 and gp_for_margin is not None
+        ) else None
+        gross_margin_estimated = (gp_q is None) if gross_margin is not None else None
+        cogs_for_ratio = cogs_q if cogs_q is not None else (
+            (rev_q - gp_q) if (rev_q is not None and gp_q is not None) else None
+        )
+        cogs_ratio = _div(cogs_for_ratio, rev_q, pct=True) if (
+            rev_q and rev_q > 0 and cogs_for_ratio is not None
+        ) else None
+        cogs_ratio_estimated = (cogs_q is None) if cogs_ratio is not None else None
+
         # 12개월 가격 수익률(모멘텀, KR metrics_at과 동일 정의/규약). _price_at_us는 date<=기준일만
         # 보므로 asof 이후 종가를 참조하지 않는다(look-ahead 방지). 1년 전 종가 없으면 None.
         prev_close, _ = _price_at_us(conn, code, _one_year_before(asof))
@@ -186,6 +209,10 @@ def metrics_at_us(conn, asof: str) -> list[dict]:
             "roe": roe,
             "operating_margin": op_margin,
             "net_margin": net_margin,
+            "gross_margin": gross_margin,
+            "gross_margin_estimated": gross_margin_estimated,
+            "cogs_ratio": cogs_ratio,
+            "cogs_ratio_estimated": cogs_ratio_estimated,
             # 절대값(달러, 단일분기 — TTM 아님). KR metrics_at과 동일하게 마진 계산에만
             # 쓰던 변수(op_q/rev_q/ni_q)를 출력에도 그대로 노출한다(새 계산 없음).
             "operating_profit": op_q,
@@ -203,6 +230,7 @@ def metrics_at_us(conn, asof: str) -> list[dict]:
         if financial_currency is not None and financial_currency != "USD":
             for key in (
                 "per", "pbr", "roe", "operating_margin", "net_margin",
+                "gross_margin", "gross_margin_estimated", "cogs_ratio", "cogs_ratio_estimated",
                 "operating_profit", "revenue", "net_income",
             ):
                 row[key] = None

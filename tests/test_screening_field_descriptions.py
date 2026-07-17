@@ -34,6 +34,10 @@ _META_FIELDS = {
     # (감가상각비 데이터가 없어 0으로 근사했는지) — METRIC_FIELD_DESCRIPTIONS(스크리닝
     # criteria.key 후보 목록)에는 포함시키지 않는다.
     "roc_estimated",
+    # gross_margin_estimated/cogs_ratio_estimated도 같은 성격의 메타 플래그다 — 원본 계정
+    # (매출총이익/매출원가)이 없어 항등식(매출액=매출원가+매출총이익)으로 유도했는지를 알린다.
+    # 지표가 아니므로 METRIC_FIELD_DESCRIPTIONS에는 넣지 않는다.
+    "gross_margin_estimated", "cogs_ratio_estimated",
 }
 
 
