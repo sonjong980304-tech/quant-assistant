@@ -271,6 +271,81 @@ def test_find_stock_code_goes_through_execute_sql(tmp_path, monkeypatch):
     assert code == "005930"
 
 
+# ── find_stock_code: 그룹명 생략 구어체 종목명(하이닉스=SK하이닉스) 정합성 ──────────────
+# 실서버 재현 버그: "하이닉스 24년 영업이익률"을 물으면 SK하이닉스(000660)가 아니라 우연히
+# "하이닉스" 안에 들어있는 무관한 짧은 회사 "이닉스"(452400)가 역방향 LIKE로 걸려 조용히
+# 틀린 종목 데이터를 정답처럼 반환했다. "SK/LG/…" 그룹명을 생략하고 부르는 한국어 관행
+# ("하이닉스"="SK하이닉스", "이노텍"="LG이노텍")을 결정론적으로 보강한다.
+
+def _seed_group_prefix_companies(tmp_path) -> str:
+    """그룹명 생략 구어체 매칭 재현용: SK하이닉스 + 우연히 부분문자열인 무관한 이닉스 +
+    LG이노텍 + 삼성전자 + 짧은 지주명 SK 를 한 DB 에 시드한다."""
+    db = tmp_path / "group_prefix.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    try:
+        rows = [
+            ("005930", "삼성전자", "KOSPI", "전기·전자"),
+            ("000660", "SK하이닉스", "KOSPI", "반도체"),
+            ("452400", "이닉스", "KOSDAQ", "자동차부품"),  # "하이닉스"에 우연히 포함되는 무관한 회사
+            ("011070", "LG이노텍", "KOSPI", "전기·전자"),
+            ("034730", "SK", "KOSPI", "지주"),
+        ]
+        for r in rows:
+            conn.execute(
+                "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)", r
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return str(db)
+
+
+def test_find_stock_code_resolves_group_prefix_omitted_hynix(tmp_path):
+    """"하이닉스"(SK 생략)는 무관한 이닉스(452400)가 아니라 SK하이닉스(000660)로 resolve돼야 한다."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "하이닉스 24년 영업이익률")
+    finally:
+        conn.close()
+    assert code == "000660"
+
+
+def test_find_stock_code_resolves_group_prefix_omitted_inotek(tmp_path):
+    """"이노텍"(LG 생략)도 LG이노텍(011070)으로 resolve된다(하이닉스 외 그룹명 생략 사례)."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "이노텍 실적 알려줘")
+    finally:
+        conn.close()
+    assert code == "011070"
+
+
+def test_find_stock_code_keeps_genuine_short_name_when_no_expansion(tmp_path):
+    """안전장치: 진짜로 "이닉스"를 물으면(그룹명+이닉스 회사가 실제로 없으므로) 확장하지 않고
+    이닉스(452400) 그대로 둔다 — 무조건 확장하는 게 아니라 확장형이 실재할 때만 우선한다."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "이닉스 주가 알려줘")
+    finally:
+        conn.close()
+    assert code == "452400"
+
+
+def test_find_stock_code_full_name_regression_with_group_prefix_fix(tmp_path):
+    """회귀: 정식명칭(SK하이닉스)·타사 정식명칭(삼성전자)은 이번 보강으로 결과가 안 바뀐다."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        assert find_stock_code(conn, "SK하이닉스 매출 알려줘") == "000660"
+        assert find_stock_code(conn, "삼성전자 PER 알려줘") == "005930"
+    finally:
+        conn.close()
+
+
 # ── classify_intent: 재무/주가/둘다 판단 ─────────────────────────────────────
 
 def test_classify_intent_detects_financial_only():
@@ -1039,6 +1114,31 @@ def test_find_stock_codes_includes_explicit_six_digit_codes(tmp_path):
     finally:
         conn.close()
     assert set(codes) == {"005930", "000660"}
+
+
+def test_find_stock_codes_resolves_group_prefix_omitted_single(tmp_path):
+    """find_stock_codes(복수)도 그룹명 생략 매칭을 공유한다 — "하이닉스"는 이닉스(452400)가
+    아니라 SK하이닉스(000660) 하나로만 나와야 한다(단수/복수 로직 일관성)."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "하이닉스 영업이익률 알려줘")
+    finally:
+        conn.close()
+    assert codes == ["000660"]
+
+
+def test_find_stock_codes_multi_with_group_prefix_omitted(tmp_path):
+    """다중종목에서도 그룹명 생략이 정확히 해석된다 — "삼성전자와 하이닉스"는
+    {삼성전자, SK하이닉스}이고 무관한 이닉스(452400)는 섞이지 않는다."""
+    db = _seed_group_prefix_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        codes = find_stock_codes(conn, "삼성전자와 하이닉스 비교해줘")
+    finally:
+        conn.close()
+    assert set(codes) == {"005930", "000660"}
+    assert "452400" not in codes
 
 
 # ── answer_kr_question: 다중종목(named multi-entity) 경로 ───────────────────────

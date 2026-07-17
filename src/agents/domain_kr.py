@@ -94,6 +94,72 @@ def _escape_sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
+# ── 그룹명 생략 구어체 종목명 보강 (SK하이닉스="하이닉스", LG이노텍="이노텍") ──────────────
+# 한국어는 대기업 계열사를 부를 때 그룹·지주 접두어를 흔히 생략한다("하이닉스"=SK하이닉스,
+# "이노텍"=LG이노텍). 역방향 LIKE(질문이 회사 공식명을 통째로 포함하는가)만 쓰면 접두어가
+# 빠진 구어체는 매칭에 실패하고, 하필 "이닉스"(452400)처럼 무관한 짧은 회사명이 "하이닉스"의
+# 부분문자열로 우연히 걸려 조용히 틀린 종목을 반환하는 정합성 버그가 난다. 아래 접두어 목록은
+# company 테이블에서 실제로 계열사가 많은(SK 21·현대 41·한국 79 등) 그룹·지주 접두어다.
+_GROUP_PREFIXES: tuple[str, ...] = (
+    "미래에셋", "포스코", "삼성", "현대", "한화", "신한", "두산", "롯데", "한국", "하나",
+    "SK", "LG", "CJ", "GS", "KB", "NH", "HD", "DB",
+)
+# 접두어를 뗀 나머지(remainder)가 이 글자 수 이상일 때만 구어체 매칭으로 인정한다. "전자"/"화재"
+# 같은 2글자 일반어가 접두어 제거로 무관한 질문에 오탐되는 것을 막는다(하이닉스=4, 이노텍=3).
+_MIN_STRIPPED_REMAINDER = 3
+
+
+def _name_match_sql(escaped_text: str) -> str:
+    """질문 텍스트에서 종목명 매칭 후보를 한 번의 SQL로 뽑는 쿼리를 만든다.
+
+    두 종류의 매칭을 UNION 으로 합친다(단일 execute_sql 호출 유지):
+    - direct: 질문이 회사 공식명을 통째로 포함(기존 역방향 LIKE). matched_text=회사명.
+    - stripped: 그룹·지주 접두어(_GROUP_PREFIXES)를 뗀 나머지가 질문에 포함되는 실재 회사.
+      matched_text=접두어를 뗀 나머지. company 테이블에 실제로 있는 회사만 후보가 되므로
+      "접두어+매칭텍스트가 실존할 때만 확장"이 자동으로 보장된다(무조건 확장 아님).
+
+    정렬: 매칭된 텍스트 길이 DESC → direct 우선 → 회사명 길이 DESC. "하이닉스"(stripped,4)가
+    "이닉스"(direct,3)를 이겨 그룹명 생략 구어체를 정확한 종목으로 resolve하고, 무관한 짧은
+    이름의 오탐을 억제한다("가장 구체적인 매치 우선" 원칙을 두 매칭 방식에 걸쳐 확장한 것).
+    """
+    when_clauses = "\n".join(
+        f"        WHEN name LIKE '{p.replace(chr(39), chr(39) * 2)}%' "
+        f"AND LENGTH(name) >= {len(p) + _MIN_STRIPPED_REMAINDER} "
+        f"THEN SUBSTR(name, {len(p) + 1})"
+        for p in _GROUP_PREFIXES
+    )
+    return (
+        "SELECT stock_code, name, matched_text, is_direct FROM (\n"
+        "  SELECT stock_code, name, name AS matched_text, 1 AS is_direct FROM company\n"
+        f"    WHERE name IS NOT NULL AND name != '' AND '{escaped_text}' LIKE '%' || name || '%'\n"
+        "  UNION ALL\n"
+        "  SELECT stock_code, name, matched_text, 0 AS is_direct FROM (\n"
+        "    SELECT stock_code, name, CASE\n"
+        f"{when_clauses}\n"
+        "      ELSE NULL END AS matched_text\n"
+        "    FROM company WHERE name IS NOT NULL AND name != ''\n"
+        f"  ) WHERE matched_text IS NOT NULL AND '{escaped_text}' LIKE '%' || matched_text || '%'\n"
+        ") ORDER BY LENGTH(matched_text) DESC, is_direct DESC, LENGTH(name) DESC"
+    )
+
+
+def _match_company_candidates(conn, text: str, execute_sql_fn: Callable) -> list[dict]:
+    """종목명 매칭 후보를 우선순위(가장 구체적인 매치 먼저) 정렬된 리스트로 반환한다.
+
+    각 항목은 {stock_code, name, matched_text} — matched_text 는 질문에서 실제로 이 후보를
+    지목한 문자열(direct 는 회사명, stripped 는 접두어를 뗀 나머지)이며, find_stock_codes 의
+    "겹치는 후보 제거"(더 긴 매칭텍스트의 부분문자열이면 스킵)에 쓰인다. find_stock_code 와
+    find_stock_codes 가 동일한 이 헬퍼를 공유해 매칭 규칙을 한 곳으로 일원화한다.
+    """
+    result = execute_sql_fn(_name_match_sql(_escape_sql_literal(text)), conn)
+    if not result.get("ok"):
+        return []
+    return [
+        {"stock_code": r["stock_code"], "name": r["name"], "matched_text": r["matched_text"]}
+        for r in result["rows"]
+    ]
+
+
 def find_stock_code(
     conn,
     question: str,
@@ -102,9 +168,10 @@ def find_stock_code(
     """질문 텍스트에서 종목코드(6자리 숫자) 또는 종목명을 찾아 종목코드로 변환한다.
 
     1) 질문에 6자리 숫자가 있으면 그대로 종목코드로 쓴다(가장 신뢰도 높음).
-    2) 없으면 company 테이블에서 "질문이 그 회사명을 포함하는" 행을 역방향 LIKE로
-       찾는다(`question LIKE '%'||name||'%'`와 동등). 여러 회사명이 부분 포함될 수
-       있어(예: "SK" vs "SK하이닉스") 가장 긴(구체적인) 이름을 우선한다.
+    2) 없으면 company 테이블에서 종목명을 매칭한다(_match_company_candidates 공유 헬퍼):
+       질문이 회사 공식명을 통째로 포함하거나(역방향 LIKE), 그룹·지주 접두어(SK/LG/…)를
+       뗀 나머지가 질문에 포함되는(실재 회사) 경우를 모두 후보로 삼아, 가장 구체적인
+       매치를 우선한다("하이닉스"→SK하이닉스, 무관한 짧은 이름 "이닉스" 오탐 억제).
     3) SQL은 execute_sql(HA-1 실행기)로만 실행한다(conn.execute() 직접 호출 금지).
 
     매치가 없으면 None을 반환한다.
@@ -116,15 +183,10 @@ def find_stock_code(
         return candidates[0]
     if not text.strip():
         return None
-    escaped = _escape_sql_literal(text)
-    sql = (
-        f"SELECT stock_code FROM company WHERE '{escaped}' LIKE '%' || name || '%' "
-        "AND name IS NOT NULL AND name != '' ORDER BY LENGTH(name) DESC LIMIT 1"
-    )
-    result = execute_sql_fn(sql, conn)
-    if not result.get("ok") or not result["rows"]:
+    matches = _match_company_candidates(conn, text, execute_sql_fn)
+    if not matches:
         return None
-    return result["rows"][0]["stock_code"]
+    return matches[0]["stock_code"]
 
 
 def find_stock_codes(
@@ -139,10 +201,11 @@ def find_stock_codes(
     이름 하나만 골라 반환하므로, 이런 질문에서는 나머지 종목이 통째로 누락된다).
 
     1) 질문에 등장하는 모든 6자리 종목코드를 먼저 모은다(순서 보존, 중복 제거).
-    2) company 테이블에서 질문에 이름이 부분 포함되는 모든 행을 이름 길이 내림차순으로
-       조회한다. 이미 선택한(더 긴) 이름의 부분 문자열인 후보(예: "SK하이닉스"를 이미
-       선택했다면 그 안에 포함된 "SK")는 건너뛴다 — find_stock_code의 "가장 구체적인
-       이름 우선" 원칙을 "하나만 고르기"가 아니라 "겹치는 후보만 제거하기"로 확장한 것.
+    2) company 테이블에서 종목명을 매칭한다(_match_company_candidates 공유 헬퍼 — 역방향
+       LIKE + 그룹명 생략 보강, find_stock_code와 완전히 동일한 규칙). 후보를 가장 구체적인
+       매치부터 순회하며, 이미 선택한(더 긴) 매칭텍스트의 부분 문자열인 후보(예: "SK하이닉스"를
+       이미 선택했다면 그 안에 포함된 "SK"나 "하이닉스", "이닉스")는 건너뛴다 — find_stock_code의
+       "가장 구체적인 매치 우선" 원칙을 "하나만 고르기"가 아니라 "겹치는 후보만 제거하기"로 확장.
     3) 위 두 결과를 종목코드 기준으로 중복 제거해 합친다.
 
     매치가 없으면 빈 리스트. SQL은 execute_sql(HA-1 실행기)로만 실행한다.
@@ -153,21 +216,14 @@ def find_stock_codes(
     codes: list[str] = list(dict.fromkeys(_stock_code_candidates(text)))
 
     if text.strip():
-        escaped = _escape_sql_literal(text)
-        sql = (
-            f"SELECT stock_code, name FROM company WHERE '{escaped}' LIKE '%' || name || '%' "
-            "AND name IS NOT NULL AND name != '' ORDER BY LENGTH(name) DESC"
-        )
-        result = execute_sql_fn(sql, conn)
-        if result.get("ok"):
-            accepted_names: list[str] = []
-            for row in result["rows"]:
-                name = row["name"]
-                if any(name in accepted for accepted in accepted_names):
-                    continue
-                accepted_names.append(name)
-                if row["stock_code"] not in codes:
-                    codes.append(row["stock_code"])
+        accepted_texts: list[str] = []
+        for cand in _match_company_candidates(conn, text, execute_sql_fn):
+            matched_text = cand["matched_text"]
+            if any(matched_text in accepted for accepted in accepted_texts):
+                continue
+            accepted_texts.append(matched_text)
+            if cand["stock_code"] not in codes:
+                codes.append(cand["stock_code"])
 
     return codes
 
