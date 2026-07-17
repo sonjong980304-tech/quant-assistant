@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from src.agents.data_financial import METRIC_SOURCE_MAP, resolve_metric
+from src.agents.data_financial import _METRICS_TABLE_COLS, METRIC_SOURCE_MAP, resolve_metric
 from src.agents.data_price_kr import get_price_history_kr, get_price_snapshot_kr
 from src.agents.exec_runtime import execute_sql
 from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS, price_return_over_months
@@ -1512,9 +1512,14 @@ def _answer_kr_multi_entity_question(
                 else:
                     entity["financial"] = financial
             else:
-                period_kwargs = {"period": period} if period is not None else {}
+                # 재무제표/사전계산 지표: resolve_metric 우선, per/pbr/roe/operating_margin/
+                # debt_ratio/market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백(문제 A,
+                # 다중종목·단일기간). period가 None이면 폴백 미시도 → 기존 최신값 경로 무영향.
                 financial, err = _call_with_retry(
-                    lambda c=code: resolve_metric_fn(conn, c, metric, llm_fn=llm_fn, **period_kwargs)
+                    lambda c=code: _resolve_metric_with_fallback(
+                        conn, c, metric, period, llm_fn,
+                        resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+                    )
                 )
                 if err:
                     entity["errors"].append(f"재무데이터 조회 실패: {err}")
@@ -1554,6 +1559,67 @@ def _answer_kr_multi_entity_question(
     return result
 
 
+def _normalize_computed_result(computed: dict) -> dict:
+    """resolve_computed_metric 결과를 resolve_metric과 동일한 키 집합으로 정규화한다(문제 A 폴백용).
+
+    per/pbr/roe/operating_margin/debt_ratio/market_cap이 과거 시점 metrics 스냅샷 부재로
+    None이라 metrics_at 기반 계산 폴백이 발동했을 때만 쓴다. 호출부(_collect_data_asof/
+    _summarize_one/합성 프롬프트/web 계층)가 resolve_metric 형식(dart_*/fnguide_*/price_date)을
+    가정하므로, computed 결과의 누락 키를 None으로 채워 형식 불일치로 UI/합성이 깨지지 않게
+    한다. value/source/period는 computed 값을 그대로 쓰고, computed 고유의 estimated(근사 여부)도
+    보존한다(다른 계산전용 경로 resolve_computed_metric과 동일 계약).
+    """
+    return {
+        "stock_code": computed.get("stock_code"),
+        "metric": computed.get("metric"),
+        "value": computed.get("value"),
+        "source": computed.get("source"),
+        "period": computed.get("period"),
+        "dart_value": None,
+        "dart_period": None,
+        "fnguide_value": None,
+        "fnguide_period": None,
+        "price_date": None,
+        "estimated": computed.get("estimated"),
+    }
+
+
+def _resolve_metric_with_fallback(
+    conn,
+    stock_code: str,
+    metric: str,
+    period: dict | None,
+    llm_fn: Callable[[str], str] | None,
+    resolve_metric_fn: Callable,
+    computed_metric_fn: Callable,
+    execute_sql_fn: Callable,
+) -> dict:
+    """재무제표/사전계산 지표(계산전용 아님)를 resolve_metric으로 조회하고, 필요 시 계산 폴백을 덧댄다.
+
+    우선순위는 항상 "resolve_metric 결과 우선 → 그래도 None이면 metrics_at 기반 계산 폴백"이다
+    (기존 정상 경로 회귀 방지 — 사전계산값을 절대 덮어쓰지 않는다). 문제 A: metrics 사전계산
+    테이블은 최신 한 분기 스냅샷만 유지해, 과거 시점을 지목한 per/pbr/roe/operating_margin/
+    debt_ratio/market_cap(_METRICS_TABLE_COLS) 질문은 그 분기 metrics 행이 없어 resolve_metric이
+    None으로 빠진다 — 원본 재무제표+주가(metrics_at)엔 그 시점 값이 있는데도. 그 경우 기간이
+    명시(period is not None)됐으면 그 기간의 asof로 computed_metric_fn을 재시도한다. period가
+    None(기간 미지정)이면 폴백을 아예 시도하지 않아 기존 최신값 경로에 무영향이다.
+    """
+    period_kwargs = {"period": period} if period is not None else {}
+    result = resolve_metric_fn(conn, stock_code, metric, llm_fn=llm_fn, **period_kwargs)
+    if (
+        result.get("value") is None
+        and period is not None
+        and metric in _METRICS_TABLE_COLS
+    ):
+        asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
+        computed = computed_metric_fn(
+            conn, stock_code, metric, asof=asof, execute_sql_fn=execute_sql_fn,
+        )
+        if computed.get("value") is not None:
+            return _normalize_computed_result(computed)
+    return result
+
+
 def _resolve_metric_over_periods(
     resolve_metric_fn: Callable,
     conn,
@@ -1561,22 +1627,44 @@ def _resolve_metric_over_periods(
     metric: str,
     periods: list[dict],
     llm_fn: Callable[[str], str] | None,
+    computed_metric_fn: Callable,
+    execute_sql_fn: Callable,
 ) -> list[dict]:
-    """여러 기간(분기/연간) 각각에 resolve_metric_fn을 호출해 기간별 결과 리스트로 담는다.
+    """여러 기간(분기/연간) 각각에 지표를 조회해 기간별 결과 리스트로 담는다.
 
-    반환 원소: {"period": <라벨>, "financial": <resolve_metric 결과 or None>, "errors": [...]}.
+    반환 원소: {"period": <라벨>, "financial": <조회 결과 or None>, "errors": [...]}.
     라벨은 파싱된 기간(quarter="2026Q1" 또는 annual→"YYYY 연간")이라 프런트/검증이 어떤
     분기의 값인지 명확히 구분할 수 있다. 다중종목 경로의 entities 리스트와 동일한
     '리스트-of-딕셔너리' 관례를 따른다. 여기 오는 period는 항상 명시적이므로 period 인자를
     그대로 넘긴다(단일/무기간 경로는 호출부에서 이미 분기해 이 함수를 타지 않는다).
+
+    문제 B: 지표 종류에 따라 기간별로 올바른 경로를 고른다(지표는 모든 기간에서 동일).
+    - 계산전용 지표(_COMPUTED_ONLY_FIELDS: psr/roa/roc/ey/gpa/cfo_ratio/gross_margin/
+      net_margin/cogs_ratio/return_12m/성장률 등)는 그 기간 asof로 computed_metric_fn
+      (metrics_at 기반)을 호출한다.
+    - 그 외 지표는 resolve_metric_fn으로 조회하되, per/pbr/roe/operating_margin/debt_ratio/
+      market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백을 덧댄다(문제 A와 동일 폴백).
     """
+    is_computed = metric in _COMPUTED_ONLY_FIELDS
     out: list[dict] = []
     for p in periods:
         label = p["quarter"] if p["kind"] == "quarter" else f"{p['year']} 연간"
         entry: dict = {"period": label, "financial": None, "errors": []}
-        financial, err = _call_with_retry(
-            lambda p=p: resolve_metric_fn(conn, stock_code, metric, llm_fn=llm_fn, period=p)
-        )
+        if is_computed:
+            financial, err = _call_with_retry(
+                lambda p=p: computed_metric_fn(
+                    conn, stock_code, metric,
+                    asof=_resolve_screening_asof(p, conn, "prices", execute_sql_fn),
+                    execute_sql_fn=execute_sql_fn,
+                )
+            )
+        else:
+            financial, err = _call_with_retry(
+                lambda p=p: _resolve_metric_with_fallback(
+                    conn, stock_code, metric, p, llm_fn,
+                    resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+                )
+            )
         if err:
             entry["errors"].append(f"재무데이터 조회 실패: {err}")
         else:
@@ -1702,6 +1790,16 @@ def answer_kr_question(
         metric = _extract_metric(question)
         if metric is None:
             result["errors"].append("재무 지표를 인식하지 못함")
+        elif len(periods) >= 2:
+            # 다중분기("25년과 26년 1분기"): 각 분기를 개별 조회해 기간별로 구분해 담는다.
+            # 최상위 financial은 None으로 두고(다중종목 entities와 동일 관례) periods에 담는다.
+            # 문제 C: 이 분기를 계산전용(_COMPUTED_ONLY_FIELDS) 검사보다 먼저 둬, 계산전용
+            # 지표(PSR 등)도 다중분기면 여기로 위임된다. 계산전용 라우팅과 6개 지표(문제 A)
+            # 폴백은 _resolve_metric_over_periods가 기간별로 모두 처리한다.
+            result["periods"] = _resolve_metric_over_periods(
+                resolve_metric_fn, conn, stock_code, metric, periods, llm_fn,
+                computed_metric_fn=computed_metric_fn, execute_sql_fn=execute_sql_fn,
+            )
         elif metric in _COMPUTED_ONLY_FIELDS:
             computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
             financial, err = _call_with_retry(
@@ -1713,18 +1811,15 @@ def answer_kr_question(
                 result["errors"].append(f"계산 지표 조회 실패: {err}")
             else:
                 result["financial"] = financial
-        elif len(periods) >= 2:
-            # 다중분기("25년과 26년 1분기"): 각 분기를 개별 조회해 기간별로 구분해 담는다.
-            # 최상위 financial은 None으로 두고(다중종목 entities와 동일 관례) periods에 담는다.
-            result["periods"] = _resolve_metric_over_periods(
-                resolve_metric_fn, conn, stock_code, metric, periods, llm_fn
-            )
         else:
-            # 기간이 파싱된 경우에만 period 인자를 넘긴다 — 미지정이면 기존 fake/시그니처
-            # (conn, stock_code, metric, llm_fn)을 그대로 존중해 회귀를 막는다.
-            period_kwargs = {"period": period} if period is not None else {}
+            # 재무제표/사전계산 지표: resolve_metric 우선, per/pbr/roe/operating_margin/
+            # debt_ratio/market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백(문제 A).
+            # period가 None이면 폴백을 시도하지 않아 기존 최신값 경로에 무영향(회귀 없음).
             financial, err = _call_with_retry(
-                lambda: resolve_metric_fn(conn, stock_code, metric, llm_fn=llm_fn, **period_kwargs)
+                lambda: _resolve_metric_with_fallback(
+                    conn, stock_code, metric, period, llm_fn,
+                    resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+                )
             )
             if err:
                 result["errors"].append(f"재무데이터 조회 실패: {err}")

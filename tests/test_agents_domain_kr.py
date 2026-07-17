@@ -1574,3 +1574,162 @@ def test_answer_kr_question_multi_entity_unspecified_period_labels_data_asof(tmp
 
     assert result["data_asof"]["price_date"] == "2026-07-15"
     assert result["data_asof"]["financial_quarter"] == "2025Q1"
+
+
+# ── 문제 A/B/C: 백테스트 옵션 전체 지표를 질의응답 경로에서도 과거 시점에 원본 계산 ────────
+# 배경: metrics 사전계산 테이블은 최신 한 분기 스냅샷만 유지해, 과거 시점을 지목한
+# per/pbr/roe/operating_margin/debt_ratio/market_cap 질문은 그 분기 metrics 행이 없어
+# resolve_metric이 None으로 빠졌다. 원본 재무제표+주가(metrics_at)로는 그 시점 값을
+# 재현할 수 있으므로, resolve_metric이 None이고 기간이 명시됐으면 computed 폴백을 덧댄다.
+# psr/roa/roc 등 계산전용 지표는 다중분기 경로도 기간별로 개별 계산하도록 배선한다.
+
+def test_answer_kr_question_metrics_col_past_period_falls_back_to_computed(tmp_path):
+    """문제 A(단일종목·단일기간): 과거 시점 PER이 metrics 부재로 None이면 계산 폴백이 값을 낸다."""
+    db = _seed(tmp_path, name="SK하이닉스", code="000660")  # metrics: 2025Q1만
+    # 2024년 말일 이하 거래일이 실재해야 asof가 확정된다(2024-12-30 시드).
+    seed_conn = connect(db)
+    seed_conn.execute(
+        "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
+        ("000660", "2024-12-30", 130000.0, 9.0e13),
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    seen: list = []
+
+    def spy_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        seen.append((code, metric, asof))
+        return {"stock_code": code, "metric": metric, "value": 8.8,
+                "source": "computed", "period": asof, "estimated": None}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 2024년 PER", conn, computed_metric_fn=spy_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    # resolve_metric None → 2024년 말일 이하 최신 거래일(2024-12-30) asof로 계산 폴백 발동.
+    assert seen == [("000660", "per", "2024-12-30")]
+    assert result["financial"]["value"] == 8.8
+    assert result["financial"]["source"] == "computed"
+    # resolve_metric과 동일한 키 집합으로 정규화(누락 키 None).
+    assert result["financial"]["dart_value"] is None
+    assert result["financial"]["fnguide_value"] is None
+    assert result["financial"]["price_date"] is None
+
+
+def test_answer_kr_question_metrics_col_present_period_does_not_fall_back(tmp_path):
+    """우선순위 회귀: metrics 캐시에 그 분기 값이 있으면 계산 폴백은 발동하지 않고 캐시값을 쓴다."""
+    db = _seed(tmp_path)  # metrics: 2025Q1, per=12.5
+
+    def boom_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        raise AssertionError("사전계산값이 있는데 계산 폴백이 발동하면 안 됨")
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 2025년 1분기 PER", conn, computed_metric_fn=boom_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"]["value"] == 12.5
+    assert result["financial"]["period"] == "2025Q1"
+
+
+def test_answer_kr_question_computed_only_multi_period_returns_value_per_period(tmp_path):
+    """문제 B/C(단일종목·다중분기): 계산전용 지표(PSR)를 다중분기로 물으면 각 기간을 개별 계산해
+    periods에 담는다(기존엔 계산전용 지표가 다중분기 분기를 못 타고 단일 asof로만 계산됐다)."""
+    db = _seed(tmp_path, name="SK하이닉스", code="000660")
+    seed_conn = connect(db)
+    for d in ("2024-12-30", "2025-12-30"):
+        seed_conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
+            ("000660", d, 130000.0, 9.0e13),
+        )
+    seed_conn.commit()
+    seed_conn.close()
+
+    def spy_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        val = {"2024-12-30": 1.1, "2025-12-30": 1.5}.get(asof)
+        return {"stock_code": code, "metric": metric, "value": val,
+                "source": "computed", "period": asof, "estimated": None}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 2024년과 2025년 PSR", conn, computed_metric_fn=spy_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"] is None
+    periods = result["periods"]
+    assert [p["period"] for p in periods] == ["2024 연간", "2025 연간"]
+    assert periods[0]["financial"]["value"] == 1.1
+    assert periods[1]["financial"]["value"] == 1.5
+
+
+def test_answer_kr_question_metrics_col_multi_period_falls_back_per_period(tmp_path):
+    """문제 A+B(단일종목·다중분기): per가 두 과거 분기 모두 metrics 부재로 None이면 각 기간을
+    개별 asof로 계산 폴백한다."""
+    db = _seed(tmp_path, name="SK하이닉스", code="000660")  # metrics: 2025Q1만
+    seed_conn = connect(db)
+    for d in ("2024-12-30", "2025-12-30"):
+        seed_conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
+            ("000660", d, 130000.0, 9.0e13),
+        )
+    seed_conn.commit()
+    seed_conn.close()
+
+    def spy_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        val = {"2024-12-30": 6.6, "2025-12-30": 9.9}.get(asof)
+        return {"stock_code": code, "metric": metric, "value": val,
+                "source": "computed", "period": asof, "estimated": None}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 2024년과 2025년 PER", conn, computed_metric_fn=spy_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    periods = result["periods"]
+    assert [p["period"] for p in periods] == ["2024 연간", "2025 연간"]
+    assert periods[0]["financial"]["value"] == 6.6
+    assert periods[1]["financial"]["value"] == 9.9
+
+
+def test_answer_kr_question_multi_entity_metrics_col_past_period_falls_back(tmp_path):
+    """문제 A(다중종목·단일기간): 두 종목의 과거 시점 PER이 metrics 부재로 None이면 각각 계산 폴백."""
+    db = _seed_two_companies(tmp_path)  # metrics: 2025Q1
+    seed_conn = connect(db)
+    for code in ("005930", "000660"):
+        seed_conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap) VALUES(?,?,?,?)",
+            (code, "2024-12-30", 60000.0, 3.0e14),
+        )
+    seed_conn.commit()
+    seed_conn.close()
+
+    def spy_computed_metric_fn(conn, code, metric, asof=None, **kw):
+        return {"stock_code": code, "metric": metric,
+                "value": 9.9 if code == "005930" else 7.7,
+                "source": "computed", "period": asof, "estimated": None}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자와 SK하이닉스 2024년 PER 비교", conn,
+            computed_metric_fn=spy_computed_metric_fn,
+        )
+    finally:
+        conn.close()
+
+    by_code = {e["stock_code"]: e for e in result["entities"]}
+    assert by_code["005930"]["financial"]["value"] == 9.9
+    assert by_code["000660"]["financial"]["value"] == 7.7
