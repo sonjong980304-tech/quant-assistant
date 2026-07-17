@@ -1392,3 +1392,85 @@ def test_answer_kr_question_multi_entity_recent_months_return_routes_to_price_re
     assert by_code["005930"]["financial"]["return_pct"] == pytest.approx(20.0)
     assert by_code["000660"]["financial"]["months"] == 6
     assert all(e["errors"] == [] for e in result["entities"])
+
+
+# ── data_asof: 기간 미지정 시 실제 사용된 데이터 시점 라벨링 ─────────────────────────
+# 질문에 연도/분기가 없으면 시스템이 자동으로 데이터 시점을 정한다(주가 기반 지표=종가
+# 기준일, 재무제표 기반 지표=기준분기). 사용자가 "언제 기준 데이터냐"를 검증할 수 있도록,
+# 이미 resolve된 값만 재사용해(effective_* 재호출 없이) 결과 dict에 data_asof로 순수 추가한다.
+def test_answer_kr_question_unspecified_period_price_metric_labels_price_date(tmp_path):
+    """기간 미지정 주가 기반 지표(PER)는 실제 사용된 종가 기준일을 data_asof.price_date에 담는다."""
+    db = _seed(tmp_path)  # metrics: quarter=2025Q1, price_date=2026-07-11, per=12.5
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 PER 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["data_asof"]["price_date"] == "2026-07-11"
+    # PER은 분기 재무(EPS)도 함께 쓰므로 재무 기준분기도 담긴다(둘 다 실제 사용된 시점).
+    assert result["data_asof"]["financial_quarter"] == "2025Q1"
+
+
+def test_answer_kr_question_unspecified_period_financial_metric_labels_quarter(tmp_path):
+    """기간 미지정 순수 재무지표(영업이익률)는 실제 사용된 기준분기만 담는다(가격 기준일 없음)."""
+    db = _seed(tmp_path)
+    conn = connect(db)
+    try:
+        conn.execute(
+            "UPDATE metrics SET operating_margin=? WHERE stock_code=? AND quarter=?",
+            (15.5, "005930", "2025Q1"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 영업이익률 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["data_asof"]["financial_quarter"] == "2025Q1"
+    assert "price_date" not in result["data_asof"]  # 순수 재무지표엔 가격 기준일 없음
+
+
+def test_answer_kr_question_unspecified_period_price_snapshot_labels_price_date(tmp_path):
+    """기간 미지정 주가 조회는 실제 스냅샷 거래일을 data_asof.price_date에 담는다."""
+    db = _seed(tmp_path)  # prices: date=2026-07-11
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 주가 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["data_asof"]["price_date"] == "2026-07-11"
+
+
+def test_answer_kr_question_explicit_period_preserves_shape_and_omits_data_asof(tmp_path):
+    """회귀 방지: 기간 명시 질문은 기존 키/값을 그대로 유지하고 자동 시점 라벨을 붙이지 않는다."""
+    db = _seed(tmp_path)  # metrics quarter=2025Q1
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 2025년 1분기 PER 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["stock_code"] == "005930"
+    assert result["intent"] == "financial"
+    assert result["financial"]["value"] == 12.5
+    assert result["financial"]["period"] == "2025Q1"
+    assert "data_asof" not in result  # 기간을 명시했으므로 중복 라벨 생략
+
+
+def test_answer_kr_question_multi_entity_unspecified_period_labels_data_asof(tmp_path):
+    """다중종목+기간미지정도 실제 사용된 시점을 최상위 data_asof에 담는다."""
+    db = _seed_two_companies(tmp_path)  # metrics: price_date=2026-07-15, quarter=2025Q1
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자와 SK하이닉스 PER 비교해줘", conn)
+    finally:
+        conn.close()
+
+    assert result["data_asof"]["price_date"] == "2026-07-15"
+    assert result["data_asof"]["financial_quarter"] == "2025Q1"

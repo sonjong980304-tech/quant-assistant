@@ -1261,3 +1261,42 @@ def test_domain_has_data_recognizes_multi_entity_kr_result_with_price():
     }
     verdict = verify_answer("삼성전자와 SK하이닉스 종가 알려줘", domain_results, llm_fn=None)
     assert verdict["valid"] is True
+
+
+# ── data_asof(기간 미지정 시 실제 사용된 시점)가 종합결론/프롬프트까지 살아남는지 ──────
+def test_synthesize_conclusion_deterministic_summary_mentions_data_asof():
+    """LLM 없이도(결정론 요약) data_asof의 기준일/기준분기가 종합결론 텍스트에 나타난다."""
+    domain_results = {
+        "kr": {
+            "stock_code": "005930", "intent": "financial",
+            "financial": {"metric": "per", "value": 12.5, "period": "2025Q1"},
+            "price": None,
+            "data_asof": {"price_date": "2026-07-11", "financial_quarter": "2025Q1"},
+            "errors": [],
+        }
+    }
+    conclusion = synthesize_conclusion("삼성전자 PER 알려줘", domain_results, llm_fn=None)
+    assert "2026-07-11" in conclusion
+    assert "2025Q1" in conclusion
+
+
+def test_synthesize_prompt_includes_data_asof_field():
+    """합성 LLM 프롬프트에 data_asof가 축약 없이 그대로 전달된다(사용자가 답변에서 볼 수 있게)."""
+    captured = {}
+
+    def fake_llm(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "결론"
+
+    domain_results = {
+        "kr": {
+            "stock_code": "005930", "intent": "financial",
+            "financial": {"metric": "per", "value": 12.5, "period": "2025Q1"},
+            "data_asof": {"price_date": "2026-07-11", "financial_quarter": "2025Q1"},
+        }
+    }
+    synthesize_conclusion("삼성전자 PER 알려줘", domain_results, fake_llm)
+
+    prompt = captured["prompt"]
+    assert "data_asof" in prompt
+    assert "2026-07-11" in prompt

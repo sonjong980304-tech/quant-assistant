@@ -1338,6 +1338,48 @@ def _call_with_retry(fn: Callable[[], Any]) -> tuple[Any, str | None]:
             return None, f"{type(exc).__name__}: {exc}"
 
 
+# ── 기간 미지정 시 "실제 사용된 데이터 시점" 라벨링(data_asof) ─────────────────────
+# 질문에 연도/분기가 없으면 시스템이 자동으로 데이터 시점을 정한다(주가 기반 지표=종가
+# 기준일, 재무제표 기반 지표=기준분기). 그 자동 결정된 시점을 사용자가 검증할 수 있도록,
+# 이미 resolve된 값만 재사용해(effective_* 재호출/재계산 금지) 결과 dict에 순수 추가한다.
+# roc_estimated/top_n/qvm_summary 등에서 써온 "결과 dict에 필드만 얹는" 관례를 그대로 따른다.
+_QUARTER_LABEL_RE = re.compile(r"\d{4}\s*Q[1-4]", re.IGNORECASE)
+
+
+def _is_quarter_label(label) -> bool:
+    """'2025Q1'/'2025 연간' 같은 재무 기준분기 라벨인지(아니면 날짜형=가격 기준일으로 간주)."""
+    return isinstance(label, str) and (bool(_QUARTER_LABEL_RE.search(label)) or "연간" in label)
+
+
+def _collect_data_asof(financials: list, price_rows: list) -> dict | None:
+    """재무 결과들 + 주가 스냅샷 행들에서 실제 사용된 시점을 추출한다(이미 계산된 값 재사용).
+
+    - 주가 기반 재무지표(per/pbr/시총)는 resolve_metric이 담아준 price_date를 가격 기준일로,
+    - 그 외 재무지표는 period(분기/연간 라벨)를 재무 기준분기로,
+    - 계산전용 지표(return_12m 등)·FnGuide 스냅샷은 날짜형 period를 가격 기준일로,
+    - 주가 스냅샷 행은 각 행의 date(prices 테이블 최신 거래일)를 가격 기준일로 쓴다.
+
+    반환: {"price_date": ..., "financial_quarter": ...}(값이 있는 키만). 시점이 전혀 없으면 None.
+    """
+    asof: dict = {}
+    for fin in financials:
+        if not isinstance(fin, dict):
+            continue
+        pd = fin.get("price_date")
+        if pd:
+            asof.setdefault("price_date", pd)
+        period = fin.get("period")
+        if period:
+            if _is_quarter_label(period):
+                asof.setdefault("financial_quarter", period)
+            else:
+                asof.setdefault("price_date", period)
+    dates = [r.get("date") for r in price_rows if isinstance(r, dict) and r.get("date")]
+    if dates:
+        asof["price_date"] = max(dates)
+    return asof or None
+
+
 def _answer_kr_multi_entity_question(
     question: str,
     conn,
@@ -1378,7 +1420,7 @@ def _answer_kr_multi_entity_question(
             else:
                 entity["financial"] = financial
             entities.append(entity)
-        return {
+        result = {
             "stock_code": None,
             "stock_codes": stock_codes,
             "question": question,
@@ -1388,6 +1430,9 @@ def _answer_kr_multi_entity_question(
             "entities": entities,
             "errors": [],
         }
+        if period is None and asof:
+            result["data_asof"] = {"price_date": asof}
+        return result
 
     intent = classify_intent(question, llm_fn=llm_fn)
     metric = _extract_metric(question) if intent in ("financial", "both") else None
@@ -1431,7 +1476,7 @@ def _answer_kr_multi_entity_question(
 
         entities.append(entity)
 
-    return {
+    result = {
         "stock_code": None,
         "stock_codes": stock_codes,
         "question": question,
@@ -1441,6 +1486,16 @@ def _answer_kr_multi_entity_question(
         "entities": entities,
         "errors": [],
     }
+    # 기간 미지정 시 실제 사용된 시점을 라벨링한다 — intent/metric/period가 모든 종목에
+    # 동일하게 적용되므로 종목별 결과에서 모아 최상위 data_asof 하나로 담는다.
+    if period is None:
+        data_asof = _collect_data_asof(
+            [e.get("financial") for e in entities],
+            [row for e in entities for row in (e.get("price") or [])],
+        )
+        if data_asof:
+            result["data_asof"] = data_asof
+    return result
 
 
 def _resolve_metric_over_periods(
@@ -1580,6 +1635,8 @@ def answer_kr_question(
             result["errors"].append(f"기간 수익률 계산 실패: {err}")
         else:
             result["financial"] = financial
+        if period is None and asof:
+            result["data_asof"] = {"price_date": asof}
         return result
 
     intent = classify_intent(question, llm_fn=llm_fn)
@@ -1632,5 +1689,12 @@ def answer_kr_question(
                 history = price_history_fn(conn, stock_code)
                 if history:
                     result["price_history"] = _summarize_price_history(history)
+
+    # 기간 미지정 시 실제 사용된 데이터 시점(가격 기준일/재무 기준분기)을 라벨링한다.
+    # 이미 resolve된 값(financial의 period/price_date, price 스냅샷의 date)만 재사용한다.
+    if period is None:
+        data_asof = _collect_data_asof([result.get("financial")], result.get("price") or [])
+        if data_asof:
+            result["data_asof"] = data_asof
 
     return result

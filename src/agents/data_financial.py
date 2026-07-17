@@ -71,6 +71,12 @@ _FNGUIDE_KEY_ALIASES: dict[str, str] = {
 # 반드시 이 집합 안의 값만 사용한다(주입 방지).
 _METRICS_TABLE_COLS = {"per", "pbr", "roe", "operating_margin", "debt_ratio", "market_cap"}
 
+# 위 metrics 컬럼 중 "주가에 의존하는" 지표. 이 지표들은 metrics 행에 함께 적재된
+# price_date(종가 기준일, 적재 시 version.effective_price_date로 확정)를 계산에 실제로 쓰므로,
+# 조회 결과에 그 price_date를 함께 실어 사용자가 "어느 종가 기준 값이냐"를 검증할 수 있게 한다.
+# roe/operating_margin/debt_ratio는 순수 재무비율이라 price_date가 무의미하므로 제외한다.
+_PRICE_BASED_METRICS = {"per", "pbr", "market_cap"}
+
 # 연간(annual) 요청 시 4개 분기를 합산해야 하는 손익계산서/현금흐름 흐름값 계정.
 # 재무상태표 잔액(total_assets/total_liabilities/total_equity/shares_outstanding)이나
 # 비율지표(per/pbr/roe 등)는 합산 대상이 아니라 연말(Q4) 스냅샷을 쓴다(잔액을 더하면 틀림).
@@ -104,21 +110,29 @@ def classify_source(metric: str, llm_fn: Callable[[str], str] | None = None) -> 
 
 def _fetch_dart_at_quarter(
     conn: sqlite3.Connection, key: str, stock_code: str, quarter: str
-) -> tuple[float, str] | None:
-    """특정 분기(예: '2025Q3')의 DART 값 — financials(EAV) 우선, 없으면 metrics 컬럼."""
+) -> tuple[float, str, str | None] | None:
+    """특정 분기(예: '2025Q3')의 DART 값 — financials(EAV) 우선, 없으면 metrics 컬럼.
+
+    반환: (value, quarter, price_date). price_date는 주가 기반 지표(_PRICE_BASED_METRICS,
+    per/pbr/market_cap)를 metrics 테이블에서 읽었을 때 그 값 계산에 쓰인 종가 기준일
+    (metrics.price_date)이며, 그 외(순수 재무비율/EAV 계정)에는 None이다. 한 분기에 종가
+    스냅샷이 여러 개면 가장 최신(price_date DESC)을 쓴다.
+    """
     row = conn.execute(
         "SELECT amount, quarter FROM financials WHERE stock_code=? AND account_key=? AND quarter=?",
         (stock_code, key, quarter),
     ).fetchone()
     if row is not None and row["amount"] is not None:
-        return row["amount"], row["quarter"]
+        return row["amount"], row["quarter"], None
     if key in _METRICS_TABLE_COLS:
         row = conn.execute(
-            f"SELECT {key} AS v, quarter FROM metrics WHERE stock_code=? AND quarter=?",
+            f"SELECT {key} AS v, quarter, price_date FROM metrics "
+            "WHERE stock_code=? AND quarter=? ORDER BY price_date DESC LIMIT 1",
             (stock_code, quarter),
         ).fetchone()
         if row is not None and row["v"] is not None:
-            return row["v"], row["quarter"]
+            price_date = row["price_date"] if key in _PRICE_BASED_METRICS else None
+            return row["v"], row["quarter"], price_date
     return None
 
 
@@ -127,11 +141,12 @@ def _fetch_dart(
     stock_code: str,
     metric: str,
     period: dict | None = None,
-) -> tuple[float, str] | None:
+) -> tuple[float, str, str | None] | None:
     """DART 값 조회: 먼저 financials(EAV), 없으면 metrics(계산 지표).
 
-    반환: (value, quarter) — quarter는 조회된 값이 실제로 어느 기간 것인지 항상 함께
-    돌려준다. 이 라벨이 없으면 총괄 에이전트의 검증 단계가 "26년 1분기 영업이익"처럼
+    반환: (value, quarter, price_date) — quarter는 조회된 값이 실제로 어느 기간 것인지
+    항상 함께 돌려주고, price_date는 주가 기반 지표(per/pbr/market_cap)일 때 그 값 계산에
+    쓰인 종가 기준일(그 외 None)이다. 이 라벨이 없으면 총괄 에이전트의 검증 단계가 "26년 1분기 영업이익"처럼
     특정 분기를 지목한 질문에 대해 값이 맞는 분기인지 확인할 방법이 없어 항상 검증
     실패(uncertain)로 빠진다(실사용 재현 버그).
 
@@ -151,15 +166,16 @@ def _fetch_dart(
             (stock_code, key),
         ).fetchone()
         if row is not None and row["amount"] is not None:
-            return row["amount"], row["quarter"]
+            return row["amount"], row["quarter"], None
         if key in _METRICS_TABLE_COLS:
             row = conn.execute(
-                f"SELECT {key} AS v, quarter FROM metrics WHERE stock_code=? "
-                "ORDER BY quarter DESC LIMIT 1",
+                f"SELECT {key} AS v, quarter, price_date FROM metrics WHERE stock_code=? "
+                "ORDER BY quarter DESC, price_date DESC LIMIT 1",
                 (stock_code,),
             ).fetchone()
             if row is not None and row["v"] is not None:
-                return row["v"], row["quarter"]
+                price_date = row["price_date"] if key in _PRICE_BASED_METRICS else None
+                return row["v"], row["quarter"], price_date
         return None
 
     if period.get("kind") == "quarter":
@@ -177,7 +193,7 @@ def _fetch_dart(
         ).fetchall()
         amounts = {r["quarter"]: r["amount"] for r in rows if r["amount"] is not None}
         if len(amounts) == 4:  # 4개 분기 모두 있을 때만 합산(추정 금지)
-            return sum(amounts.values()), f"{year} 연간"
+            return sum(amounts.values()), f"{year} 연간", None
         return None
     # 흐름값이 아닌 계정(잔액/비율)은 연말(Q4) 스냅샷.
     return _fetch_dart_at_quarter(conn, key, stock_code, f"{year}Q4")
@@ -214,7 +230,8 @@ def resolve_metric(
     """지표 하나를 소스 판단 후 DB에서 조회. 항상 'source'/'period'를 담은 dict 반환.
 
     반환: {"stock_code", "metric", "value", "source", "period",
-           "dart_value", "dart_period", "fnguide_value", "fnguide_period"}.
+           "dart_value", "dart_period", "fnguide_value", "fnguide_period", "price_date"}.
+    price_date는 주가 기반 지표(per/pbr/시총)일 때 그 값 계산에 쓰인 종가 기준일이고 그 외 None.
     - DART·FnGuide 둘 다 값이 있으면 대표값(value/source/period)은 DART를 우선 채택한다
       (rule #3, 회귀 없음). 단 이 경우 두 소스 값이 다를 수 있으므로(예: 같은 '매출액'이라도
       집계 기준이 달라 DART/FnGuide 수치가 어긋남) dart_value/fnguide_value에 양쪽을 모두
@@ -245,4 +262,7 @@ def resolve_metric(
         "dart_period": dart_result[1] if dart_result else None,
         "fnguide_value": fnguide_result[0] if fnguide_result else None,
         "fnguide_period": fnguide_result[1] if fnguide_result else None,
+        # 주가 기반 지표(per/pbr/시총)의 종가 기준일(metrics.price_date). 그 외 지표는 None.
+        # 기간 미지정 질문에서 "이 값이 어느 종가 기준이냐"를 답변에 라벨링하는 데 재사용된다.
+        "price_date": dart_result[2] if dart_result else None,
     }

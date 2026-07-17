@@ -741,6 +741,10 @@ def _synthesize_prompt(question: str, domain_results: dict) -> str:
     return (
         "아래 여러 도메인 에이전트의 결과를 사용자 질문에 대한 하나의 종합결론으로 요약하세요.\n"
         "각 도메인 데이터를 왜곡하지 말고, 서로 상충하면 그 사실도 함께 밝히세요.\n"
+        "도메인 결과에 'data_asof'(예: {\"price_date\":..., \"financial_quarter\":...})가 있으면, "
+        "질문에 기간이 명시되지 않아 시스템이 자동으로 고른 '실제 데이터 기준시점'입니다 — "
+        "사용자가 어느 시점 데이터인지 검증할 수 있도록 그 가격 기준일/재무 기준분기를 "
+        "종합결론에 반드시 함께 밝히세요.\n"
         "스크리닝 결과 행에 '_same_company': true가 있으면, 그 행은 바로 앞의 '_same_company':"
         " false인 행과 동일 회사의 다른 상장 주식 종류(예: Class A/C)입니다 — 서로 다른"
         " 회사가 아니라 같은 회사임을 종합결론에서 반드시 밝히세요.\n\n"
@@ -782,6 +786,17 @@ def _summarize_one(domain: str, result: dict) -> str:
             ]
             if codes:
                 bits.append(f"다중종목 데이터 포함({', '.join(codes)})")
+        # 기간 미지정 시 자동으로 정해진 실제 데이터 기준시점(가격 기준일/재무 기준분기)을
+        # 결정론 요약에도 명시한다 — LLM 없이도 사용자가 "언제 기준 데이터냐"를 확인할 수 있게.
+        asof = result.get("data_asof")
+        if isinstance(asof, dict) and asof:
+            asof_bits = []
+            if asof.get("price_date"):
+                asof_bits.append(f"가격 기준일 {asof['price_date']}")
+            if asof.get("financial_quarter"):
+                asof_bits.append(f"재무 기준분기 {asof['financial_quarter']}")
+            if asof_bits:
+                bits.append("기준시점: " + ", ".join(asof_bits))
         return ", ".join(bits) or "데이터 없음"
     if domain == "backtest":
         if result.get("blocked"):

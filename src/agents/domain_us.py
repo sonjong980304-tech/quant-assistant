@@ -402,6 +402,23 @@ def answer_us_screening(
     )
 
 
+def _build_us_data_asof(financial_result, price_result) -> dict | None:
+    """기간 미지정 미국 질문에서 실제 사용된 시점을 추출한다(이미 resolve된 값 재사용, KR과 대칭).
+
+    US 재무 스냅샷(get_financials_us=metrics_at_us 행)의 quarter는 us_financials.as_of_date
+    (재무제표 기준시점)이고, 주가 스냅샷 행의 date는 us_prices 최신 거래일이다. 새로 조회/
+    계산하지 않고 이미 손에 든 두 값만 라벨링한다.
+    """
+    asof: dict = {}
+    if isinstance(financial_result, dict) and financial_result.get("quarter"):
+        asof["financial_quarter"] = financial_result["quarter"]
+    if isinstance(price_result, list) and price_result:
+        dates = [r.get("date") for r in price_result if isinstance(r, dict) and r.get("date")]
+        if dates:
+            asof["price_date"] = max(dates)
+    return asof or None
+
+
 def answer_us_question(
     question: str,
     conn,
@@ -477,7 +494,7 @@ def answer_us_question(
         else:
             errors.append(f"price: {outcome['error']}")
 
-    return {
+    result = {
         "ok": not errors,
         "stock_code": ticker,
         "intent": intent,
@@ -486,3 +503,9 @@ def answer_us_question(
         "error": "; ".join(errors) if errors else None,
         "price_history": price_history,
     }
+    # 기간 미지정 시 실제 사용된 데이터 시점(재무 기준시점/종가일)을 라벨링한다(KR과 대칭).
+    if period is None:
+        data_asof = _build_us_data_asof(financial_result, price_result)
+        if data_asof:
+            result["data_asof"] = data_asof
+    return result

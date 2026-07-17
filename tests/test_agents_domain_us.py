@@ -752,3 +752,37 @@ def test_answer_us_screening_common_stock_unaffected_regression(tmp_path):
         conn.close()
     assert result["errors"] == []
     assert {r["stock_code"] for r in result["result"]} == {"COM1", "COM2"}
+
+
+# ── data_asof: 기간 미지정 시 실제 사용된 데이터 시점 라벨링(KR과 대칭) ──────────────
+def test_answer_us_question_unspecified_period_labels_data_asof(tmp_path):
+    """기간 미지정 미국 질문(PER+주가)은 실제 재무 기준시점/종가일을 data_asof에 담는다."""
+    db = _seed_us_db(tmp_path)  # us_financials as_of_date=2026-06-30, us_prices date=2026-07-11
+    conn = connect_readonly(db)
+    try:
+        result = answer_us_question("AAPL PER랑 주가 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["data_asof"]["financial_quarter"] == "2026-06-30"
+    assert result["data_asof"]["price_date"] == "2026-07-11"
+
+
+def test_answer_us_question_financial_only_data_asof_has_only_quarter(tmp_path):
+    """기간 미지정 재무 단독(PER)은 재무 기준시점만 담는다(주가 스냅샷 없어 가격 기준일 없음)."""
+    db = _seed_us_db(tmp_path)
+    price_calls = []
+
+    def fake_price_fn(conn, code, **kwargs):
+        price_calls.append(code)
+        return []
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_us_question("AAPL PER 알려줘", conn, price_fn=fake_price_fn)
+    finally:
+        conn.close()
+
+    assert price_calls == []  # 재무 단독 질문 → 주가 에이전트 미호출
+    assert result["data_asof"]["financial_quarter"] == "2026-06-30"
+    assert "price_date" not in result["data_asof"]
