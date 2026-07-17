@@ -356,6 +356,36 @@ def _extract_histogram_data(domain_results: dict) -> tuple[list, list, str, str]
     return edges, counts, field, f"{field} 분포 히스토그램"
 
 
+def _chartable_payload(domain_results: dict):
+    """차트 폴백(build_chart_freeform)에 넘길 '실제로 그릴 데이터'를 domain_results에서 꺼낸다.
+
+    domain_results는 {도메인: {..., "result": <실제데이터>}} 래퍼다. 이걸 그대로 넘기면
+    build_chart_freeform이 받는 data가 도메인키 dict({"kr": {...}})가 돼, _summarize_data_shape가
+    'dict, 최상위 키: [kr]'로만 요약한다 — LLM은 정작 그릴 리스트가 domain_results["kr"]["result"]에
+    묻혀 있는 걸 못 보고 data를 리스트로 착각한 코드를 짜 실행에 실패한다(실측: 리스트로 가정한
+    코드가 dict를 순회 → TypeError → chart_base64 미충족 → None). 멀티턴 경로
+    (conversation._run_followup_step)가 직전 턴의 flat한 result를 그대로 넘겨 정상 동작하는 것과
+    대칭이 되도록, 여기서도 각 도메인의 "result" payload만 꺼내 넘긴다.
+
+    - 도메인이 하나면 그 payload를 그대로 준다(가장 흔한 스크리닝 경로: flat 리스트).
+    - 여러 도메인이면 {도메인: payload} dict로 준다(요약이 도메인별 구조를 보여주게).
+    - 꺼낼 result가 하나도 없으면(예상 밖 모양) 원본을 그대로 돌려준다(회귀 안전 — 기존보다
+      나빠지지 않는다). "result" 키가 없거나 None인 도메인(에러 응답 등)은 건너뛴다.
+    """
+    if not isinstance(domain_results, dict):
+        return domain_results
+    payloads = {
+        domain: value["result"]
+        for domain, value in domain_results.items()
+        if isinstance(value, dict) and value.get("result") is not None
+    }
+    if not payloads:
+        return domain_results
+    if len(payloads) == 1:
+        return next(iter(payloads.values()))
+    return payloads
+
+
 def _build_charts(domain_results: dict, conn) -> list[tuple[str, str]]:
     """domain_results에서 그릴 수 있는 차트를 전부 찾아 base64 PNG 리스트로 만든다.
 
@@ -927,7 +957,9 @@ def answer_with_verification(
                     # 결정론적(LLM 미사용) 패턴매칭이다. 스크리닝 리스트처럼 이 4가지 어디에도
                     # 안 맞는 데이터는 chart_fallback_fn(차트 서브에이전트, matplotlib 자유선택)
                     # 으로 보강한다. 그래도 실패하면(None) 차트 없이 텍스트 응답만(에러 아님).
-                    fallback_chart = chart_fallback_fn(question, domain_results, llm_fn)
+                    fallback_chart = chart_fallback_fn(
+                        question, _chartable_payload(domain_results), llm_fn
+                    )
                     if fallback_chart:
                         charts = [(fallback_chart["chart_base64"], fallback_chart.get("chart_title"))]
                 if charts:

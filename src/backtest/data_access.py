@@ -225,6 +225,9 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "per": "주가수익비율(PER)",
     "pbr": "주가순자산비율(PBR)",
     "psr": "주가매출비율(PSR)",
+    "pcr": "주가현금흐름비율(PCR, 시가총액 ÷ 영업활동현금흐름 TTM). 밸류 팩터(낮을수록 저평가·우수)",
+    "ev_ebitda": "EV/EBITDA(기업가치 ÷ EBITDA, EBITDA=EBIT+감가상각비 TTM). 밸류 팩터(낮을수록 저평가·우수). 감가상각비 미수집 종목은 None",
+    "peg": "PEG(PER ÷ 순이익성장률). 성장 대비 밸류 팩터(낮을수록 우수). 순이익성장률>0일 때만 계산",
     "roe": "자기자본이익률(ROE, %)",
     "roa": "총자산이익률(ROA, %)",
     "operating_margin": "영업이익률(%, 해당분기)",
@@ -232,6 +235,8 @@ METRIC_FIELD_DESCRIPTIONS: dict[str, str] = {
     "gross_margin": "매출총이익률(%, 해당분기, 매출총이익 ÷ 매출액). GPA(gp_a=매출총이익÷총자산)와 분모가 다른 별개 지표(높을수록 우수)",
     "cogs_ratio": "매출원가율(%, 해당분기, 매출원가 ÷ 매출액). 원가효율(낮을수록 우수)",
     "debt_ratio": "부채비율(%)",
+    "current_ratio": "유동비율(%, 유동자산 ÷ 유동부채). 안정성 팩터(높을수록 우수)",
+    "interest_coverage": "이자보상배율(영업이익 TTM ÷ 이자비용 TTM, 배율). 안정성 팩터(높을수록 우수)",
     "revenue_growth": "매출 성장률(YoY, %)",
     "op_growth": "영업이익 성장률(YoY, %)",
     "ni_growth": "순이익 성장률(YoY, %)",
@@ -285,6 +290,7 @@ def metrics_at(conn, asof: str) -> list[dict]:
         ni_ttm = _sum_ttm(conn, code, q, "net_income")               # 연결 전체 (ROA용)
         gp_ttm = _sum_ttm(conn, code, q, "gross_profit")             # GPA(수익성 팩터) 분자
         ocf_ttm = _sum_ttm(conn, code, q, "operating_cashflow")      # CFO비율(질 팩터) 분자(TTM 영업현금흐름)
+        op_ttm = _sum_ttm(conn, code, q, "operating_profit")         # 이자보상배율 분자(TTM 영업이익)
         # PER·ROE 분자는 지배주주 귀속 순이익. 미수집 시 연결 순이익으로 폴백.
         ctrl_ni_ttm = _sum_ttm(conn, code, q, "controlling_net_income")
         if ctrl_ni_ttm is None:
@@ -305,7 +311,8 @@ def metrics_at(conn, asof: str) -> list[dict]:
         cur_liab = _fin(conn, code, q, "current_liabilities")     # 유동부채(스냅샷)
         noncur_assets = _fin(conn, code, q, "non_current_assets") # 비유동자산(스냅샷)
         cash = _fin(conn, code, q, "cash")                        # 현금및현금성자산(스냅샷)
-        dep = _fin(conn, code, q, "depreciation")                 # 감가상각비(스냅샷)
+        dep = _fin(conn, code, q, "depreciation")                 # 감가상각비(스냅샷, ROC 투하자본용)
+        dep_ttm = _sum_ttm(conn, code, q, "depreciation")         # 감가상각비(TTM, EBITDA용 — EBIT과 기간 일치)
 
         # 순이익 데이터 오류(자기자본 대비 비현실적 거대 = Q4 차분 폭발/원본 오류) 방어.
         # 순이익 기반 지표(PER·ROE·ROA)를 무효화해 다원넥스뷰 5.7경 같은 종목을 배제.
@@ -374,6 +381,11 @@ def metrics_at(conn, asof: str) -> list[dict]:
             cap is not None and liab is not None and excess_cash is not None
         ) else None
         earnings_yield = _div(ebit, ev, pct=True) if (ebit is not None and ev is not None and ev > 0) else None
+        # EV/EBITDA — 마법공식 EV·EBIT 인프라를 그대로 재사용한다. EBITDA = EBIT + 감가상각비(TTM,
+        # EBIT과 기간을 맞춤). roc(IC용 dep는 0으로 근사)와 달리 감가상각비가 없으면 EBITDA 자체를
+        # 근사하지 않고 None으로 둔다 — DART 표준 API에 감가상각비 계정이 없는 종목(삼성전자 등
+        # 대형주 다수)은 EV/EBITDA가 None이 된다(src/ingest/metrics.py의 ev_ebitda와 동일 관례).
+        ebitda = (ebit + dep_ttm) if (ebit is not None and dep_ttm is not None) else None
         # 투하자본 IC = (유동자산-유동부채)+(비유동자산-감가상각비). IC<=0이면 ROC 무의미 → None.
         # 감가상각비는 DART 표준 API에 계정 자체가 없는 종목이 많다(삼성전자 등 대형주 다수 —
         # 사업보고서 주석에서만 확인 가능하나 이 프로젝트가 수집하는 API 범위 밖). 감가상각비가
@@ -387,12 +399,26 @@ def metrics_at(conn, asof: str) -> list[dict]:
         roc = _div(ebit, ic, pct=True) if (ebit is not None and ic is not None and ic > 0) else None
         roc_estimated = (dep is None) if roc is not None else None
 
+        # PER·순이익성장률(YoY)을 출력 dict에서 계산하기 전에 변수로 뽑아 PEG(=PER/순이익성장률)에
+        # 재사용한다(값 정의는 아래 dict와 100% 동일). PEG는 성장 대비 밸류라 성장률>0일 때만
+        # 의미가 있다(성장률<=0이면 None — src/ingest/metrics.py의 peg와 동일 관례).
+        per = _div(cap, ctrl_ni_ttm) if (cap and ctrl_ni_ttm and ctrl_ni_ttm > 0) else None
+        ni_growth = _yoy(conn, code, q, "net_income")
+        peg = (per / ni_growth) if (per is not None and ni_growth and ni_growth > 0) else None
+
         out.append({
             "stock_code": code, "name": c["name"], "sector": c["sector"], "market": c["market"],
             "quarter": q, "close": close, "market_cap": cap,
-            "per": _div(cap, ctrl_ni_ttm) if (cap and ctrl_ni_ttm and ctrl_ni_ttm > 0) else None,
+            "per": per,
             "pbr": _div(cap, book) if (cap and book and book > 0) else None,
             "psr": _div(cap, rev_ttm) if (cap and rev_ttm and rev_ttm > 0) else None,
+            # PCR = 시가총액 ÷ 영업활동현금흐름(TTM). ocf_ttm은 이미 CFO비율에서 조회한 값 재사용.
+            # PER의 음수순이익 처리와 동일하게 현금흐름 TTM>0일 때만(음수=현금소진은 밸류 무의미) 계산.
+            "pcr": _div(cap, ocf_ttm) if (cap and ocf_ttm and ocf_ttm > 0) else None,
+            # EV/EBITDA = 마법공식 EV ÷ EBITDA(=EBIT+감가상각비 TTM). EBITDA<=0 또는 EV/EBITDA 입력
+            # (감가상각비) 결측이면 None. 밸류 팩터(낮을수록 저평가).
+            "ev_ebitda": _div(ev, ebitda) if (ev is not None and ebitda is not None and ebitda > 0) else None,
+            "peg": peg,
             "roe": roe,
             "roa": _div(ni_ttm, assets, pct=True) if (ni_ttm and assets and assets > 0) else None,
             "operating_margin": op_margin,
@@ -417,9 +443,14 @@ def metrics_at(conn, asof: str) -> list[dict]:
             "roc": roc,
             "roc_estimated": roc_estimated,
             "debt_ratio": _div(liab, equity, pct=True) if (equity and equity > 0) else None,
+            # 유동비율 = 유동자산 ÷ 유동부채(%). cur_assets/cur_liab는 마법공식 IC에서 이미 조회한 값 재사용.
+            "current_ratio": _div(cur_assets, cur_liab, pct=True) if (cur_liab and cur_liab > 0) else None,
+            # 이자보상배율 = 영업이익(TTM) ÷ 이자비용(TTM). 배율이라 %가 아님. 이자비용>0일 때만(무이자
+            # 기업은 이자보상배율 정의상 해당 없음 → None). int_ttm은 마법공식 EBIT에서 이미 조회한 값 재사용.
+            "interest_coverage": _div(op_ttm, int_ttm) if (int_ttm and int_ttm > 0) else None,
             "revenue_growth": _yoy(conn, code, q, "revenue"),
             "op_growth": _yoy(conn, code, q, "operating_profit"),
-            "ni_growth": _yoy(conn, code, q, "net_income"),
+            "ni_growth": ni_growth,
             "return_12m": return_12m,
         })
     return out

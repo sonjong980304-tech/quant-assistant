@@ -190,3 +190,137 @@ def test_build_sp500_benchmark_fn_none_for_unknown_date():
         dates, fetch_fn=lambda s, e: {"2026-01-31": 4000.0, "2026-02-28": 4200.0}
     )
     assert bench("2099-12-31") is None
+
+
+# ==========================================================================
+# metrics_at_us — 파생 지표 확장(psr/pcr/ev_ebitda/peg/roa/gp_a/debt_ratio/
+# current_ratio/interest_coverage/revenue_growth/op_growth/ni_growth) (TDD).
+#
+# 배경: 백테스트 UI 체크박스(db.py METRIC_DEFS 20개)는 국가 구분 없이 노출되는데
+# metrics_at_us는 그중 12개만 계산해, 미국에서 나머지를 선택하면 selection.py의
+# _validate_criteria_keys가 "존재하지 않는 필드" ValueError로 백테스트를 크래시시켰다.
+# us_financials(yfinance EAV)에는 Total Assets/Total Debt/Current Assets·Liabilities/
+# Operating Cash Flow/EBITDA/Interest Expense/Gross Profit 원본이 이미 수집돼 있어
+# (data/market.db 직접 조회로 확인), 공식만 추가하면 계산 가능하다.
+# ==========================================================================
+def _seed_us_full(tmp_path, financial_currency: str = "USD") -> sqlite3.Connection:
+    """AAPL 1종목을 5개 quarterly(2023-12-31 전년동기 + 2024 4분기)로 시드한다.
+
+    손익(TTM 4분기 + 성장률용 전년동기), 재무상태(최신분기 스냅샷), 현금흐름을 모두 채워
+    새 파생 지표를 결정론적으로 검증할 수 있게 한다. 값은 검산 편의를 위해 딱 떨어지게 잡았다:
+      · Net Income   2023Q4=8,   2024 각 분기=10  → TTM=40, 단일분기=10, YoY=(10-8)/8=25%
+      · Total Revenue 2023Q4=80,  2024 각 분기=100 → TTM=400, 단일=100, YoY=25%
+      · Operating Income 2023Q4=24, 2024 각 분기=30 → TTM=120, 단일=30, YoY=25%
+      · Gross Profit 2024 각 분기=40 → TTM=160 · EBITDA 각 분기=50 → TTM=200
+      · Interest Expense 각 분기=5 → TTM=20 · Operating Cash Flow 각 분기=25 → TTM=100
+    최신분기(2024-12-31) 재무상태: Stockholders Equity=200, Total Assets=800,
+    Total Liabilities Net Minority Interest=600, Current Assets=300, Current Liabilities=150,
+    Total Debt=250, Cash And Cash Equivalents=50. market_cap=1000, 종가(2025-03-01)=150.
+    """
+    db = tmp_path / "dau_full.db"
+    init_db(str(db))
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, "
+        "financial_currency, updated_at) VALUES (?,?,?,?,?,?,?)",
+        ("AAPL", "Apple", "NASDAQ", "Technology", 1000.0, financial_currency, "2025-03-01"),
+    )
+
+    def ins(as_of, disclosed, stmt, key, val):
+        conn.execute(
+            "INSERT INTO us_financials(stock_code, as_of_date, period_type, statement_type, "
+            "item_key, item_value, disclosed_date, source) VALUES (?,?,?,?,?,?,?,?)",
+            ("AAPL", as_of, "quarterly", stmt, key, val, disclosed, "yfinance"),
+        )
+
+    ttm_quarters = [
+        ("2024-03-31", "2024-05-15"), ("2024-06-30", "2024-08-14"),
+        ("2024-09-30", "2024-11-14"), ("2024-12-31", "2025-02-14"),
+    ]
+    prev_year = ("2023-12-31", "2024-02-14")  # 성장률(YoY) 비교용 전년동기
+    # 손익: 4개 TTM 분기 값
+    for as_of, disclosed in ttm_quarters:
+        ins(as_of, disclosed, "income_stmt", "Net Income", 10.0)
+        ins(as_of, disclosed, "income_stmt", "Total Revenue", 100.0)
+        ins(as_of, disclosed, "income_stmt", "Operating Income", 30.0)
+        ins(as_of, disclosed, "income_stmt", "Gross Profit", 40.0)
+        ins(as_of, disclosed, "income_stmt", "EBITDA", 50.0)
+        ins(as_of, disclosed, "income_stmt", "Interest Expense", 5.0)
+        ins(as_of, disclosed, "cashflow", "Operating Cash Flow", 25.0)
+    # 전년동기(단일분기 YoY 분모): Net Income/Total Revenue/Operating Income만
+    ins(prev_year[0], prev_year[1], "income_stmt", "Net Income", 8.0)
+    ins(prev_year[0], prev_year[1], "income_stmt", "Total Revenue", 80.0)
+    ins(prev_year[0], prev_year[1], "income_stmt", "Operating Income", 24.0)
+    # 최신분기 재무상태(스냅샷)
+    for key, val in [
+        ("Stockholders Equity", 200.0), ("Total Assets", 800.0),
+        ("Total Liabilities Net Minority Interest", 600.0),
+        ("Current Assets", 300.0), ("Current Liabilities", 150.0),
+        ("Total Debt", 250.0), ("Cash And Cash Equivalents", 50.0),
+    ]:
+        ins("2024-12-31", "2025-02-14", "balance_sheet", key, val)
+    for date_str, close in [("2025-01-15", 140.0), ("2025-03-01", 150.0)]:
+        conn.execute(
+            "INSERT INTO us_prices(stock_code, date, open, high, low, close, volume) VALUES (?,?,?,?,?,?,?)",
+            ("AAPL", date_str, close - 2, close + 2, close - 3, close, 1000.0),
+        )
+    conn.commit()
+    return conn
+
+
+def test_metrics_at_us_computes_all_derived_metrics(tmp_path):
+    conn = _seed_us_full(tmp_path)
+    rows = dau.metrics_at_us(conn, "2025-03-01")
+    assert len(rows) == 1
+    r = rows[0]
+    # 밸류
+    assert r["psr"] == pytest.approx(2.5)          # 1000 / 400(TTM 매출)
+    assert r["pcr"] == pytest.approx(10.0)         # 1000 / 100(TTM 영업현금흐름)
+    assert r["ev_ebitda"] == pytest.approx(6.0)    # EV(1000+250-50=1200) / 200(TTM EBITDA)
+    assert r["peg"] == pytest.approx(1.0)          # per(25) / ni_growth(25)
+    # 수익성
+    assert r["roa"] == pytest.approx(5.0)          # 40(TTM 순이익) / 800(총자산) * 100
+    assert r["gp_a"] == pytest.approx(20.0)        # 160(TTM 매출총이익) / 800 * 100
+    # 안정성
+    assert r["debt_ratio"] == pytest.approx(300.0)     # 600(부채) / 200(자본) * 100
+    assert r["current_ratio"] == pytest.approx(200.0)  # 300(유동자산) / 150(유동부채) * 100
+    assert r["interest_coverage"] == pytest.approx(6.0)  # 120(TTM 영업이익) / 20(TTM 이자비용)
+    # 성장(YoY 단일분기)
+    assert r["revenue_growth"] == pytest.approx(25.0)  # (100-80)/80 * 100
+    assert r["op_growth"] == pytest.approx(25.0)       # (30-24)/24 * 100
+    assert r["ni_growth"] == pytest.approx(25.0)       # (10-8)/8 * 100
+    conn.close()
+
+
+def test_metrics_at_us_new_fields_registered_in_descriptions():
+    """새 파생 지표가 단일 정의처(METRIC_FIELD_DESCRIPTIONS_US)에 등록돼야 UI/스크리닝에 노출된다."""
+    for key in (
+        "psr", "pcr", "ev_ebitda", "peg", "roa", "gp_a", "debt_ratio",
+        "current_ratio", "interest_coverage", "revenue_growth", "op_growth", "ni_growth",
+    ):
+        assert key in dau.METRIC_FIELD_DESCRIPTIONS_US, f"{key} 가 정의처에 없음"
+
+
+def test_metrics_at_us_new_fields_none_when_raw_data_missing(tmp_path):
+    """원본 항목(총자산/부채/현금흐름 등)이 없는 종목은 새 지표가 None (억지 추정 안 함)."""
+    conn = _seed_us_db(tmp_path)  # 기존 최소 시드(Total Assets/Total Debt 등 없음)
+    r = dau.metrics_at_us(conn, "2025-03-01")[0]
+    for key in ("pcr", "ev_ebitda", "roa", "gp_a", "debt_ratio", "current_ratio", "interest_coverage"):
+        assert r[key] is None, f"{key} 는 원본 없으면 None 이어야 하는데 {r[key]!r}"
+    conn.close()
+
+
+def test_metrics_at_us_new_derived_fields_nullified_for_non_usd(tmp_path):
+    """비USD(예: KRW) 재무통화 종목은 새 재무 파생 지표도 전부 무효화(통화 불일치 방어)."""
+    conn = _seed_us_full(tmp_path, financial_currency="KRW")
+    r = dau.metrics_at_us(conn, "2025-03-01")[0]
+    for key in (
+        "psr", "pcr", "ev_ebitda", "peg", "roa", "gp_a", "debt_ratio",
+        "current_ratio", "interest_coverage", "revenue_growth", "op_growth", "ni_growth",
+    ):
+        assert r[key] is None, f"{key} 는 비USD 라 None 이어야 하는데 {r[key]!r}"
+    # 가격/시총은 정상 달러 데이터라 유지
+    assert r["close"] == 150.0
+    assert r["market_cap"] == 1000.0
+    conn.close()

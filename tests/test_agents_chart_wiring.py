@@ -700,7 +700,74 @@ def test_answer_with_verification_uses_chart_fallback_when_build_charts_empty():
     assert res["chart_base64"] == "PNG"
     assert res["chart_title"] == "수익률 막대그래프"
     assert captured["question"] == "코스피 상위 종목 수익률 그래프로 그려줘"
-    assert captured["domain_results"] == {"kr": screening}
+    # 폴백에는 도메인키 래퍼({"kr": {...}})가 아니라 **flat한 종목 리스트**(그릴 실제 데이터)를
+    # 넘겨야 한다. 래퍼를 넘기면 build_chart_freeform이 받는 data가 dict가 돼 요약이 'dict,
+    # 최상위 키: [kr]'로만 나오고 LLM이 정작 그릴 리스트(domain_results["kr"]["result"])를 못
+    # 찾아 실행에 실패했다(실측). 멀티턴 경로가 flat한 result를 넘기는 것과 대칭.
+    assert captured["domain_results"] == screening["result"]
+
+
+def test_chart_fallback_receives_unwrapped_flat_list_for_single_domain():
+    """단일 도메인 스크리닝: 폴백은 domain_results["kr"]["result"](flat 리스트)를 그대로 받는다."""
+    from src.agents.supervisor import answer_with_verification
+
+    stocks = [
+        {"stock_code": "005930", "name": "삼성전자", "return_12m": 12.3},
+        {"stock_code": "000660", "name": "SK하이닉스", "return_12m": 45.6},
+    ]
+    screening = {"intent": "screening", "result": stocks}
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": screening}
+
+    captured = {}
+
+    def fake_chart_fallback(question, data, llm_fn):
+        captured["data"] = data
+        return {"chart_base64": "PNG", "chart_title": "T"}
+
+    res = answer_with_verification(
+        "코스피 상위 10개 수익률 그래프로 그려줘", conn=None, llm_fn="fake-llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res["chart_base64"] == "PNG"
+    # 폴백이 받은 data는 flat 리스트여야 한다(래퍼 dict가 아니라).
+    assert captured["data"] == stocks
+    assert isinstance(captured["data"], list)
+
+
+def test_chart_fallback_receives_per_domain_payloads_for_multi_domain():
+    """복합 도메인(kr+us): 각 도메인의 result만 뽑아 {도메인: payload} dict로 넘긴다
+    (도메인별 껍데기 dict가 아니라 그릴 데이터만)."""
+    from src.agents.supervisor import answer_with_verification
+
+    kr_rows = [{"name": "삼성전자", "return_12m": 12.3}]
+    us_rows = [{"name": "AAPL", "return_12m": 30.0}]
+
+    def stub_route(question, llm_fn):
+        return ["kr", "us"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {"result": kr_rows}, "us": {"result": us_rows}}
+
+    captured = {}
+
+    def fake_chart_fallback(question, data, llm_fn):
+        captured["data"] = data
+        return {"chart_base64": "PNG", "chart_title": "T"}
+
+    res = answer_with_verification(
+        "한국·미국 상위 종목 수익률 그래프로 그려줘", conn=None, llm_fn="fake-llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=_valid_verify,
+        chart_fallback_fn=fake_chart_fallback,
+    )
+    assert res["chart_base64"] == "PNG"
+    # 도메인이 여러 개면 {도메인: 그 도메인의 result} — 껍데기 dict가 아니라 그릴 리스트만.
+    assert captured["data"] == {"kr": kr_rows, "us": us_rows}
 
 
 def test_answer_with_verification_does_not_call_chart_fallback_when_build_charts_already_found():

@@ -117,9 +117,15 @@ def test_screening_prompt_lists_market_cap_description_us():
 
 
 def test_screening_prompt_us_domain_does_not_leak_kr_only_fields():
-    """US 프롬프트에는 KR 전용 필드(revenue_growth 등)가 섞이지 않는다."""
-    prompt = _screening_prompt("매출 성장률 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
-    assert "revenue_growth" not in prompt
+    """US 프롬프트에는 US가 계산하지 않는 KR 전용 필드가 섞이지 않는다.
+
+    과거엔 revenue_growth/op_growth 등 성장률을 KR 전용으로 봤으나, us_financials(yfinance)에
+    분기 손익이 쌓여 있어 YoY 계산이 가능해져 US에도 정식 편입됐다(METRIC_FIELD_DESCRIPTIONS_US).
+    지금도 US에 없는 KR 전용 지표는 마법공식 계열(earnings_yield/roc — DART 전용 계산)이다.
+    """
+    prompt = _screening_prompt("이익수익률(마법공식) 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
+    assert "earnings_yield" not in prompt
+    assert "roc" not in prompt
 
 
 def test_llm_maps_operating_profit_from_prompt_description_not_alias_table():

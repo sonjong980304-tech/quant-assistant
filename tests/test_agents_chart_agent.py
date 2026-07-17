@@ -117,6 +117,40 @@ def test_build_chart_freeform_retries_once_after_execution_failure_then_succeeds
     assert "NameError: plt" in attempts[1]  # 실패 사유가 재시도 프롬프트에 피드백됨
 
 
+def test_build_chart_freeform_injects_flat_stock_list_as_data_and_summarizes_it_as_list():
+    """'종목별 단일값 리스트'(스크리닝 결과 모양)를 그대로 data로 주입하고, 프롬프트 요약도
+    'dict 래퍼'가 아니라 '리스트[dict]'로 나와야 한다.
+
+    실측 회귀: 폴백이 도메인키 래퍼({"kr": {...}})를 넘기면 요약이 'dict, 최상위 키: [kr]'로만
+    나와 LLM이 실제 종목 리스트를 못 찾았다. 폴백은 flat 리스트를 넘겨야 하며, 그때 이 서브
+    에이전트는 그 리스트를 data로 그대로 주입하고 리스트로 요약한다(supervisor._chartable_payload
+    가 언랩해 넘겨준다는 계약을 이 레벨에서 문서화)."""
+    stocks = [
+        {"stock_code": f"00{i:04d}", "name": f"종목{i}", "return_12m": 0.3 - i * 0.02}
+        for i in range(10)
+    ]
+    captured = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return "```python\nchart_base64='PNG'\nchart_title='상위10 수익률'\n```"
+
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        captured["context"] = context
+        return {"ok": True, "result": None, "error": None,
+                "extra": {"chart_base64": "PNG", "chart_title": "상위10 수익률"}}
+
+    result = build_chart_freeform(
+        "상위 10개 종목 수익률 그래프로 그려줘", stocks, fake_llm, execute_python_fn=fake_exec,
+    )
+    assert result == {"chart_base64": "PNG", "chart_title": "상위10 수익률"}
+    # flat 리스트가 그대로 data로 주입돼야 한다(도메인키 래퍼가 아니라).
+    assert captured["context"] == {"data": stocks}
+    # 프롬프트 요약이 '리스트[dict]'로 나와 LLM이 종목 리스트임을 인지할 수 있어야 한다.
+    assert "리스트[dict] 10개" in captured["prompt"]
+    assert "return_12m" in captured["prompt"]
+
+
 def test_build_chart_freeform_gives_up_after_max_attempts():
     def fake_llm(prompt):
         return "```python\nchart_base64='PNG'\n```"
