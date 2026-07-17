@@ -274,6 +274,71 @@ AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다
 | GET | `/api/chat/history` | 세션의 턴별 질문/답변/근거데이터 목록 |
 | GET | `/api/chat/csv` | 특정 턴의 결과를 CSV로 재다운로드(표 형태가 아니면 명확한 사유와 함께 실패) |
 
+## 올웨더 포트폴리오 (`/allweather`)
+
+4종목(QQQ/삼성전자/TLT/ACE KRX금현물)에 매달 몬테카를로로 비중을 재계산해 보여주는
+**모니터링 전용** 화면입니다(자동매매 없음 — 계산·저장·알림까지만 하고 실제 주문 실행은
+이 기능의 범위 밖입니다). 핵심 모듈은 `src/allweather/`이고, `montecarlo.py`(비중 최적화)는
+실거래봇 `quant_trader/portfolio/rebalancer.py`의 계산 로직(연율화 ×252/√252, 샤프비율
+공식)을 기반으로 하되, 아래 "종목당 비중 상하한" 절에서 설명하는 상하한 하나만 원본과
+다릅니다.
+
+### lookback(10년)과 백테스트 전체 기간(계속 늘어남)은 다른 숫자입니다
+화면 하단에 나오는 "실제 YYYY-MM-DD~YYYY-MM-DD (약 N년)"은 **walk-forward 백테스트
+곡선 전체가 커버하는 기간**입니다(2004-11-30부터 시작, 매달 배치가 돌 때마다 최신
+종가까지 자동으로 늘어남 — 2026-07 기준 약 21.6년). 이건 알고리즘이 **매달 리밸런싱
+결정을 내릴 때 참고하는 기간**(`lookback_years=10`, `backtest.py::run_walk_forward`)과는
+완전히 다른 숫자입니다 — 둘 다 맞는 숫자이고, 서로 다른 질문에 대한 답일 뿐입니다.
+
+비유하면: "21.6년짜리 시험을 261번(매달) 봤는데, 매번 시험 볼 때마다 최근 10년치
+참고서만 펴놓고 풀었다"는 뜻입니다. 2016년 7월에 리밸런싱할 땐 2006년 7월~2016년
+7월(10년)만, 2026년 7월에 리밸런싱할 땐 2016년 7월~2026년 7월(10년)만 보고 판단합니다
+(look-ahead 없이 그 시점까지의 데이터만 사용). 이렇게 261번의 "10년짜리 판단"이
+이어붙어서 전체 그래프가 21.6년이 되는 겁니다.
+
+### 종목당 비중 상하한 (10%~45%)
+2026-07-17 21.7년 실측 데이터로 검증한 결과, 상하한 없는 무제약 샤프비율 극대화가
+(lookback=10년 기준) QQQ+삼성전자에 99% 가까이 쏠리는 코너 솔루션으로 수렴함을
+확인했습니다(그 10년 동안 TLT가 가격 기준 마이너스 수익률이었기 때문 — 2022년 금리
+급등으로 채권값이 폭락한 여파가 아직 안 회복됨). "올웨더(전천후)"라는 취지에 맞지 않아
+종목당 최소10%~최대45% 비중 상하한을 추가했습니다(`montecarlo.py::MIN_WEIGHT`/
+`MAX_WEIGHT`, Dirichlet 거부샘플링으로 구현). 이 상하한이 quant_trader 원본과의 유일한
+실질적 차이입니다.
+
+**탐색해봤지만 채택하지 않은 것들** (근거 없이 "이게 낫다"고 단정하지 않도록 실측 결과를
+남겨둡니다):
+- lookback을 20년으로 늘리면 MDD·CAGR·Sharpe가 전부 악화됩니다 — 과거를 더 오래
+  기억할수록 최근 성과 변화(TLT의 2022년 실시간 폭락)에 반응이 느려지기 때문입니다.
+- 리밸런싱 결정 시점의 과거 3년 구간 MDD를 -15% 이내로 직접 제약하는 방식도
+  시도했지만, 실현 MDD는 오히려 -42%로 더 나빠졌습니다 — 결정 시점 과거창에서 계산한
+  MDD와 실제 보유 중 겪는 MDD는 다른 값이기 때문입니다.
+- 근본 원인은 2022년 "주식+장기채 동반폭락"(금리급등 쇼크, 통상적인 주식-채권
+  역상관이 깨진 이례적 구간)으로, 이 4종목 조합 자체의 구조적 한계입니다 — lookback
+  길이나 비중 상하한 튜닝으로는 피할 수 없습니다.
+
+### 가격 데이터 확보 (21.7년 이력)
+- 삼성전자: 기존 `prices` DB 테이블(2014년~) 대신 yfinance `005930.KS`를 직접
+  조회합니다(2000년~, 더 긺).
+- ACE KRX금현물(411060.KS): 2021년 말에야 상장돼 그 이전 데이터가 없습니다. `GLD`
+  (달러 표시 실물담보 금ETF, 2004-11~)×`USDKRW=X`(원/달러 환율, 2003-12~)로 만든
+  합성 원화금가격으로 과거를 채우고, 411060.KS 실데이터가 존재하는 구간(2021-12-15~)은
+  항상 진짜 시세로 이어붙입니다(`data.py::build_synthetic_krx_gold_series`) — 최근·
+  실보유 구간은 항상 진짜 데이터가 우선입니다.
+- 무위험이자율은 미국 3개월 국채(`^IRX`)를 리밸런싱 시점별 과거값으로 조회합니다
+  (`risk_free_rate_at`, 미래참조 없음).
+
+### 배치 파이프라인
+매달 1일 08:10(launchd, `scripts/run_macro_indicators.py`의 07:40과 시간 안 겹침)
+`scripts/run_all_weather.py`가 `pipeline.py::run_all_weather_pipeline`을 실행해: 4종목
+가격 수집 → walk-forward 백테스트(리밸런싱마다 몬테카를로 10만회 재계산, look-ahead
+없음) → `all_weather_snapshot` 테이블에 이력 저장(직전 달 대비 비중 델타 계산용) →
+quant_trader와 동일한 텔레그램 채널로 알림 발송(직전 달 대비 비중 변화 포함) 순서로
+동작합니다. 화면(`/allweather`)은 이 저장된 최신 스냅샷을 **읽기만** 합니다 — 접속
+시 즉석 재계산하지 않습니다(매크로 신호와 동일한 "판단은 배치로 1회, 조회는 캐시만"
+원칙).
+
+---
+
 ## 최근 추가 기능 (히스토그램 · CSV 컬럼 필터링 · QVM 멀티팩터 전략)
 
 ### 히스토그램(분포) 차트
@@ -342,6 +407,7 @@ AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다
 | `us_company` / `us_prices` / `us_financials` | 미국 주식 버전(NASDAQ 스크리너 + yfinance) |
 | `raw_reports` | DART 원본 응답(재파싱용 보관) |
 | `macro_indicators` / `macro_signal` | 거시지표 원본값 / 파생 신호 |
+| `all_weather_snapshot` | 올웨더 포트폴리오 월별 스냅샷(비중/CAGR/MDD/샤프/누적수익률/백테스트곡선) — 매달 배치가 append |
 | `wiki` | 질문·SQL·태그 등 **질의 기록 로그**(과거 유사도 캐시 기능은 폐기, 지금은 하위호환용) |
 | `result_cache` | (SQL해시 + data_version) → 결과 (legacy 파이프라인 전용) |
 | `ingest_meta` | 실제 공시된 최신 분기 / 최신 종가일 등 체크포인트 |
@@ -387,6 +453,7 @@ DART 일일 조회 한도 때문에 "매일 전부 다시 받기"가 아니라, 
 | 미국 주가/재무/유니버스 | 매일 | `scripts/run_us_prices.py`, `scripts/run_us_financials.py`, `scripts/run_us_universe.py` |
 | FnGuide 지표 | 매일 | `scripts/run_fnguide_metrics.py` |
 | 매크로 지표 | 매일 | `scripts/run_macro_indicators.py` |
+| 올웨더 포트폴리오 리밸런싱+텔레그램 알림 | 매달 1일 08:10 | `scripts/run_all_weather.py` |
 | 전체 재수집(refeed, 복사본→swap) | 필요 시 | `scripts/run_refeed_cron.sh` |
 
 ---
@@ -437,9 +504,11 @@ uvicorn web.app:app --reload      # http://127.0.0.1:8000
 | GET | `/api/metric-defs`, `/api/sectors` | 백테스트 UI용 지표 정의 / 업종 목록 |
 | POST | `/api/backtest` | 백테스트 실행 |
 | GET | `/api/backtest-runs` | 저장된 백테스트 이력 |
+| GET | `/api/allweather` | 올웨더 포트폴리오 최신 스냅샷 조회(저장된 값 읽기만, 즉석 재계산 없음) |
 | GET | `/`, `/chat` | **기본 화면** — 멀티턴 대화(`chat.html`) |
 | GET | `/query` | 예전 단발 질의 화면(`index.html`, 실시간 트리 + 백테스트 UI 패널) |
 | GET | `/macro` | 매크로 전용 화면 |
+| GET | `/allweather` | 올웨더 포트폴리오 모니터링 화면(`allweather.html`) |
 
 프론트(`/query`): 질의 입력 + 실시간 트리(`🌳`) + 종합결론/도메인별 원본 데이터 + 백테스트
 패널(접이식, 산업 필터·조합방식·거래비용 등).
@@ -513,6 +582,8 @@ dart-text2sql-wiki/
 │   │   ├── conversation.py        # 멀티턴 대화 세션(신규/이어가기 분기, 프로세스 메모리)
 │   │   └── charting.py            # 라인/산점도/막대/히스토그램 → base64 PNG
 │   ├── backtest/              # engine, primitives(26개 프리미티브, QVM 포함), pipeline_exec, auditor, selection 등
+│   ├── allweather/            # 올웨더 포트폴리오: data(가격수집)/montecarlo(비중최적화)/
+│   │                          # backtest(walk-forward)/store/notify(텔레그램)/pipeline(오케스트레이션)
 │   ├── ingest/                # dart, krx, naver_prices, fnguide_metrics, us_*, macro_* 등
 │   ├── factors/fama_french.py # 파마프렌치 팩터 온디맨드 조회
 │   ├── wiki/store.py          # 질의 기록 로그
@@ -520,7 +591,7 @@ dart-text2sql-wiki/
 │   └── legacy/pipeline.py     # 예전 6노드 파이프라인 (이관 보관, cli.py가 사용)
 ├── web/
 │   ├── app.py                 # FastAPI (신규 계층형 구조 사용)
-│   └── static/                # chat.html(기본), index.html(/query), macro.html
+│   └── static/                # chat.html(기본), index.html(/query), macro.html, allweather.html
 └── scripts/                   # 데이터 수집/백필/launchd 진입점
 ```
 
