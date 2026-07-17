@@ -274,6 +274,42 @@ def test_compute_qvm_custom_category_weights_changes_score():
     )
 
 
+def test_compute_qvm_category_weights_as_dict_does_not_crash():
+    """실사용 재현 버그: LLM이 파이프라인 JSON의 category_weights를 리스트가 아니라
+    {"quality":1.0,"value":1.0,"momentum":1.0} 같은 딕셔너리로 생성했다. list(dict)는
+    값이 아니라 키(문자열)를 반환하므로, 그 문자열과 z-score를 곱하려다
+    "can't multiply sequence by non-int of type 'float'"로 크래시했다(실서버 재현).
+    딕셔너리를 quality/value/momentum 순서의 숫자 리스트로 정규화해 등가중과 동일한
+    결과가 나와야 한다."""
+    rows = _qvm_universe()
+    from_dict = compute_qvm_scores(
+        rows, category_weights={"quality": 1.0, "value": 1.0, "momentum": 1.0}
+    )
+    from_tuple = compute_qvm_scores(rows, category_weights=(1 / 3, 1 / 3, 1 / 3))
+    dict_map = {r["stock_code"]: r["qvm_score"] for r in from_dict}
+    tuple_map = {r["stock_code"]: r["qvm_score"] for r in from_tuple}
+    assert dict_map.keys() == tuple_map.keys()
+    for code in dict_map:
+        assert dict_map[code] == pytest.approx(tuple_map[code])
+
+
+def test_compute_qvm_category_weights_dict_uppercase_keys():
+    """대소문자 무관 — LLM이 "Quality"/"Value"/"Momentum"처럼 대문자로 시작해도 인식한다."""
+    rows = _qvm_universe()
+    out = compute_qvm_scores(
+        rows, category_weights={"Quality": 0.0, "Value": 0.0, "Momentum": 1.0}
+    )
+    for r in out:
+        assert r["qvm_score"] == pytest.approx(r["momentum_z"])
+
+
+def test_compute_qvm_category_weights_dict_missing_key_raises_clear_error():
+    """quality/value/momentum 키가 빠지면 크래시 대신 명확한 ValueError를 낸다."""
+    rows = _qvm_universe()
+    with pytest.raises(ValueError, match="quality/value/momentum"):
+        compute_qvm_scores(rows, category_weights={"quality": 1.0, "value": 1.0})
+
+
 def test_compute_qvm_sector_fallback_in_full_pipeline():
     rows = _qvm_universe()
     # 소수 섹터(금융 2종목) 추가 → 섹터 z-score가 전체 유니버스 폴백으로 계산돼도 점수 산출

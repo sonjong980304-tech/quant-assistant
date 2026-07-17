@@ -60,7 +60,10 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
      이때 true가 됩니다(실측이면 false, roc 자체가 null이면 null). "삼성전자 ROC 알려줘"
      류 질문에 답할 때 이 값이 true면 반드시 "감가상각비 데이터가 없어 근사치"라고
      답변에 명시하세요 — 실측치처럼 단정하면 안 됩니다.
-   asof는 'YYYY-MM-DD' 구체 날짜(오늘={today}). conn은 실행기가 자동 주입하므로 쓰지 마세요.
+   asof는 'YYYY-MM-DD' 구체 날짜(오늘={today}). 질문에 "{{YYYY-MM-DD}}"나 "(예: ...)"처럼
+   채워지지 않은 자리표시자(placeholder)가 그대로 적혀 있어도 그 문자열을 절대 그대로
+   복사해 넣지 마세요 — 반드시 위에 안내한 오늘 날짜({today})를 실제 값으로 쓰세요.
+   conn은 실행기가 자동 주입하므로 쓰지 마세요.
    · markets(선택, 예: ["KOSPI"]) : 시장 필터. "코스피 전종목"/"코스닥 전종목"처럼 특정
      시장으로 한정하는 질문은 이 단계에서 markets로 걸러야 합니다. **run_backtest의 markets
      파라미터와 이름·의미가 동일하지만 별개 함수의 파라미터입니다 — get_cross_section에는
@@ -195,8 +198,14 @@ _PIPELINE_PROMPT = """당신은 SQL로 표현 불가능한 통계/퀀트 분석 
     내부 순서: 가치역수(E/P·B/P·S/P) → 1%/99% winsorize → 섹터 z-score(<5표본 전체폴백)
     → 카테고리 합성(Quality=roe/gp_a/cfo_ratio, Value=E/P·B/P·S/P, Momentum=12-1) → 결측필터
     (raw 7개 중 3개 이상 결측 제외) → 2차 z-score → 최종점수(등가중). 파라미터는 모두 선택이며
-    기본값이 사용자 확정값입니다(category_weights로 Q/V/M 가중치 변경 가능). 결과 rows를
-    combine(criteria=[{{"key":"qvm_score","direction":"high"}}], n=원하는수)으로 넘겨 상위 종목을 뽑습니다.
+    기본값이 사용자 확정값(1%/99% winsorize, 섹터<5표본 폴백, 등가중 등)과 이미 정확히
+    일치합니다 — 질문이 표준 QVM 명세를 그대로 서술하고 있을 뿐 특별히 다른 값을 요구하지
+    않으면 파라미터를 생략하고 기본값을 그대로 쓰세요(질문 문장에 나온 숫자를 일일이 다시
+    옮겨 적지 마세요). category_weights를 지정할 때는 반드시 [퀄리티가중치, 밸류가중치,
+    모멘텀가중치] 순서의 숫자 배열이어야 합니다(예: [0.33, 0.33, 0.34]) — 절대
+    {{"quality":..,"value":..,"momentum":..}} 같은 객체/딕셔너리로 쓰지 마세요(오류가 납니다).
+    결과 rows를 combine(criteria=[{{"key":"qvm_score","direction":"high"}}], n=원하는수)으로
+    넘겨 상위 종목을 뽑습니다.
 21. run_qvm_backtest(start_year, end_year, n, rebalance, markets, quality_fields,
     value_source_fields, category_weights, with_benchmark) : QVM 전략으로 리밸런싱 백테스트를
     실행합니다(19·20을 매 리밸런싱 시점에 적용해 qvm_score 상위 n종목을 동일가중 보유). "QVM/
@@ -367,6 +376,26 @@ def validate_pipeline_steps(steps: list[dict]) -> list[str]:
     return errors
 
 
+def _infer_requested_count(steps: list[dict]) -> int | None:
+    """파이프라인 steps에서 최종 선정 개수(n)를 추정한다.
+
+    검증/종합결론 LLM 프롬프트가 긴 결과 리스트를 앞부분 5개로 축약할 때
+    (supervisor._truncate_for_prompt), 도메인 결과 dict에 top_n이 있으면 그 개수까지는
+    자르지 않는다 — kr/us 스크리닝은 이미 top_n을 담아 이 혜택을 받지만, backtest 도메인은
+    담지 않아 "QVM 상위 20종목" 같은 요청도 5개로 잘려 검증 LLM이 "일부만 있다"고
+    오판하는 사례가 실서버에서 재현됐다. combine 등 선정형 프리미티브의 n 파라미터를
+    스캔해 재사용한다(여러 단계에 n이 있으면 파이프라인상 더 뒤(최종 선정에 가까운) 값을
+    우선). 못 찾으면 None(기존 head=5 그대로, 동작 불변)."""
+    found: int | None = None
+    for step in steps or []:
+        if not isinstance(step, dict):
+            continue
+        params = step.get("params")
+        if isinstance(params, dict) and isinstance(params.get("n"), int):
+            found = params["n"]
+    return found
+
+
 def answer_backtest_question(
     question: str,
     steps: list[dict],
@@ -462,4 +491,9 @@ def answer_backtest_question(
         steps, conn, question, run_pipeline_fn, llm_fn=llm_fn, market=market, **audit_kwargs
     )
 
-    return {**audit, "data": data}
+    result_payload = {**audit, "data": data}
+    if isinstance(audit.get("result"), list):
+        requested_n = _infer_requested_count(steps)
+        if requested_n is not None:
+            result_payload["top_n"] = requested_n
+    return result_payload

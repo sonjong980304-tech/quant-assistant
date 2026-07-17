@@ -1132,6 +1132,28 @@ def _universe_zscore(rows: list[dict], in_field: str, out_field: str) -> list[di
     return out
 
 
+def _normalize_category_weights(category_weights) -> list[float]:
+    """category_weights를 [quality, value, momentum] 순서의 숫자 리스트로 정규화한다.
+
+    LLM이 파이프라인 JSON을 생성할 때 리스트 대신 {"quality":..,"value":..,"momentum":..}
+    같은 딕셔너리로 주는 사례가 실서버에서 재현됐다 — list(dict)는 값이 아니라 키를
+    반환하므로 그 문자열과 z-score를 곱하려다 "can't multiply sequence by non-int of
+    type 'float'"로 크래시했다. 리스트/튜플은 그대로 통과시키고, 딕셔너리는 quality/
+    value/momentum 키(대소문자 무관)로 순서를 맞춰 추출한다. 필요한 키가 없으면 계산을
+    계속 진행하는 대신 원인을 바로 알 수 있는 ValueError로 즉시 실패시킨다.
+    """
+    if isinstance(category_weights, dict):
+        lowered = {str(k).lower(): v for k, v in category_weights.items()}
+        missing = [k for k in ("quality", "value", "momentum") if k not in lowered]
+        if missing:
+            raise ValueError(
+                "category_weights 딕셔너리에는 quality/value/momentum 키가 모두 "
+                f"있어야 합니다(누락: {missing}): {category_weights}"
+            )
+        return [float(lowered["quality"]), float(lowered["value"]), float(lowered["momentum"])]
+    return [float(w) for w in category_weights]
+
+
 def compute_qvm_scores(
     rows: list[dict],
     quality_fields=("roe", "gp_a", "cfo_ratio"),
@@ -1196,7 +1218,7 @@ def compute_qvm_scores(
     # ⑦ 최종 점수 = 카테고리 z-score 가중평균(결측 카테고리 제외 재정규화)
     rows = composite_score(
         rows, ["quality_z", "value_z", "momentum_z"], "qvm_score",
-        weights=list(category_weights),
+        weights=_normalize_category_weights(category_weights),
     )
     return rows
 

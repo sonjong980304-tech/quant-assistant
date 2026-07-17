@@ -580,3 +580,42 @@ def test_answer_backtest_question_still_runs_valid_pipeline_after_validation_add
     )
     assert out["blocked"] is False
     assert out["result"]["performance"]["cagr"] == 5.0
+
+
+def test_answer_backtest_question_surfaces_top_n_for_list_result_from_combine_n():
+    """실서버 재현: QVM 스크리닝처럼 combine의 n=20으로 20개를 뽑아도, backtest 도메인
+    결과에 top_n이 없어 검증/종합결론 LLM 프롬프트가 앞 5개로 잘라버리고(supervisor.
+    _truncate_for_prompt) "일부 종목만 있다"고 오판했다. steps의 마지막 n 파라미터를
+    top_n으로 함께 반환해 kr/us 스크리닝과 동일한 축약 예외를 받도록 한다."""
+    rows = [{"stock_code": f"S{i}", "qvm_score": float(i)} for i in range(20)]
+    out = answer_backtest_question(
+        "QVM 상위 20종목", [
+            {"op": "get_cross_section_qvm", "params": {"asof": "2026-07-15"}, "out": "xs"},
+            {"op": "compute_qvm_scores", "params": {"rows": {"$ref": "xs"}}, "out": "scored"},
+            {
+                "op": "combine",
+                "params": {"rows": {"$ref": "scored"}, "criteria": [], "n": 20},
+                "out": "picked",
+            },
+        ],
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: rows,
+    )
+    assert out["blocked"] is False
+    assert out["result"] == rows
+    assert out["top_n"] == 20
+
+
+def test_answer_backtest_question_no_top_n_key_when_steps_lack_n_param():
+    """회귀: n 파라미터가 없는 파이프라인(예: 상관관계 분석)은 top_n 키를 추가하지 않는다
+    (기존 동작 그대로 head=5 축약 — 새 필드 도입이 무관한 경로에 영향을 주지 않는지 확인)."""
+    out = answer_backtest_question(
+        "PBR과 GPA 상관관계", [
+            {"op": "get_cross_section", "params": {"asof": "2026-07-15"}, "out": "xs"},
+            {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+        ],
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: {"r": 0.5, "n": 100},
+    )
+    assert out["blocked"] is False
+    assert "top_n" not in out
