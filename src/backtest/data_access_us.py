@@ -3,9 +3,9 @@
 엔진(engine.run_backtest)에 넘길 콜백을 us_company/us_prices/us_financials(EAV)에서 구현한다.
 한국판 data_access.py와 시그니처를 맞추되, 미국 데이터 특성상 아래가 다르다:
 - look-ahead 방지: disclosed_date는 실제 공시일이 아니라 기말+45/90일 근사값(us_financials.py 참고).
-- 생존편향: 미국은 상장폐지 추적 데이터가 없다 → _is_alive_us는 bool이 아니라 문자열
-  "unverifiable"(검증불가)을 반환한다. KR의 _is_alive(True/False)와 반환 타입이 다르므로
-  호출부에서 "통과"로 오인하지 않게 명시적으로 구분한다.
+- 생존편향: FMP로 수집한 us_delisting(구간 기반) 테이블로 _is_alive_us가 KR의 _is_alive와
+  동일하게 bool(True/False)을 반환한다. 미국은 상장폐지된 티커가 재사용(재상장)되는 경우가
+  흔해(예: TWTR) 단순 날짜비교가 아니라 (상장일~상장폐지일) 구간으로 판정한다.
 - 시가총액: us_prices에 상장주식수가 없어 정밀 시총 계산 불가 → us_company.market_cap으로 근사한다.
 - 벤치마크: 동일가중 유니버스 벤치마크는 KR의 build_benchmark_fn(콜백 기반)을 그대로 재사용하고,
   S&P500 실제지수(^GSPC)는 build_sp500_benchmark_fn으로 별도 계산한다.
@@ -14,9 +14,6 @@ from __future__ import annotations
 
 from ..ingest.metrics import _div
 from .data_access import _one_year_before  # return_12m 기준일 계산 재사용(KR과 동일 규약)
-
-# 미국은 상장폐지 추적 데이터가 없어 생존편향 검증이 원천적으로 불가능하다(버그가 아니라 알려진 한계).
-UNVERIFIABLE = "unverifiable"
 
 
 def effective_quarter_at_us(conn, code: str, asof: str) -> str | None:
@@ -79,13 +76,46 @@ def us_price_history_batch(conn, codes: list[str], asof: str, lookback_days: int
     return out
 
 
-def _is_alive_us(conn, code: str, asof: str) -> str:
-    """미국은 상장폐지 데이터가 없어 생존 여부를 검증할 수 없다 → 항상 "unverifiable".
+def _is_alive_us(conn, code: str, asof: str) -> bool:
+    """asof 시점에 이 티커가 살아있었는지(상장 상태)를 us_delisting 구간으로 판정한다(KR _is_alive 대칭).
 
-    KR의 _is_alive는 bool(True/False)을 돌려주지만 이 함수는 문자열을 돌려준다 —
-    "검증불가"를 "통과(True)"와 혼동하지 않게 하기 위한 의도적 타입 차이다.
+    KR _is_alive(단순 delisting_date>asof)와 동일 시그니처(bool)지만, 미국은 상장폐지된 티커가
+    재사용(재상장)되는 경우가 흔해(예: TWTR) 구간 기반으로 판정한다 — us_delisting은 한 티커에
+    여러 (상장일~상장폐지일) 구간을 가질 수 있다(db.py 참고).
+
+    판정: 어떤 상장폐지 구간의 delisting_date<=asof(그 시점 이미 폐지됨)이고, 그 폐지일 이후
+    asof까지 재상장(다른 구간의 listing_date)이 없었으면 죽은 것(False)으로 본다. 폐지 후 asof
+    이전에 재상장됐다면(티커 재사용) 그 시점엔 다시 살아있다 → True(재상장 이후 오탐 방지, AC15).
+    상장폐지 이력이 아예 없으면 살아있다(KR과 동일한 "모르면 살아있음" 폴백). 상장폐지일 당일은
+    KR과 동일하게 죽은 것으로 본다(KR: delisting_date>asof → 당일 False).
+
+    현실의 티커 재사용 대다수는 "옛 회사 상폐 + 새 회사가 지금 활성"이라 us_delisting에는 옛
+    상폐 구간 1개만 있고 재상장 구간이 없다(FMP 상폐목록엔 아직 살아있는 새 회사가 안 담김).
+    이 경우 FMP 활성 종목 목록(AC2)에 그 티커가 있으면 ingest 단계에서 delisting_date=''(빈값)
+    '현재 활성 마커' 행을 남긴다 → 아래에서 active_marker로 감지해, 재사용 티커는 상폐 이후
+    구간을 하드차단하지 않는다(재상장 날짜는 활성목록에 없어 정확한 경계를 못 놓으므로, 상폐
+    이후를 통과시키고 실제 거래여부는 상위의 주가존재 필터에 위임 — 생존편향 방향으로도 안전:
+    갱신 스냅샷 시점에 활성인 티커만 마킹된다). AC15의 "재상장 이후 오탐 방지"를 실데이터
+    모양에서 충족시키는 핵심 경로다.
     """
-    return UNVERIFIABLE
+    rows = conn.execute(
+        "SELECT listing_date, delisting_date FROM us_delisting WHERE stock_code=?",
+        (code,),
+    ).fetchall()
+    if not rows:
+        return True
+    # delisting_date가 빈값인 행 = '현재 활성 마커'(ingest가 재사용 티커에 남김). 이 티커는
+    # 지금 살아있는 재사용 티커이므로 상폐 이후 시점을 하드차단하지 않는다(가격필터에 위임).
+    active_marker = any(not r["delisting_date"] for r in rows)
+    # listing_date=''(상장일 미상/마커 센티널)은 재상장 근거로 쓰지 않는다(빈값 제외).
+    listings = [r["listing_date"] for r in rows if r["listing_date"]]
+    for r in rows:
+        d = r["delisting_date"]
+        if d and d <= asof:
+            relisted = any(d < L <= asof for L in listings)
+            if not relisted and not active_marker:
+                return False
+    return True
 
 
 def _us_item(conn, code: str, as_of_date: str, statement_type: str, item_key: str):
@@ -208,6 +238,13 @@ def metrics_at_us(conn, asof: str) -> list[dict]:
     out = []
     for c in companies:
         code = c["stock_code"]
+        # 생존편향 사전필터(KR metrics_at의 _is_alive와 대칭): asof 시점 이미 상장폐지된
+        # 종목은 선정 후보에서 제외한다(us_delisting 구간 기반). 티커 재사용(재상장/현재 활성)은
+        # _is_alive_us가 통과시켜 사전필터에서 제외되지 않는다(AC15). 주가존재 필터(아래 `if not
+        # close`)만으로도 옛 상폐 종목 대부분이 걸리지만, 상폐 티커의 과거 주가가 데이터에 남아
+        # 있는 경우 등을 명시적 판정으로 정확히 제외한다(스펙 AC6/AC12).
+        if not _is_alive_us(conn, code, asof):
+            continue
         q = effective_quarter_at_us(conn, code, asof)
         if not q:
             continue

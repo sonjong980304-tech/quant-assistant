@@ -3,7 +3,7 @@
 한국판 data_access.py의 effective_quarter_at/_price_at/_is_alive/metrics_at/
 build_callbacks 구조를 미국(us_company/us_prices/us_financials EAV)판으로 옮긴 것을 검증한다.
 - look-ahead 방지: disclosed_date<=asof인 최신 quarterly만 사용.
-- 생존편향: 미국은 상장폐지 데이터가 없어 항상 "unverifiable"(검증불가).
+- 생존편향: us_delisting(FMP, 구간 기반)으로 _is_alive_us가 bool을 반환(티커 재사용 오탐 방지).
 - S&P500 벤치마크: yfinance ^GSPC 히스토리를 DI로 주입해 네트워크 없이 검증.
 DB 접근이 필요한 검사는 임시 SQLite에 시딩해 사용자 DB와 완전 격리한다.
 """
@@ -103,12 +103,128 @@ def test_price_at_us_none_when_no_price_before_asof(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# _is_alive_us — 미국은 상폐 데이터 없음 → 항상 검증불가
+# _is_alive_us — us_delisting 구간 기반 bool 판정(KR _is_alive와 동일 시그니처, AC4/AC15)
 # --------------------------------------------------------------------------
-def test_is_alive_us_always_unverifiable(tmp_path):
+def _seed_us_delisting(conn, code: str, episodes: list[tuple[str, str]]) -> None:
+    """episodes = [(listing_date, delisting_date), ...] 을 us_delisting에 시드한다."""
+    for listing, delisting in episodes:
+        conn.execute(
+            "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+            "VALUES (?,?,?,?,?)", (code, code, "NYSE", listing, delisting))
+    conn.commit()
+
+
+def test_is_alive_us_returns_bool_not_string(tmp_path):
+    # AC4: KR _is_alive와 동일하게 bool(True/False)을 반환한다(더 이상 "unverifiable" 문자열 아님).
     conn = _seed_us_db(tmp_path)
-    # KR의 bool(True/False)과 달리 문자열 "unverifiable"을 돌려준다(검증불가를 명확히 구분).
-    assert dau._is_alive_us(conn, "AAPL", "2025-03-01") == "unverifiable"
+    result = dau._is_alive_us(conn, "AAPL", "2025-03-01")
+    assert result is True  # 상폐 이력 없음 → 살아있음
+    assert isinstance(result, bool)
+
+
+def test_is_alive_us_true_when_no_delisting_row(tmp_path):
+    conn = _seed_us_db(tmp_path)
+    assert dau._is_alive_us(conn, "AAPL", "2010-01-01") is True
+
+
+def test_is_alive_us_true_before_delisting(tmp_path):
+    conn = _seed_us_db(tmp_path)
+    _seed_us_delisting(conn, "DEAD", [("2013-11-07", "2022-10-27")])
+    assert dau._is_alive_us(conn, "DEAD", "2018-01-01") is True
+
+
+def test_is_alive_us_false_on_or_after_delisting(tmp_path):
+    conn = _seed_us_db(tmp_path)
+    _seed_us_delisting(conn, "DEAD", [("2013-11-07", "2022-10-27")])
+    assert dau._is_alive_us(conn, "DEAD", "2023-01-01") is False
+    # 상장폐지일 당일도 KR과 동일하게 죽은 것으로 본다(KR _is_alive: delisting_date>asof).
+    assert dau._is_alive_us(conn, "DEAD", "2022-10-27") is False
+
+
+def test_is_alive_us_true_after_relisting_ticker_reuse(tmp_path):
+    # AC15: 티커 재사용(TWTR류). 구간A(2013~2020) 상폐 후 구간B(2023~2025) 재상장.
+    # 구간B 안(2024)의 조회는 앞선 상폐(2020)에도 불구하고 오탐 없이 True여야 한다.
+    conn = _seed_us_db(tmp_path)
+    _seed_us_delisting(conn, "TWTR", [("2013-01-01", "2020-01-01"), ("2023-01-01", "2025-01-01")])
+    assert dau._is_alive_us(conn, "TWTR", "2024-01-01") is True
+
+
+def test_is_alive_us_false_in_gap_between_delisting_and_relisting(tmp_path):
+    # AC15 대칭: 구간A 상폐(2020) 후 재상장(2023) 전 공백기(2021)는 죽은 상태여야 한다.
+    conn = _seed_us_db(tmp_path)
+    _seed_us_delisting(conn, "TWTR", [("2013-01-01", "2020-01-01"), ("2023-01-01", "2025-01-01")])
+    assert dau._is_alive_us(conn, "TWTR", "2021-06-01") is False
+    # 재상장 구간 자체도 상폐(2025) 뒤(2026)에는 다시 죽는다.
+    assert dau._is_alive_us(conn, "TWTR", "2026-01-01") is False
+
+
+def test_is_alive_us_true_for_reused_active_single_episode(tmp_path):
+    # critic 실데이터 모양(AC15 핵심): 옛 상폐 구간 1개 + '현재 활성 마커'(delisting_date='').
+    # 상폐(2022) 이후 시점은 활성 마커 덕에 오탐 없이 살아있음으로 판정돼야 한다.
+    conn = _seed_us_db(tmp_path)
+    _seed_us_delisting(conn, "TWTR", [("2013-11-07", "2022-10-27"), ("", "")])  # 2번째=활성 마커
+    assert dau._is_alive_us(conn, "TWTR", "2024-01-01") is True
+    assert dau._is_alive_us(conn, "TWTR", "2018-01-01") is True
+
+
+def _seed_extra_company(conn, code: str, close: float = 150.0) -> None:
+    """metrics_at_us에 잡히도록 code에 최소 재무(유효분기)+주가를 시드한다(상폐 필터 검증용)."""
+    conn.execute(
+        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, updated_at) "
+        "VALUES (?,?,?,?,?,?)", (code, code, "NYSE", "Tech", 1000.0, "2025-03-01"))
+    conn.execute(
+        "INSERT INTO us_financials(stock_code, as_of_date, period_type, statement_type, "
+        "item_key, item_value, disclosed_date, source) VALUES (?,?,?,?,?,?,?,?)",
+        (code, "2024-12-31", "quarterly", "income_stmt", "Net Income", 10.0, "2025-02-14", "yfinance"))
+    conn.execute(
+        "INSERT INTO us_prices(stock_code, date, open, high, low, close, volume) "
+        "VALUES (?,?,?,?,?,?,?)", (code, "2025-03-01", close - 2, close + 2, close - 3, close, 1000.0))
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# metrics_at_us — 사전필터: 상장폐지 종목은 선정 후보에서 제외(AC6/AC12)
+# --------------------------------------------------------------------------
+def test_metrics_at_us_excludes_delisted_ticker(tmp_path):
+    # 상폐된 GHOST를 주가·재무가 있는 가짜 종목으로 주입해도, us_delisting 구간에 걸리면
+    # metrics_at_us 결과에서 실제로 빠져야 한다(사전필터). AAPL은 그대로 남는다.
+    conn = _seed_us_db(tmp_path)
+    _seed_extra_company(conn, "GHOST")
+    conn.execute(
+        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+        "VALUES (?,?,?,?,?)", ("GHOST", "유령", "NYSE", "2010-01-01", "2020-01-01"))
+    conn.commit()
+    codes = {r["stock_code"] for r in dau.metrics_at_us(conn, "2025-03-01")}
+    assert "GHOST" not in codes   # 상폐 → 사전필터로 제외
+    assert "AAPL" in codes         # 생존 종목은 그대로
+
+
+def test_metrics_at_us_keeps_relisted_ticker(tmp_path):
+    # AC15/AC6 결합: 재상장 구간 안(2024) 시점의 재사용 티커는 사전필터에서 제외되지 않는다.
+    conn = _seed_us_db(tmp_path)
+    _seed_extra_company(conn, "REUSE")
+    for listing, delisting in [("2010-01-01", "2020-01-01"), ("2023-01-01", "2027-01-01")]:
+        conn.execute(
+            "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+            "VALUES (?,?,?,?,?)", ("REUSE", "재사용", "NYSE", listing, delisting))
+    conn.commit()
+    codes = {r["stock_code"] for r in dau.metrics_at_us(conn, "2025-03-01")}
+    assert "REUSE" in codes  # 2025-03-01은 재상장 구간(2023~2027) 안 → 살아있음
+
+
+def test_metrics_at_us_keeps_reused_active_single_episode(tmp_path):
+    # critic 실데이터 모양: 옛 상폐 구간 1개 + 활성 마커인 재사용 종목은 사전필터에서 제외되지 않는다.
+    conn = _seed_us_db(tmp_path)
+    _seed_extra_company(conn, "TWTR")
+    conn.execute(
+        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+        "VALUES (?,?,?,?,?)", ("TWTR", "Twitter", "NYSE", "2013-11-07", "2022-10-27"))
+    conn.execute(
+        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+        "VALUES (?,?,?,?,?)", ("TWTR", None, None, "", ""))  # 현재 활성 마커
+    conn.commit()
+    codes = {r["stock_code"] for r in dau.metrics_at_us(conn, "2025-03-01")}
+    assert "TWTR" in codes  # 상폐(2022) 이후지만 활성 마커 → 후보 유지
 
 
 # --------------------------------------------------------------------------

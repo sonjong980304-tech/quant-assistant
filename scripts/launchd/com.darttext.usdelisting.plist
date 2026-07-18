@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.usdelisting</string>
+
+    <!-- FMP 미국 상장폐지 목록 주간 갱신. 매주 토요일 06:00 —
+         .omc/specs/brainstorming-us-delisting-survivorship.md AC8.
+         usfinancials(04:00)/usfinancialssec(05:00)와 겹치지 않게 1시간 뒤로 배치.
+         FMP delisted-companies는 증분 API가 없어 전체 목록을 받아 us_delisting에 멱등
+         upsert한다(신규 상장폐지만 실질 추가). 소량 페이지 호출이라 하루 250회 한도를
+         크게 남긴다. 초기 역사적 전체 백필은 사용자가 같은 스크립트를 최초 1회 수동 실행
+         (AC7)하고, 이 launchd는 이후 매주 갱신만 담당한다(AC8). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/run_us_delisting.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>6</integer>
+        <key>Hour</key><integer>6</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/us_delisting.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/us_delisting.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>
