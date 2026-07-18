@@ -1300,3 +1300,18 @@ def test_synthesize_prompt_includes_data_asof_field():
     prompt = captured["prompt"]
     assert "data_asof" in prompt
     assert "2026-07-11" in prompt
+
+
+def test_synthesize_conclusion_deterministic_summary_mentions_backtest_data_asof():
+    """실서버 재현: '코스피 전종목 pbr/gpa 상관관계' 같은 backtest 도메인 질문은 result가
+    집계값만 담아(시점 정보 없음) 사용자가 데이터 기준시점을 검증할 수 없었다. backtest도
+    kr/us와 동일하게 data_asof가 있으면 결정론 요약에 그대로 드러나야 한다."""
+    domain_results = {
+        "backtest": {
+            "blocked": False,
+            "result": {"r": 0.24, "n": 656},
+            "data_asof": {"price_date": "2026-07-15"},
+        }
+    }
+    conclusion = synthesize_conclusion("코스피 pbr gpa 상관관계", domain_results, llm_fn=None)
+    assert "2026-07-15" in conclusion

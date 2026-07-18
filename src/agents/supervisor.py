@@ -832,7 +832,11 @@ def _summarize_one(domain: str, result: dict) -> str:
     if domain == "backtest":
         if result.get("blocked"):
             return "하드차단됨(결과 폐기)"
-        return f"백테스트 결과={result.get('result')}"
+        bits = [f"백테스트 결과={result.get('result')}"]
+        asof = result.get("data_asof")
+        if isinstance(asof, dict) and asof.get("price_date"):
+            bits.append(f"기준시점: 가격 기준일 {asof['price_date']}")
+        return ", ".join(bits)
     return "데이터 있음"
 
 

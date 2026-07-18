@@ -700,6 +700,47 @@ def test_answer_backtest_question_no_qvm_summary_when_not_qvm_pipeline(tmp_path)
     assert "qvm_summary" not in out
 
 
+# ── data_asof — get_cross_section(_qvm)의 요청 asof를 결과에 노출한다. 실서버 재현:
+#    "코스피 전종목 pbr/gpa 상관관계 5분위 평균" 같은 correlation/quantile_bucket_means
+#    파이프라인은 집계값만 반환해(result에 시점 정보가 전혀 안 남음) 사용자가 "어느 시점
+#    데이터인지 검증할 수 없다"는 답변을 받았다. steps에서 asof를 정적으로 추출해
+#    kr/us 도메인과 동일한 키({"price_date": ...})로 노출하면, supervisor.py의 종합결론
+#    로직(도메인 무관하게 data_asof를 언급하도록 이미 배선돼 있음)이 그대로 재사용된다. ──
+def test_answer_backtest_question_attaches_data_asof_for_correlation_pipeline():
+    out = answer_backtest_question(
+        "PBR과 GPA 상관관계", [
+            {"op": "get_cross_section", "params": {"asof": "2026-07-15"}, "out": "xs"},
+            {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+        ],
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: {"r": 0.5, "n": 100},
+    )
+    assert out["data_asof"] == {"price_date": "2026-07-15"}
+
+
+def test_answer_backtest_question_attaches_data_asof_for_qvm_cross_section():
+    rows = _qvm_scored_rows(["화학", "화학", "금융"], excluded_count=2)
+    out = answer_backtest_question(
+        "퀄리티 밸류 모멘텀 상위 3종목", _QVM_STEPS_WITH_COMBINE,
+        conn=None,
+        run_pipeline_fn=lambda s, conn=None: rows,
+    )
+    assert out["data_asof"] == {"price_date": "2026-07-10"}
+
+
+def test_answer_backtest_question_no_data_asof_when_no_cross_section_step(tmp_path):
+    """회귀: get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은 data_asof 키
+    자체가 없어야 한다(top_n/qvm_summary와 동일한 하위호환 관례)."""
+    conn = _writable_conn(tmp_path)
+    out = answer_backtest_question(
+        "저PER 20개 종목 분기 리밸런싱 백테스트",
+        [{"op": "run_backtest", "params": {}, "out": "bt"}],
+        conn,
+        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
+    )
+    assert "data_asof" not in out
+
+
 # ── rebalance_summary — 다중 리밸런싱 백테스트면 시점별 보유종목+구간수익률을 결정론적
 #    텍스트로 결과 payload에 첨부한다(top_n/qvm_summary와 동일한 순수 추가 필드 관례).
 #    "반기별이면 반기마다 어떤 종목이 있었는지와 반기별 수익률도 같이 항상 답한다"는 요구를

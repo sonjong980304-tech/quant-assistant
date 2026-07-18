@@ -416,12 +416,14 @@ def _infer_requested_count(steps: list[dict]) -> int | None:
     return found
 
 
-def _infer_qvm_asof(steps: list[dict]) -> str | None:
-    """steps에서 get_cross_section_qvm(또는 get_cross_section)의 asof 파라미터를 찾는다.
+def _infer_cross_section_asof(steps: list[dict]) -> str | None:
+    """steps에서 get_cross_section(_qvm)의 asof 파라미터를 찾는다.
 
     compute_qvm_scores 자체는 asof를 모른다(그 앞 단계인 get_cross_section_qvm의
     파라미터로만 존재) — _infer_requested_count와 동일한 관례로 steps(JSON)를 실행 없이
-    정적으로 스캔한다. 여러 단계에 있으면 마지막(파이프라인상 더 뒤) 값을 우선한다."""
+    정적으로 스캔한다. 여러 단계에 있으면 마지막(파이프라인상 더 뒤) 값을 우선한다.
+    QVM 파이프라인에 한정되지 않고 correlation/quantile_bucket_means 등 get_cross_section을
+    쓰는 모든 파이프라인의 data_asof(아래 _build_data_asof)에도 재사용한다."""
     found: str | None = None
     for step in steps or []:
         if not isinstance(step, dict):
@@ -431,6 +433,21 @@ def _infer_qvm_asof(steps: list[dict]) -> str | None:
             if isinstance(params, dict) and isinstance(params.get("asof"), str):
                 found = params["asof"]
     return found
+
+
+def _build_data_asof(steps: list[dict]) -> dict | None:
+    """get_cross_section(_qvm)의 요청 asof를 kr/us 도메인과 동일한 data_asof 키로 노출한다.
+
+    실서버 재현: "코스피 전종목 pbr/gpa 상관관계 5분위 평균" 같은 correlation/
+    quantile_bucket_means 파이프라인은 집계값만 반환해 result에 시점 정보가 전혀 남지
+    않는다(_qvm_scored_rows처럼 종목별 quarter를 보존하지 않음) — steps에서 정적으로
+    추출한 요청 asof를 kr/us 도메인이 쓰는 {"price_date": ...} 형태로 그대로 노출하면,
+    supervisor.py의 종합결론 로직(도메인 무관하게 data_asof를 언급하도록 이미 배선됨)이
+    별도 분기 없이 재사용된다. get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은
+    None을 반환해 result_payload에 키 자체를 붙이지 않는다(top_n/qvm_summary와 동일한
+    하위호환 관례)."""
+    asof = _infer_cross_section_asof(steps)
+    return {"price_date": asof} if asof else None
 
 
 def _find_qvm_scored_rows(result) -> list[dict] | None:
@@ -479,7 +496,7 @@ def _build_qvm_summary(steps: list[dict], result) -> dict | None:
         sector = r.get("sector")
         sector_distribution[sector] = sector_distribution.get(sector, 0) + 1
     return {
-        "asof": _infer_qvm_asof(steps),
+        "asof": _infer_cross_section_asof(steps),
         "excluded_count": rows[0]["_qvm_excluded_count"],
         "sector_distribution": sector_distribution,
     }
@@ -581,6 +598,9 @@ def answer_backtest_question(
         steps에 compute_qvm_scores 단계가 있으면(QVM 스크리닝) qvm_summary={"asof":
         str|None, "excluded_count": int, "sector_distribution": {섹터명: 종목수}}도 더한다
         (QVM 파이프라인이 아니면 이 키 자체가 없다 — 하위호환).
+        steps에 get_cross_section(_qvm) 단계가 있으면 data_asof={"price_date": str}도
+        더한다(kr/us 도메인과 동일 키 — supervisor.py 종합결론이 도메인 무관하게 노출).
+        get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은 이 키가 없다.
     """
     run_pipeline_fn = run_pipeline_fn or run_pipeline
     run_audit_fn = run_audit_fn or run_backtest_with_audit
@@ -641,6 +661,9 @@ def answer_backtest_question(
     qvm_summary = _build_qvm_summary(steps, audit.get("result"))
     if qvm_summary is not None:
         result_payload["qvm_summary"] = qvm_summary
+    data_asof = _build_data_asof(steps)
+    if data_asof is not None:
+        result_payload["data_asof"] = data_asof
     rebalance_summary = _build_rebalance_summary(audit.get("result"))
     if rebalance_summary is not None:
         result_payload["rebalance_summary"] = rebalance_summary

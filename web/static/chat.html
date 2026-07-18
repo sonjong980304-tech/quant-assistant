@@ -202,6 +202,11 @@ function esc(s){
   return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// 근거 데이터 패널 숫자를 소수점 3자리로 통일 표시(값 자체는 그대로, 화면 표시만 반올림).
+function fmtNum(v){
+  return v.toLocaleString(undefined,{maximumFractionDigits:3});
+}
+
 async function loadModels(){
   const sel=document.getElementById('modelSel');
   try{
@@ -263,11 +268,12 @@ function renderAnswerBody(answer){
 }
 
 // 근거 데이터(domain_evidence) 재귀 렌더러 — index.html의 renderValue 패턴을 그대로 이식(가공 없이 원본 병기, AC4).
+// 단, 숫자는 fmtNum으로 소수점 3자리까지만 화면에 표시한다(원본 값 자체는 바뀌지 않음 — 표시 전용 반올림).
 function renderKV(v){
   if(v==null) return '<span class="muted">—</span>';
   if(Array.isArray(v)){
     if(!v.length) return '<span class="muted">[]</span>';
-    if(v.every(x=>x===null||typeof x!=='object')) return v.map(x=>esc(x)).join(', ');
+    if(v.every(x=>x===null||typeof x!=='object')) return v.map(x=>typeof x==='number'?fmtNum(x):esc(x)).join(', ');
     if(v.every(x=>x!==null&&typeof x==='object'&&!Array.isArray(x))){
       const cols=[...new Set(v.flatMap(o=>Object.keys(o)))];
       let h='<div class="table-scroll"><table><thead><tr>'+cols.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr></thead><tbody>';
@@ -287,7 +293,7 @@ function renderKV(v){
     return `<div class="table-scroll"><table class="kvt"><tbody>${entries.map(([k,val])=>
       `<tr><th>${esc(k)}</th><td>${renderKV(val)}</td></tr>`).join('')}</tbody></table></div>`;
   }
-  return esc(v);
+  return typeof v==='number'?fmtNum(v):esc(v);
 }
 
 function renderEvidenceCode(sql, code){
