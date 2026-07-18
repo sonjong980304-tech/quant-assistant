@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import calendar
 
-from ..data_quality import get_price_quality_excluded_codes
+from ..data_quality import get_price_quality_excluded_codes, is_equity_ratio_anomalous
 from ..ingest.metrics import (
     _div, _fin, _sum_ttm, _yoy,
     controlling_equity, avg_controlling_equity,
@@ -460,7 +460,7 @@ def metrics_at(conn, asof: str) -> list[dict]:
         ni_growth = _yoy(conn, code, q, "net_income", asof=asof)
         peg = (per / ni_growth) if (per is not None and ni_growth and ni_growth > 0) else None
 
-        out.append({
+        row = {
             "stock_code": code, "name": c["name"], "sector": c["sector"], "market": c["market"],
             "quarter": q, "close": close, "market_cap": cap,
             "per": per,
@@ -506,7 +506,18 @@ def metrics_at(conn, asof: str) -> list[dict]:
             "op_growth": _yoy(conn, code, q, "operating_profit", asof=asof),
             "ni_growth": ni_growth,
             "return_12m": return_12m,
-        })
+        }
+
+        # 물적분할(스핀오프) 시차 가드: 시총↓(시장이 즉시 반영)인데 자기자본은 분할 전(자회사
+        # 포함) 값 그대로라, 시총과 (분할 전) 재무제표를 결합하는 밸류에이션 배수가 오염된다
+        # (PBR 비정상적 저평가 오탐 등). 걸리면 그 배수만 결측 처리한다 — 가격만 쓰는 return_12m
+        # 과 순수 재무비율(roe/부채비율 등, 시총 미사용)은 건드리지 않는다. 다음 분기 재무 공시로
+        # 자기자본이 갱신되면 is_equity_ratio_anomalous 가 자연히 False 가 돼 자동 정상화된다
+        # (해제 로직 불필요). 판정 근거·임계값은 src/data_quality.is_equity_ratio_anomalous 참조.
+        if is_equity_ratio_anomalous(conn, code, asof):
+            for _k in ("per", "pbr", "psr", "pcr", "ev_ebitda", "peg", "earnings_yield"):
+                row[_k] = None
+        out.append(row)
     return out
 
 

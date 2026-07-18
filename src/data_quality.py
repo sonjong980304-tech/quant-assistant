@@ -50,6 +50,21 @@ JUMP_RATIO_LOW = 0.5
 _CACHE_KEY = "price_quality_excluded_codes"
 _CACHE_KEY_AT = "price_quality_excluded_at"
 
+# ── 물적분할(스핀오프) 시차 가드 임계값 ──────────────────────────────────────
+# 물적분할 직후엔 주가(=시총)가 시장에서 즉시 급락 반영되지만, 자기자본(재무제표)은 다음 분기
+# DART 공시가 나와야 갱신된다. 그 시차 구간엔 effective_quarter_at 이 '분할 전(자회사 포함) 큰
+# 자기자본'을 그대로 쓰므로 PBR = 시총 ÷ 자기자본 이 비정상적으로 낮게 계산돼 저평가 오탐이 난다.
+# 판정 지표는 시총/지배주주지분 비율(= 사실상 PBR)이고, 이 비율이 직전 유효분기(≈3개월 전) 대비
+# 얼마나 급변했는지를 본다. 임계값 2.0/0.5 는 위 가격이상치 가드(JUMP_RATIO_HIGH/LOW)와 동일한
+# '배율로 대칭' 감각을 그대로 가져왔다 — 물적분할된 모회사 시총은 흔히 30~50%+ 급락하므로 비율이
+# 0.5배(반토막) 이하로 떨어지면 그 시차 오탐을 잡아낸다(급등 방향 2.0배는 역합병 등 대칭 케이스).
+# 이 임계값은 '간이 방식'이라 genuine 한 ±50% 분기 급등락도 함께 걸릴 수 있으나, (1) 종목 전체가
+# 아니라 그 asof 의 밸류에이션 배수만 결측이고 (2) 다음 분기 공시로 자연 정상화되며 (3) 반토막 난
+# 종목의 PBR 은 어차피 신뢰도가 낮으므로 허용 가능한 트레이드오프다(과도한 정교화를 피한다).
+SPINOFF_RATIO_HIGH = 2.0
+SPINOFF_RATIO_LOW = 0.5
+SPINOFF_LOOKBACK_MONTHS = 3  # 직전 유효분기 ≈ 3개월 전
+
 
 def detect_price_quality_anomalies(
     conn: sqlite3.Connection,
@@ -105,3 +120,54 @@ def get_price_quality_excluded_codes(
         # 연결(배치 갱신 스크립트 등)이 호출될 때 캐시가 채워진다.
         pass
     return codes
+
+
+def is_equity_ratio_anomalous(
+    conn: sqlite3.Connection,
+    stock_code: str,
+    asof: str,
+    *,
+    ratio_high: float = SPINOFF_RATIO_HIGH,
+    ratio_low: float = SPINOFF_RATIO_LOW,
+    lookback_months: int = SPINOFF_LOOKBACK_MONTHS,
+) -> bool:
+    """물적분할(스핀오프) 시차로 PBR/PSR 류가 오염됐는지 판정하는 '일시적' 가드.
+
+    블랭킷 가격이상치 가드(detect_price_quality_anomalies, 종목 전체 영구 제외)와 성격이
+    다르다. 물적분할 오탐은 일시적이다 — 다음 분기 재무제표가 공시되면 자기자본이 갱신돼
+    자연 정상화된다. 그래서 이 함수는 종목을 빼는 게 아니라, 특정 (종목, asof) 조합에서만
+    True 를 돌려주고(호출부가 그 시점의 밸류에이션 배수만 결측 처리하게 함) 별도 해제 로직 없이
+    다음 분기엔 자연히 False 로 돌아온다.
+
+    판정: 시총 ÷ 지배주주지분 비율(≈PBR)을 asof 와 lookback_months 전(≈직전 유효분기) 두
+    시점에서 각각 구해, 그 변화율이 ratio_low 이하(급락)이거나 ratio_high 이상(급등)이면 True.
+    각 시점의 유효분기·자기자본·시총은 metrics_at 과 동일한 look-ahead 규약(effective_quarter_at
+    /controlling_equity(asof=)/date<=asof 최근 종가)으로 조회하므로 미래참조가 없다.
+
+    판정에 필요한 값(현재/기준 시점의 유효분기·자기자본·시총) 중 하나라도 없으면 판단하지 않고
+    안전하게 False 를 반환한다(결측 처리하지 않음 — 근거가 있을 때만 가린다).
+
+    backtest.data_access ↔ data_quality 의 모듈 순환참조를 피하려고 필요한 헬퍼는 함수 안에서
+    지연 import 한다(backtest.data_access 는 상단에서 이 모듈을 import 한다).
+    """
+    from .backtest.data_access import _months_before, _price_at, effective_quarter_at
+    from .ingest.metrics import controlling_equity
+
+    def _cap_equity_ratio(at: str) -> float | None:
+        q = effective_quarter_at(conn, stock_code, at)
+        if not q:
+            return None
+        equity = controlling_equity(conn, stock_code, q, asof=at)
+        _, cap = _price_at(conn, stock_code, at)
+        if not (equity and equity > 0 and cap and cap > 0):
+            return None
+        return cap / equity
+
+    ratio_now = _cap_equity_ratio(asof)
+    if ratio_now is None:
+        return False
+    ratio_ref = _cap_equity_ratio(_months_before(asof, lookback_months))
+    if not ratio_ref:  # None 또는 0 → 기준이 없어 판단 불가
+        return False
+    change = ratio_now / ratio_ref
+    return change >= ratio_high or change <= ratio_low
