@@ -31,6 +31,7 @@ from typing import Callable
 
 from ..llm import extract_json
 from .data_access import _is_alive, effective_quarter_at
+from .data_access_us import _is_alive_us  # US 생존편향 판정(us_delisting 구간 기반, KR과 대칭)
 from .pipeline_exec import MAX_TIMEOUT  # 새 상수 만들지 않고 기존 타임아웃 상한 재사용
 
 
@@ -42,23 +43,18 @@ def check_survivorship(conn, holdings: list[dict], is_alive_fn: Callable | None 
     """① 생존편향 하드차단: 보유종목 중 그 시점 기준 이미 상장폐지된 종목이 있으면 차단한다.
 
     각 리밸런싱 시점(holdings의 date=asof)에 보유한 종목이 그 시점에 실제로 살아있었는지를
-    delisting 테이블로 재검증한다. 정상 경로에서는 data_access._is_alive()가 이미 죽은 종목을
-    걸러내므로 사실상 항상 통과한다 — 이 함수는 그 가드가 회귀로 깨졌을 때를 잡는 **방어적
-    이중화 안전망**이다(스펙 §3.2 ①). 위반이 하나라도 있으면 blocked=True로 사유·증거(종목코드)를 반환.
+    상장폐지 테이블로 재검증한다. 정상 경로에서는 metrics_at/metrics_at_us의 _is_alive(_us)가
+    이미 죽은 종목을 걸러내므로 사실상 항상 통과한다 — 이 함수는 그 가드가 회귀로 깨졌을 때를
+    잡는 **방어적 이중화 안전망**이다(스펙 §3.2 ①). 위반이 하나라도 있으면 blocked=True로
+    사유·증거(종목코드)를 반환.
 
-    market="US"이면 상장폐지 추적 데이터(delisting 같은 테이블)가 아예 없어 생존편향 검증이
-    원천적으로 불가능하다 → 거짓 "통과"(blocked=False)로 오인하지 않도록 unverifiable=True를
-    붙여 "검증불가"를 별도 상태로 반환한다(하드차단도, 통과도 아님 — 알려진 한계).
-
-    is_alive_fn은 테스트 주입용(기본=data_access._is_alive) — SQL은 _is_alive의 바인딩 쿼리를 재사용한다.
+    market에 따라 기본 판정 함수가 다르다(둘 다 bool 반환이라 판정 루프는 동일):
+    KR=data_access._is_alive(delisting 테이블), US=data_access_us._is_alive_us(us_delisting
+    구간 기반 — 미국 티커 재사용/재상장을 정확히 처리, 재상장 이후 시점 오탐 방지).
+    is_alive_fn을 명시 주입하면 그것을 우선한다(테스트 주입용).
     """
-    if market == "US":
-        return {
-            "sin": "survivorship", "blocked": False, "unverifiable": True,
-            "reason": "미국 종목은 상장폐지 데이터가 없어 생존편향 검증 불가(데이터없음)",
-            "evidence": [],
-        }
-    is_alive_fn = is_alive_fn or _is_alive
+    if is_alive_fn is None:
+        is_alive_fn = _is_alive_us if market == "US" else _is_alive
     evidence = []
     for h in holdings or []:
         asof = h.get("date")
@@ -92,10 +88,20 @@ def check_lookahead(conn, holdings: list[dict], quarter_fn: Callable | None = No
             q = quarter_fn(conn, code, asof)
             if not q:
                 continue
+            # 그 분기가 asof 까지 실제로 공시됐는지 재검증한다. 정정공시가 있으면 financials 의
+            # disclosed_date 는 정정일(미래)로 바뀌므로, financials 만 보면 정정 전 asof 에서
+            # 정상 경로(effective_quarter_at=revision 기반)를 오탐(false-positive)한다. 정정이력을
+            # 보존하는 financials_revision 과 financials 를 UNION 해 "가장 이른 공시일"이 asof 보다
+            # 뒤일 때만(=그 분기를 asof 시점엔 어떤 버전으로도 알 수 없었을 때만) 차단한다.
             row = conn.execute(
-                "SELECT MAX(disclosed_date) FROM financials "
-                "WHERE stock_code=? AND quarter=? AND disclosed_date IS NOT NULL",
-                (code, q),
+                "SELECT MIN(d) FROM ("
+                "  SELECT MIN(disclosed_date) AS d FROM financials_revision "
+                "    WHERE stock_code=? AND quarter=? AND disclosed_date IS NOT NULL "
+                "  UNION ALL "
+                "  SELECT MIN(disclosed_date) AS d FROM financials "
+                "    WHERE stock_code=? AND quarter=? AND disclosed_date IS NOT NULL "
+                ")",
+                (code, q, code, q),
             ).fetchone()
             disclosed = row[0] if row else None
             if disclosed and asof and disclosed > asof:
@@ -143,6 +149,47 @@ _SOFT_SYSTEM = (
 )
 
 
+_PORTFOLIO_OPS = {"run_backtest", "run_qvm_backtest"}
+
+
+def _ops_used(steps: list[dict] | None) -> list[str]:
+    return [s.get("op") for s in (steps or []) if isinstance(s, dict) and s.get("op")]
+
+
+def _steps_context(steps: list[dict] | None) -> str:
+    """실제 파이프라인 연산 목록을 검사관 프롬프트에 넣을 문구로 만든다.
+
+    실서버 재현 버그: "코스피 전종목 pbr/gpa 상관관계 5분위" 같은 get_cross_section→
+    correlation/quantile_bucket_means 파이프라인(run_backtest 없음)은 result에 performance/
+    holdings가 전혀 없어, 4개 소프트경고 검사관이 아무 정보 없이 판단해야 했다. 특히
+    inspect_outlier의 "모르면 경고로 남겨라" 지시 때문에 사용자가 뭘 해도 이상치 경고가
+    100% 뜨는 구조적 결함이었다(remove_outliers/winsorize 프리미티브는 이미 정상 등록돼
+    실행 가능한 상태였음 — 검사 단계가 그걸 썼는지 확인할 방법이 없었을 뿐).
+    실제 steps를 보여줘 검사관이 추측 대신 사실에 근거해 판단하게 한다."""
+    ops = _ops_used(steps)
+    if not ops:
+        return "이 파이프라인이 실제로 사용한 연산 목록: (알 수 없음 — steps 정보가 전달되지 않음)"
+    return f"이 파이프라인이 실제로 사용한 연산 목록: {ops}"
+
+
+def _portfolio_scope_note(steps: list[dict] | None) -> str:
+    """포트폴리오 개념(기간 다양성/회전율)이 적용되지 않는 파이프라인이면 자동 통과시키는 지시.
+
+    run_backtest/run_qvm_backtest처럼 여러 리밸런싱 시점을 거치는 연산이 없다면(예: 특정
+    asof 한 시점의 횡단면(cross-section) 통계 분석), '백테스트 기간이 다양한 국면을
+    포함하는지'/'회전율이 과도한지' 같은 질문 자체가 성립하지 않는다 — 정보가 없다고
+    무조건 경고로 남기면(기존 동작) 순수 통계질문에 매번 오탐이 뜬다."""
+    ops = _ops_used(steps)
+    if ops and not (set(ops) & _PORTFOLIO_OPS):
+        return (
+            "위 연산 목록에 run_backtest/run_qvm_backtest가 없다 — 이는 여러 리밸런싱 시점을"
+            " 거치는 포트폴리오 백테스트가 아니라 특정 시점의 횡단면(cross-section) 통계"
+            " 분석이다. 이 경우 이 검사가 다루는 개념(기간의 다양성·국면 포함 여부/회전율)"
+            " 자체가 해당사항 없음이니 반드시 triggered=false로 판단하라."
+        )
+    return ""
+
+
 def _run_inspector(sin: str, prompt: str, llm_fn: Callable) -> dict:
     """공통 실행부: 프롬프트를 llm_fn에 넘겨 JSON 판정을 파싱한다.
 
@@ -158,20 +205,23 @@ def _run_inspector(sin: str, prompt: str, llm_fn: Callable) -> dict:
     }
 
 
-def inspect_storytelling(result: dict, llm_fn: Callable) -> dict:
+def inspect_storytelling(result: dict, llm_fn: Callable, steps: list[dict] | None = None) -> dict:
     """③ 스토리텔링·데이터의 역사: 백테스트 기간이 짧거나 단일 국면에만 성과가 몰렸는지."""
+    scope_note = _portfolio_scope_note(steps)
     prompt = (
         f"{_SOFT_SYSTEM}\n\n[검사: 스토리텔링·데이터의 역사]\n"
         "백테스트 기간이 충분히 길고 다양한 경제 국면(상승/하락/횡보)을 포함하는지, 특정 시기의"
         " 우연한 성과를 사후적으로 이야기로 포장한 흔적이 없는지 판단하라.\n"
-        f"성과: {result.get('performance')}\n"
+        f"{_steps_context(steps)}\n"
+        + (f"{scope_note}\n" if scope_note else "")
+        + f"성과: {result.get('performance')}\n"
         f"리밸런싱 시점 수: {len(result.get('holdings') or [])}\n"
         f"기간(dates): {result.get('dates')}"
     )
     return _run_inspector("storytelling", prompt, llm_fn)
 
 
-def inspect_snooping(result: dict, question: str, llm_fn: Callable) -> dict:
+def inspect_snooping(result: dict, question: str, llm_fn: Callable, steps: list[dict] | None = None) -> dict:
     """④ 데이터마이닝·스누핑: 사용자 원본 질문을 '사전 등록 가설'로 취급해 사후정당화 여부 판단(AC11)."""
     prompt = (
         f"{_SOFT_SYSTEM}\n\n[검사: 데이터마이닝·데이터스누핑]\n"
@@ -179,26 +229,30 @@ def inspect_snooping(result: dict, question: str, llm_fn: Callable) -> dict:
         " 정직하게 검증한 것인지, 아니면 좋은 성과가 나오도록 팩터/기간/종목수를 사후에 짜맞춘"
         " 데이터 스누핑의 흔적이 있는지 판단하라.\n"
         f"[사용자 원본 질문(사전등록 가설)]\n{question}\n\n"
+        f"{_steps_context(steps)}\n"
         f"성과: {result.get('performance')}\n"
         f"보유종목: {result.get('holdings')}"
     )
     return _run_inspector("snooping", prompt, llm_fn)
 
 
-def inspect_signal_decay(result: dict, llm_fn: Callable) -> dict:
+def inspect_signal_decay(result: dict, llm_fn: Callable, steps: list[dict] | None = None) -> dict:
     """⑤ 신호감소·회전율: 회전율이 과도해 거래비용 차감 후 성과가 신기루가 아닌지."""
     perf = result.get("performance") or {}
+    scope_note = _portfolio_scope_note(steps)
     prompt = (
         f"{_SOFT_SYSTEM}\n\n[검사: 신호의 감소와 회전율]\n"
         "팩터 신호가 빠르게 감소하거나 회전율이 과도해, 수수료·세금·슬리피지를 제한 뒤에도"
         " 성과가 유지되는지 판단하라. (engine은 회전율×거래비용을 이미 차감한다.)\n"
-        f"회전율(avg_turnover): {perf.get('avg_turnover')}\n"
+        f"{_steps_context(steps)}\n"
+        + (f"{scope_note}\n" if scope_note else "")
+        + f"회전율(avg_turnover): {perf.get('avg_turnover')}\n"
         f"성과: {perf}"
     )
     return _run_inspector("signal_decay", prompt, llm_fn)
 
 
-def inspect_outlier(result: dict, llm_fn: Callable) -> dict:
+def inspect_outlier(result: dict, llm_fn: Callable, steps: list[dict] | None = None) -> dict:
     """⑥ 이상치제어: 팩터 정규화·이상치 완화 방식이 이 결과의 성과를 왜곡하지 않았는지."""
     prompt = (
         f"{_SOFT_SYSTEM}\n\n[검사: 이상치 제어]\n"
@@ -206,7 +260,12 @@ def inspect_outlier(result: dict, llm_fn: Callable) -> dict:
         " 판단하라. 현재 파이프라인은 combine(method=)으로 zscore(값 자체를 표준화, 극단치에"
         " 가장 취약)/rank_sum(순위만 사용, 극단치 크기에 영향받지 않음)을 지원하고, 사전에"
         " winsorize(IQR 기준 상하단을 벗어난 값만 경계로 눌러 붙임)로 극단치를 먼저 완화할 수도"
-        " 있다. 이 결과가 어떤 조합을 썼는지 알 수 없다면 그 불확실성 자체를 경고로 남겨라.\n"
+        " 있다.\n"
+        f"{_steps_context(steps)}\n"
+        "위 연산 목록에 winsorize/winsorize_pct/remove_outliers가 있으면 이상치를 실제로"
+        " 완화한 것이고, combine이 있으면 그 method를 확인해 어떤 조합을 썼는지 판단하라 —"
+        " 목록에 없는 연산은 쓰이지 않은 것으로 간주하고 추측하지 마라. steps 정보 자체가"
+        " 전혀 없을 때만(위 목록이 '알 수 없음') 그 불확실성을 경고로 남겨라.\n"
         f"성과: {result.get('performance')}\n"
         f"보유종목: {result.get('holdings')}"
     )
@@ -222,18 +281,21 @@ def run_soft_inspectors(
     llm_fn: Callable,
     pool_factory: Callable | None = None,
     timeout_s: float = MAX_TIMEOUT,
+    steps: list[dict] | None = None,
 ) -> list[dict]:
     """소프트경고 검사관 4종을 ThreadPoolExecutor(max_workers=4)로 동시 병렬 실행한다.
 
     pipeline_exec.py의 기존 ThreadPoolExecutor 관례를 확장하고, 기존 MAX_TIMEOUT 상한을 재사용한다
     (새 상수 금지 — 스펙 §3.3). 4개가 모두 끝날 때까지 기다린 뒤 결과 리스트를 반환한다(동기 병렬).
-    pool_factory는 테스트 주입용(submit 호출 횟수 spy 등).
+    pool_factory는 테스트 주입용(submit 호출 횟수 spy 등). steps(실제 파이프라인)를 넘기면
+    4개 검사관 전부에 그대로 전달돼, result에 performance/holdings가 없는 순수 통계 파이프라인
+    (correlation/quantile_bucket_means 등)도 추측이 아니라 실제 연산을 보고 판단한다.
     """
     tasks = [
-        lambda: inspect_storytelling(result, llm_fn),
-        lambda: inspect_snooping(result, question, llm_fn),
-        lambda: inspect_signal_decay(result, llm_fn),
-        lambda: inspect_outlier(result, llm_fn),
+        lambda: inspect_storytelling(result, llm_fn, steps=steps),
+        lambda: inspect_snooping(result, question, llm_fn, steps=steps),
+        lambda: inspect_signal_decay(result, llm_fn, steps=steps),
+        lambda: inspect_outlier(result, llm_fn, steps=steps),
     ]
     fallback_sins = ["storytelling", "snooping", "signal_decay", "outlier"]
     pool_factory = pool_factory or (lambda: ThreadPoolExecutor(max_workers=4))
@@ -288,16 +350,17 @@ def pre_audit(steps: list[dict], conn, run_pipeline_fn: Callable) -> dict | None
 
 
 def post_audit(result: dict, conn, question: str, llm_fn: Callable | None = None,
-               market: str = "KR") -> dict:
+               market: str = "KR", steps: list[dict] | None = None) -> dict:
     """사후검사(run_backtest 실행 직후): 하드차단 2종 + 소프트경고 4종.
 
     하드차단(생존편향/미래참조)이 하나라도 발동하면 blocked=True로 소프트검사는 생략한다
     (하드차단 시 정상 결과를 폐기하므로 소프트경고는 무의미). llm_fn이 없으면(LLM 미가용)
     소프트검사도 생략한다.
 
-    market="US"이면 생존편향이 "검증불가"(unverifiable)로 나오는데, 이는 하드차단(정상 결과
-    폐기)도 통과도 아니므로 소프트경고 형태로 결과에 첨부해 사용자에게 명확히 알린다 —
-    LLM 미가용이어도 이 검증불가 경고만은 항상 붙는다(데이터없음은 알려진 한계).
+    market="US"도 이제 KR과 동일하게 생존편향을 실제 하드차단한다(us_delisting 구간 기반
+    _is_alive_us). 과거의 "검증불가(unverifiable)" 별도 상태는 제거됐다 — 상장폐지 이력이
+    없으면 KR과 동일하게 조용히 통과한다. steps(실제 파이프라인)를 넘기면 run_soft_inspectors에
+    그대로 전달해, result에 performance/holdings가 없는 순수 통계 파이프라인도 정확히 판단하게 한다.
     반환: {"blocked": bool, "hard": [verdict...], "soft": [verdict...]}
     """
     holdings = result.get("holdings") if isinstance(result, dict) else None
@@ -308,12 +371,7 @@ def post_audit(result: dict, conn, question: str, llm_fn: Callable | None = None
     blocked = any(v["blocked"] for v in hard)
     soft: list[dict] = []
     if not blocked and llm_fn is not None:
-        soft = run_soft_inspectors(result, question, llm_fn)
-    # 검증불가(예: US 생존편향)를 소프트경고로 노출 — 하드차단 시에는 결과 자체가 폐기되므로 생략.
-    if not blocked:
-        for v in hard:
-            if v.get("unverifiable"):
-                soft.append({"sin": v["sin"], "triggered": True, "message": v["reason"]})
+        soft = run_soft_inspectors(result, question, llm_fn, steps=steps)
     return {"blocked": blocked, "hard": hard, "soft": soft}
 
 

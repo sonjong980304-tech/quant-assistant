@@ -98,9 +98,27 @@ def test_soft_inspectors_called_when_hard_checks_pass(tmp_path, monkeypatch):
                                   llm_fn=_json_llm(True, "경고"), market="KR")
 
     assert calls["n"] == 1
+
+
+def test_soft_inspectors_receive_actual_pipeline_steps(tmp_path):
+    """실서버 재현: correlation/quantile_bucket_means 같은 순수 통계 파이프라인은
+    result에 performance/holdings가 없어 소프트경고 검사관이 아무 정보 없이 판단해야
+    했다(항상 경고). run_backtest_with_audit이 steps를 post_audit까지 실제로 전달해
+    검사관이 실제 파이프라인을 보고 판단하는지 확인한다."""
+    conn = _seeded_conn(tmp_path)
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"},
+        {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+    ]
+    seen = []
+    run_pipeline_fn = lambda s, conn=None: {"r": 0.5, "n": 100}
+    out = run_backtest_with_audit(
+        steps, conn, "질문", run_pipeline_fn,
+        llm_fn=lambda p: (seen.append(p) or "{}"), market="KR",
+    )
     assert out["blocked"] is False
-    assert len(out["warnings"]) == 4
-    assert all(w["triggered"] for w in out["warnings"])
+    assert len(seen) == 4
+    assert all("correlation" in p for p in seen)
 
 
 # --------------------------------------------------------------------------
@@ -266,19 +284,26 @@ def test_without_on_progress_is_unaffected(tmp_path):
     assert len(out["warnings"]) == 4
 
 
-def test_us_market_survivorship_unverifiable_warning_propagates(tmp_path):
+def test_us_market_survivorship_hard_block_propagates(tmp_path):
+    # AC5: market="US"가 배선을 타고 흘러 실제 생존편향 하드차단까지 도달하는지 확인.
+    # (과거엔 "검증불가" 소프트경고였으나, 이제 us_delisting 기반 실제 하드차단으로 전환됨.)
     conn = _seeded_conn(tmp_path)
+    conn.execute(
+        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+        "VALUES (?,?,?,?,?)", ("DEAD", "죽은미국사", "NYSE", "2013-01-01", "2020-01-01"))
+    conn.commit()
     us_result = {
         "dates": ["2025-09-30", "2025-12-31"], "navs": [1.0, 1.1], "benchmark": None,
         "performance": {"cagr": 5.0},
-        "holdings": [{"date": "2025-12-31", "codes": ["AAPL"]}],
+        "holdings": [{"date": "2021-06-30", "codes": ["DEAD"]}],
     }
     steps = [{"op": "run_backtest", "params": {"market": "US"}, "out": "bt"}]
     run_pipeline_fn = lambda s, conn=None: dict(us_result)
     out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="US")
 
-    assert out["blocked"] is False
-    sins = {w["sin"] for w in out["warnings"]}
+    assert out["blocked"] is True
+    assert out["result"] is None
+    sins = {v["sin"] for v in out["hard"] if v.get("blocked")}
     assert "survivorship" in sins
 
 

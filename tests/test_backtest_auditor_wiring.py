@@ -151,26 +151,34 @@ def test_soft_warnings_attached_without_hiding_result(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# US 백테스트: 생존편향 '검증불가'가 audit_warnings로 노출된다(하드차단도 통과도 아님)
+# US 백테스트: 상장폐지 종목 보유 시 생존편향 하드차단이 배선을 타고 노출된다(AC5)
+# (과거엔 '검증불가' 소프트경고였으나, 이제 us_delisting 기반 실제 하드차단으로 전환됨)
 # --------------------------------------------------------------------------
-def test_us_backtest_surfaces_survivorship_unverifiable_warning(tmp_path, monkeypatch):
+def test_us_backtest_hard_blocks_delisted_holding(tmp_path, monkeypatch):
     from src.backtest import pipeline_exec as pe
 
     us_result = {
         "dates": ["2025-09-30", "2025-12-31"], "navs": [1.0, 1.1], "benchmark": None,
         "performance": {"cagr": 5.0},
-        "holdings": [{"date": "2025-12-31", "codes": ["AAPL"]}],
+        "holdings": [{"date": "2021-06-30", "codes": ["DEAD"]}],
     }
     monkeypatch.setattr(pe, "run_pipeline", lambda steps, conn=None: dict(us_result))
 
-    # LLM 미가용(소프트 검사 스킵)이어도 '검증불가' 경고는 나와야 한다(데이터없음은 알려진 한계).
-    nodes = make_nodes(_deps(FakeLLM("{}", available=False), _db_with_company(tmp_path)))
-    state = {"route": "pipeline", "raw_question": "애플 백테스트",
+    db = _db_with_company(tmp_path)
+    conn0 = sqlite3.connect(db)
+    conn0.execute(
+        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+        "VALUES (?,?,?,?,?)", ("DEAD", "죽은미국사", "NYSE", "2013-01-01", "2020-01-01"))
+    conn0.commit()
+    conn0.close()
+
+    nodes = make_nodes(_deps(FakeLLM("{}", available=False), db))
+    state = {"route": "pipeline", "raw_question": "미국 백테스트",
              "pipeline": [{"op": "run_backtest", "params": {"market": "US"}, "out": "bt"}]}
     out = nodes["execute_node"](state)
-    assert out["error"] is None
-    sins = {w["sin"] for w in out.get("audit_warnings", [])}
-    assert "survivorship" in sins  # 미국 종목 생존편향 검증불가 경고가 노출됨
+    # 하드차단 → 정상 결과 없이 에러(차단 사유)만 반환
+    assert out["error"] and "상장폐지" in out["error"]
+    assert out.get("audit_warnings") in (None, [])
 
 
 # --------------------------------------------------------------------------

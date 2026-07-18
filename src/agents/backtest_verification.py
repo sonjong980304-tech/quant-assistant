@@ -93,7 +93,7 @@ def run_backtest_with_audit(
     result = run_pipeline_fn(steps, conn=conn)
 
     try:
-        audit = auditor.post_audit(result, conn, question, llm_fn, market=market)
+        audit = auditor.post_audit(result, conn, question, llm_fn, market=market, steps=steps)
     except Exception as exc:  # noqa: BLE001 — fail-closed: 사후 하드검사가 죽으면 안전측(차단)
         audit = {"blocked": True,
                  "hard": [{"sin": "hard_audit_error", "blocked": True,

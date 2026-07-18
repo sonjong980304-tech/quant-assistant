@@ -26,6 +26,7 @@ from typing import Callable
 from src.agents.backtest_verification import run_backtest_with_audit
 from src.agents.data_price_kr import get_price_snapshot_kr
 from src.agents.data_price_us import get_price_snapshot_us
+from src.backtest.data_access import mode_financial_quarter_at
 from src.backtest.pipeline_exec import PRIMITIVE_OPS, run_pipeline
 from src.llm import extract_json
 
@@ -435,7 +436,7 @@ def _infer_cross_section_asof(steps: list[dict]) -> str | None:
     return found
 
 
-def _build_data_asof(steps: list[dict]) -> dict | None:
+def _build_data_asof(steps: list[dict], conn=None) -> dict | None:
     """get_cross_section(_qvm)의 요청 asof를 kr/us 도메인과 동일한 data_asof 키로 노출한다.
 
     실서버 재현: "코스피 전종목 pbr/gpa 상관관계 5분위 평균" 같은 correlation/
@@ -445,9 +446,21 @@ def _build_data_asof(steps: list[dict]) -> dict | None:
     supervisor.py의 종합결론 로직(도메인 무관하게 data_asof를 언급하도록 이미 배선됨)이
     별도 분기 없이 재사용된다. get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은
     None을 반환해 result_payload에 키 자체를 붙이지 않는다(top_n/qvm_summary와 동일한
-    하위호환 관례)."""
+    하위호환 관례).
+
+    conn이 주어지면 mode_financial_quarter_at(data_access.py)으로 "재무 기준분기"도 함께
+    붙인다(price_date만으로는 사용자가 재무제표 시점을 검증할 수 없다는 실사용 리포트
+    대응). conn이 없거나(단위테스트 등) 재무데이터가 전혀 없으면 price_date만 반환한다
+    (kr/us의 "값이 있는 키만" 관례와 동일)."""
     asof = _infer_cross_section_asof(steps)
-    return {"price_date": asof} if asof else None
+    if not asof:
+        return None
+    result: dict = {"price_date": asof}
+    if conn is not None:
+        quarter = mode_financial_quarter_at(conn, asof)
+        if quarter:
+            result["financial_quarter"] = quarter
+    return result
 
 
 def _find_qvm_scored_rows(result) -> list[dict] | None:
@@ -598,8 +611,9 @@ def answer_backtest_question(
         steps에 compute_qvm_scores 단계가 있으면(QVM 스크리닝) qvm_summary={"asof":
         str|None, "excluded_count": int, "sector_distribution": {섹터명: 종목수}}도 더한다
         (QVM 파이프라인이 아니면 이 키 자체가 없다 — 하위호환).
-        steps에 get_cross_section(_qvm) 단계가 있으면 data_asof={"price_date": str}도
-        더한다(kr/us 도메인과 동일 키 — supervisor.py 종합결론이 도메인 무관하게 노출).
+        steps에 get_cross_section(_qvm) 단계가 있으면 data_asof={"price_date": str,
+        "financial_quarter": str}(재무 기준분기는 재무데이터가 있을 때만)도 더한다
+        (kr/us 도메인과 동일 키 — supervisor.py 종합결론이 도메인 무관하게 노출).
         get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은 이 키가 없다.
     """
     run_pipeline_fn = run_pipeline_fn or run_pipeline
@@ -661,7 +675,7 @@ def answer_backtest_question(
     qvm_summary = _build_qvm_summary(steps, audit.get("result"))
     if qvm_summary is not None:
         result_payload["qvm_summary"] = qvm_summary
-    data_asof = _build_data_asof(steps)
+    data_asof = _build_data_asof(steps, conn=conn)
     if data_asof is not None:
         result_payload["data_asof"] = data_asof
     rebalance_summary = _build_rebalance_summary(audit.get("result"))

@@ -834,8 +834,14 @@ def _summarize_one(domain: str, result: dict) -> str:
             return "하드차단됨(결과 폐기)"
         bits = [f"백테스트 결과={result.get('result')}"]
         asof = result.get("data_asof")
-        if isinstance(asof, dict) and asof.get("price_date"):
-            bits.append(f"기준시점: 가격 기준일 {asof['price_date']}")
+        if isinstance(asof, dict) and asof:
+            asof_bits = []
+            if asof.get("price_date"):
+                asof_bits.append(f"가격 기준일 {asof['price_date']}")
+            if asof.get("financial_quarter"):
+                asof_bits.append(f"재무 기준분기 {asof['financial_quarter']}")
+            if asof_bits:
+                bits.append("기준시점: " + ", ".join(asof_bits))
         return ", ".join(bits)
     return "데이터 있음"
 

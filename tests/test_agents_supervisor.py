@@ -1315,3 +1315,18 @@ def test_synthesize_conclusion_deterministic_summary_mentions_backtest_data_asof
     }
     conclusion = synthesize_conclusion("코스피 pbr gpa 상관관계", domain_results, llm_fn=None)
     assert "2026-07-15" in conclusion
+
+
+def test_synthesize_conclusion_deterministic_summary_mentions_backtest_financial_quarter():
+    """실사용 리포트: "가격날짜는 있는데 재무데이터 시점은 안 나온다" — data_asof에
+    financial_quarter가 있으면 결정론 요약(backtest 분기)에도 함께 나와야 한다."""
+    domain_results = {
+        "backtest": {
+            "blocked": False,
+            "result": {"r": 0.24, "n": 656},
+            "data_asof": {"price_date": "2026-07-18", "financial_quarter": "2026Q1"},
+        }
+    }
+    conclusion = synthesize_conclusion("코스피 pbr gpa 상관관계", domain_results, llm_fn=None)
+    assert "2026-07-18" in conclusion
+    assert "2026Q1" in conclusion

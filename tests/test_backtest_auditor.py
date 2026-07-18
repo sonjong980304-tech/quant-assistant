@@ -47,16 +47,52 @@ def test_check_survivorship_blocks_when_holding_delisted_before_asof(tmp_path):
     assert v["reason"]  # 사유 텍스트가 존재
 
 
-def test_check_survivorship_us_market_is_unverifiable_not_pass_or_block(tmp_path):
-    # 미국은 상장폐지 추적 데이터가 없어 생존편향 검증이 원천적으로 불가능하다.
-    # → 거짓 "통과"도 아니고 하드차단도 아닌, 별도 "검증불가" 상태를 반환해야 한다.
+def _seed_us_delisting_ep(conn, code, episodes):
+    """us_delisting에 (listing_date, delisting_date) 구간들을 시드한다."""
+    for listing, delisting in episodes:
+        conn.execute(
+            "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
+            "VALUES (?,?,?,?,?)", (code, code, "NYSE", listing, delisting))
+    conn.commit()
+
+
+def test_check_survivorship_us_blocks_when_holding_delisted_before_asof(tmp_path):
+    # AC5: 미국도 KR과 동일하게 실제 하드차단한다(더 이상 "unverifiable"이 아님).
+    conn = _seeded_conn(tmp_path)
+    _seed_us_delisting_ep(conn, "DEAD", [("2013-01-01", "2020-01-01")])
+    holdings = [{"date": "2021-06-30", "codes": ["AAPL", "DEAD"]}]
+    v = auditor.check_survivorship(conn, holdings, market="US")
+    assert v["sin"] == "survivorship"
+    assert v["blocked"] is True
+    assert v.get("unverifiable") in (None, False)  # 검증불가 개념 제거
+    assert any(e["stock_code"] == "DEAD" for e in v["evidence"])
+
+
+def test_check_survivorship_us_passes_when_all_alive(tmp_path):
     conn = _seeded_conn(tmp_path)
     holdings = [{"date": "2025-12-31", "codes": ["AAPL", "MSFT"]}]
     v = auditor.check_survivorship(conn, holdings, market="US")
-    assert v["sin"] == "survivorship"
-    assert v["blocked"] is False          # 하드차단 아님
-    assert v.get("unverifiable") is True  # 통과도 아님 — 검증불가로 명확히 구분
-    assert v["reason"]                    # 사유 텍스트 존재
+    assert v["blocked"] is False
+    assert v["evidence"] == []
+    assert v.get("unverifiable") in (None, False)
+
+
+def test_check_survivorship_us_passes_after_relisting(tmp_path):
+    # AC15: 티커 재사용 — 재상장 구간 안(2024)의 보유는 앞선 상폐(2020)에도 불구하고 통과.
+    conn = _seeded_conn(tmp_path)
+    _seed_us_delisting_ep(conn, "TWTR", [("2013-01-01", "2020-01-01"), ("2023-01-01", "2025-01-01")])
+    holdings = [{"date": "2024-01-01", "codes": ["TWTR"]}]
+    v = auditor.check_survivorship(conn, holdings, market="US")
+    assert v["blocked"] is False
+
+
+def test_check_survivorship_us_passes_reused_active_single_episode(tmp_path):
+    # critic 실데이터 모양(AC15): 옛 상폐 구간 1개 + 활성 마커인 재사용 종목 보유는 잘못 하드차단되지 않는다.
+    conn = _seeded_conn(tmp_path)
+    _seed_us_delisting_ep(conn, "TWTR", [("2013-11-07", "2022-10-27"), ("", "")])  # 2번째=활성 마커
+    holdings = [{"date": "2024-01-01", "codes": ["TWTR"]}]
+    v = auditor.check_survivorship(conn, holdings, market="US")
+    assert v["blocked"] is False
 
 
 def test_check_survivorship_kr_market_stays_bool_semantics(tmp_path):
@@ -180,6 +216,55 @@ def test_inspect_outlier_prompt_reflects_actual_available_methods():
     assert "winsorize" in prompt
 
 
+# --------------------------------------------------------------------------
+# 실서버 재현 버그: "코스피 전종목 pbr/gpa 상관관계 5분위" 같은 순수 횡단면 통계 파이프라인
+# (get_cross_section→correlation/quantile_bucket_means, run_backtest 없음)은 result에
+# performance/holdings가 전혀 없어 4개 검사관이 아무 정보 없이 판단해야 했다. inspect_outlier
+# 프롬프트의 "모르면 경고로 남겨라" 지시 때문에 사용자가 뭘 해도 이상치 경고가 100% 뜨는
+# 구조적 결함이었다 — steps(실제 파이프라인)를 검사관에게 보여줘 해결한다.
+# --------------------------------------------------------------------------
+def test_inspect_outlier_prompt_includes_actual_steps_used():
+    seen = []
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"},
+        {"op": "winsorize", "params": {"rows": {"$ref": "xs"}, "field": "pbr"}, "out": "xs_w"},
+    ]
+    auditor.inspect_outlier(_RESULT, lambda p: (seen.append(p) or "{}"), steps=steps)
+    prompt = seen[0]
+    assert "get_cross_section" in prompt
+    assert "winsorize" in prompt
+
+
+def test_inspect_storytelling_prompt_flags_non_portfolio_pipeline_when_no_run_backtest():
+    """run_backtest/run_qvm_backtest가 없는 파이프라인(순수 통계분석)이면 '기간 다양성'
+    개념 자체가 적용 안 되니 반드시 triggered=false로 판단하라는 지시가 프롬프트에 있어야 한다."""
+    seen = []
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"},
+        {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+    ]
+    auditor.inspect_storytelling(_RESULT, lambda p: (seen.append(p) or "{}"), steps=steps)
+    prompt = seen[0]
+    assert "correlation" in prompt
+    assert "triggered=false" in prompt or "해당사항 없음" in prompt
+
+
+def test_inspect_signal_decay_prompt_flags_non_portfolio_pipeline_when_no_run_backtest():
+    seen = []
+    steps = [{"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"}]
+    auditor.inspect_signal_decay(_RESULT, lambda p: (seen.append(p) or "{}"), steps=steps)
+    prompt = seen[0]
+    assert "get_cross_section" in prompt
+    assert "triggered=false" in prompt or "해당사항 없음" in prompt
+
+
+def test_inspect_snooping_prompt_includes_steps_for_context():
+    seen = []
+    steps = [{"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"}]
+    auditor.inspect_snooping(_RESULT, "질문", lambda p: (seen.append(p) or "{}"), steps=steps)
+    assert "get_cross_section" in seen[0]
+
+
 def test_inspectors_use_distinct_prompts():
     seen = []
     recorder = lambda p: (seen.append(p) or "{}")
@@ -237,6 +322,24 @@ def test_run_soft_inspectors_reuses_pipeline_max_timeout():
 def test_run_soft_inspectors_returns_all_sins():
     out = auditor.run_soft_inspectors(_RESULT, "질문", _json_llm(True, "m"))
     assert {v["sin"] for v in out} == {"storytelling", "snooping", "signal_decay", "outlier"}
+
+
+def test_run_soft_inspectors_passes_steps_to_all_four_inspectors():
+    """AUD-6 배선 회귀: steps를 넘기면 4개 검사관 프롬프트 전부에 실제 파이프라인 정보가
+    반영돼야 한다(순서 무관하게 동시 실행되므로 스레드-세이프하게 각자 prompt를 기록)."""
+    import threading
+    seen = []
+    lock = threading.Lock()
+
+    def recorder(p):
+        with lock:
+            seen.append(p)
+        return "{}"
+
+    steps = [{"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"}]
+    auditor.run_soft_inspectors(_RESULT, "질문", recorder, steps=steps)
+    assert len(seen) == 4
+    assert all("get_cross_section" in p for p in seen)
 
 
 # --------------------------------------------------------------------------
@@ -349,14 +452,39 @@ def test_post_audit_attaches_soft_when_not_blocked(tmp_path):
     assert all(v["triggered"] for v in audit["soft"])
 
 
-def test_post_audit_us_attaches_survivorship_unverifiable_warning(tmp_path):
-    # US 백테스트는 LLM 미가용(소프트 검사 스킵)이어도 생존편향 '검증불가' 경고가 붙어야 한다.
+def test_post_audit_passes_steps_to_soft_inspectors(tmp_path):
+    conn = _seeded_conn(tmp_path)
+    result = {"r": 0.5, "n": 100}  # correlation 파이프라인 결과 — performance/holdings 없음
+    steps = [
+        {"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"},
+        {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+    ]
+    seen = []
+    audit = auditor.post_audit(
+        result, conn, "질문", llm_fn=lambda p: (seen.append(p) or "{}"), steps=steps,
+    )
+    assert audit["blocked"] is False
+    assert len(seen) == 4
+    assert all("correlation" in p for p in seen)
+
+
+def test_post_audit_us_hard_blocks_delisted_holding(tmp_path):
+    # AC5: US 백테스트도 상장폐지 종목을 보유하면 KR과 동일하게 하드차단된다(LLM 미가용이어도).
+    conn = _seeded_conn(tmp_path)
+    _seed_us_delisting_ep(conn, "DEAD", [("2013-01-01", "2020-01-01")])
+    result = {"performance": {"cagr": 10.0},
+              "holdings": [{"date": "2021-06-30", "codes": ["DEAD"]}]}
+    audit = auditor.post_audit(result, conn, "질문", llm_fn=None, market="US")
+    assert audit["blocked"] is True
+    surv = [v for v in audit["hard"] if v["sin"] == "survivorship"]
+    assert surv and surv[0]["blocked"] is True
+
+
+def test_post_audit_us_passes_cleanly_when_alive(tmp_path):
+    # 상폐 이력이 없으면 US도 KR처럼 조용히 통과한다(더 이상 '검증불가' 경고를 강제로 붙이지 않음).
     conn = _seeded_conn(tmp_path)
     result = {"performance": {"cagr": 10.0},
               "holdings": [{"date": "2025-12-31", "codes": ["AAPL"]}]}
     audit = auditor.post_audit(result, conn, "질문", llm_fn=None, market="US")
     assert audit["blocked"] is False
-    surv = [v for v in audit["soft"] if v["sin"] == "survivorship"]
-    assert len(surv) == 1
-    assert surv[0]["triggered"] is True
-    assert "검증불가" in surv[0]["message"] or "상장폐지" in surv[0]["message"]
+    assert [v for v in audit["soft"] if v["sin"] == "survivorship"] == []

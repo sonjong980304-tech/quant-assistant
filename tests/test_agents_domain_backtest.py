@@ -728,6 +728,27 @@ def test_answer_backtest_question_attaches_data_asof_for_qvm_cross_section():
     assert out["data_asof"] == {"price_date": "2026-07-10"}
 
 
+def test_answer_backtest_question_data_asof_includes_financial_quarter_when_conn_given(tmp_path):
+    """실사용 리포트: "가격날짜는 있는데 재무데이터 시점은 안 나온다" — conn이 주어지면
+    financials 테이블에서 실제 재무 기준분기(최빈값)도 함께 붙어야 한다."""
+    conn = _writable_conn(tmp_path)
+    conn.execute(
+        "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+        "VALUES (?,?,?,?,?)",
+        ("000001", "2026Q1", "2026-05-15", "revenue", 100.0),
+    )
+    conn.commit()
+    out = answer_backtest_question(
+        "PBR과 GPA 상관관계", [
+            {"op": "get_cross_section", "params": {"asof": "2026-07-18"}, "out": "xs"},
+            {"op": "correlation", "params": {"rows": {"$ref": "xs"}, "field_x": "pbr", "field_y": "gp_a"}, "out": "corr"},
+        ],
+        conn,
+        run_pipeline_fn=lambda s, conn=None: {"r": 0.5, "n": 100},
+    )
+    assert out["data_asof"] == {"price_date": "2026-07-18", "financial_quarter": "2026Q1"}
+
+
 def test_answer_backtest_question_no_data_asof_when_no_cross_section_step(tmp_path):
     """회귀: get_cross_section을 쓰지 않는 파이프라인(run_backtest 등)은 data_asof 키
     자체가 없어야 한다(top_n/qvm_summary와 동일한 하위호환 관례)."""
