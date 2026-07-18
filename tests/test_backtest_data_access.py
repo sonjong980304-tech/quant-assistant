@@ -16,6 +16,7 @@ from src.backtest.data_access import (
     _is_alive,
     _months_before,
     _one_year_before,
+    mode_financial_quarter_at,
     momentum_12_1,
     momentum_12_1_batch,
     price_return_over_months,
@@ -266,3 +267,68 @@ def test_momentum_12_1_batch_uses_constant_sql_calls(tmp_path):
 def test_momentum_12_1_batch_empty_codes(tmp_path):
     conn = _conn(tmp_path)
     assert momentum_12_1_batch(conn, [], "2026-07-16") == {}
+
+
+# --------------------------------------------------------------------------
+# mode_financial_quarter_at — get_cross_section(_qvm)류 파이프라인(correlation/
+# quantile_bucket_means 등)이 result에 종목별 quarter를 남기지 않아, backtest 도메인의
+# data_asof에 "재무 기준분기"를 못 붙이던 문제 대응(domain_backtest._build_data_asof에서
+# 재사용). effective_quarter_at을 종목마다 반복 호출하는 대신(전종목 순회 시 비용 큼),
+# 동일한 disclosed_date<=asof 조건을 SQL 윈도우함수로 한 번에 계산해 최빈값만 뽑는다.
+# --------------------------------------------------------------------------
+def _seed_financials(conn, rows: list[tuple[str, str, str]]) -> None:
+    """rows: (stock_code, quarter, disclosed_date). account_key는 더미로 채운다."""
+    for code, quarter, disclosed in rows:
+        conn.execute(
+            "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+            "VALUES (?,?,?,?,?)",
+            (code, quarter, disclosed, "revenue", 100.0),
+        )
+    conn.commit()
+
+
+def test_mode_financial_quarter_at_returns_most_common_quarter_among_disclosed(tmp_path):
+    conn = _conn(tmp_path)
+    _seed_financials(conn, [
+        ("000001", "2026Q1", "2026-05-15"),
+        ("000002", "2026Q1", "2026-05-20"),
+        ("000003", "2025Q4", "2026-03-31"),  # 아직 2026Q1 미공시
+    ])
+    assert mode_financial_quarter_at(conn, "2026-07-18") == "2026Q1"
+
+
+def test_mode_financial_quarter_at_respects_lookahead_cutoff(tmp_path):
+    """disclosed_date > asof인 분기는 무시한다(미래참조 방지, effective_quarter_at과 동일 원칙)."""
+    conn = _conn(tmp_path)
+    _seed_financials(conn, [
+        ("000001", "2026Q2", "2026-08-14"),  # asof 이후 공시 — 아직 반영 안 됨
+        ("000001", "2026Q1", "2026-05-15"),
+    ])
+    assert mode_financial_quarter_at(conn, "2026-07-18") == "2026Q1"
+
+
+def test_mode_financial_quarter_at_none_when_no_data(tmp_path):
+    conn = _conn(tmp_path)
+    assert mode_financial_quarter_at(conn, "2026-07-18") is None
+
+
+def test_mode_financial_quarter_at_counts_per_stock_not_raw_rows(tmp_path):
+    """종목 하나가 계정과목(account_key)별로 여러 행을 가져도 quarter 표는 종목당 1표여야
+    한다 — 원시 행수로 세면(버그) 소수 종목의 계정 수가 많다는 이유만으로 최빈값이 왜곡된다."""
+    conn = _conn(tmp_path)
+    for key in ("revenue", "net_income", "total_assets"):
+        conn.execute(
+            "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+            "VALUES (?,?,?,?,?)",
+            ("000001", "2026Q1", "2026-05-15", key, 1.0),
+        )
+    for code in ("000002", "000003"):
+        conn.execute(
+            "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+            "VALUES (?,?,?,?,?)",
+            (code, "2025Q4", "2026-03-31", "revenue", 1.0),
+        )
+    conn.commit()
+    # 000001은 원시 행 3개(2026Q1)지만 종목 수로는 1표. 000002/000003은 원시행 1개씩(2025Q4)
+    # 이지만 종목 수로는 2표 — 종목당 1표로 세면 2025Q4가 이겨야 한다(원시 행수로 세면 2026Q1이 이김).
+    assert mode_financial_quarter_at(conn, "2026-07-18") == "2025Q4"

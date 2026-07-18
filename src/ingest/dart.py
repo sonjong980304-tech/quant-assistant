@@ -141,7 +141,9 @@ def _parse_all(rows: list[dict]) -> tuple[dict, str | None]:
     rcept = None
     for r in rows:
         if rcept is None and r.get("rcept_no"):
-            rcept = str(r["rcept_no"])[:8]
+            # 전체 접수번호(14자리)를 보관한다 — financials_revision.rcept_no(정정공시 식별)용.
+            # 공시일(disclosed_date)은 앞 8자리(YYYYMMDD)만 슬라이스해 그대로 계산한다.
+            rcept = str(r["rcept_no"])
         key = normalize_account(r.get("account_nm", ""), r.get("account_id"))
         if not key or key in data:
             continue
@@ -167,6 +169,26 @@ def _save_raw(conn, code: str, year: int, reprt: str, fs_div: str, rows: list) -
         "INSERT OR REPLACE INTO raw_reports"
         "(stock_code, bsns_year, reprt_code, fs_div, payload, fetched_at) VALUES(?,?,?,?,?,?)",
         (code, year, reprt, fs_div, payload, now_iso()),
+    )
+
+
+def _insert_revision(conn, code, quarter, disclosed, key, nm, value, rcept_no) -> None:
+    """financials 를 REPLACE 하는 바로 그 값을 append-only financials_revision 에도 남긴다.
+
+    정정공시(재무제표 재작성)로 financials 원본이 덮어써져도 "정정 전엔 얼마였는지" 역사를
+    보존한다(백테스트 look-ahead 방지의 데이터 소스). 같은 rcept_no 재수집은 UNIQUE 충돌 →
+    멱등(값만 갱신). 진짜 새 rcept_no(정정공시)만 새 행이 쌓인다. rcept_no 미상이면 호출부가
+    disclosed(공시일)를 센티널로 넘겨 NULL 로 인한 멱등성 깨짐을 막는다.
+    """
+    conn.execute(
+        """INSERT INTO financials_revision
+             (stock_code, quarter, disclosed_date, account_key, account_name, amount, rcept_no)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(stock_code, quarter, account_key, rcept_no) DO UPDATE SET
+             disclosed_date=excluded.disclosed_date,
+             account_name=excluded.account_name,
+             amount=excluded.amount""",
+        (code, quarter, disclosed, key, nm, value, rcept_no),
     )
 
 
@@ -244,9 +266,10 @@ def ingest_dart(
                         continue
                     disclosed = (
                         f"{rcept[:4]}-{rcept[4:6]}-{rcept[6:8]}"
-                        if rcept and len(rcept) == 8
+                        if rcept and len(rcept) >= 8
                         else estimate_disclosed_date(quarter)
                     )
+                    rcept_no = rcept or disclosed  # 접수번호 미상이면 공시일을 멱등 센티널로
                     for key, (amt, nm) in data.items():
                         # FLOW(손익·현금흐름)는 분기 단독으로 공시되나, 사업보고서(Q4)는 연간 누적이므로
                         # Q4 단독 = 연간 - (Q1+Q2+Q3). STOCK(재무상태)은 시점 잔액 그대로.
@@ -265,6 +288,7 @@ def ingest_dart(
                                VALUES (?,?,?,?,?,?)""",
                             (code, quarter, disclosed, key, nm, round(value)),
                         )
+                        _insert_revision(conn, code, quarter, disclosed, key, nm, round(value), rcept_no)
                         n_rows += 1
                     actual_latest = max(actual_latest or quarter, quarter, key=_q_sort_key)
                 conn.commit()
@@ -299,9 +323,10 @@ def _write_reports_year(conn, code, year, reports, wanted, *, ingest_shares_fn=N
             continue
         disclosed = (
             f"{rcept[:4]}-{rcept[4:6]}-{rcept[6:8]}"
-            if rcept and len(rcept) == 8
+            if rcept and len(rcept) >= 8
             else estimate_disclosed_date(quarter)
         )
+        rcept_no = rcept or disclosed  # 접수번호 미상이면 공시일을 멱등 센티널로
         for key, (amt, nm) in data.items():
             if key in FLOW_KEYS and qn == 4:
                 prior = sum(
@@ -318,6 +343,7 @@ def _write_reports_year(conn, code, year, reports, wanted, *, ingest_shares_fn=N
                    VALUES (?,?,?,?,?,?)""",
                 (code, quarter, disclosed, key, nm, round(value)),
             )
+            _insert_revision(conn, code, quarter, disclosed, key, nm, round(value), rcept_no)
             n_rows += 1
         if ingest_shares_fn is not None:
             n_rows += ingest_shares_fn(qn, quarter, disclosed)

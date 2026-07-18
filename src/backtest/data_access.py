@@ -68,11 +68,60 @@ def rebalance_dates(start_year: int, end_year: int, freq: str = "quarterly") -> 
 
 
 def effective_quarter_at(conn, code: str, asof: str) -> str | None:
-    """asof 시점까지 공시된 최신 분기 (look-ahead 방지)."""
+    """asof 시점까지 공시된 최신 분기 (look-ahead 방지).
+
+    정정공시(재무제표 재작성)로 financials 원본이 덮어써지면 그 분기의 disclosed_date 가
+    정정일(미래)로 바뀌어, 정정 전 asof 에서는 그 분기가 통째로 사라진다. 그래서 정정이력을
+    보존하는 financials_revision(disclosed_date<=asof 인 버전이 하나라도 있으면 그 분기는
+    "그때 알 수 있던 분기")을 우선 본다. 정정테이블 도입 전 적재분(revision 행 없음)은 기존
+    financials.disclosed_date 로 폴백해 과거 데이터 백테스트가 깨지지 않게 한다. 두 소스를
+    UNION 해 "그 시점까지 공시된 분기" 집합의 최대 quarter 를 고른다(quarter 는 'YYYYQn' 이라
+    사전식 정렬=시간 정렬).
+    """
     row = conn.execute(
-        "SELECT quarter FROM financials WHERE stock_code=? AND disclosed_date IS NOT NULL "
-        "AND disclosed_date<=? ORDER BY quarter DESC LIMIT 1",
-        (code, asof),
+        "SELECT MAX(quarter) AS quarter FROM ("
+        "  SELECT quarter FROM financials_revision "
+        "    WHERE stock_code=? AND disclosed_date IS NOT NULL AND disclosed_date<=? "
+        "  UNION "
+        "  SELECT quarter FROM financials "
+        "    WHERE stock_code=? AND disclosed_date IS NOT NULL AND disclosed_date<=? "
+        ")",
+        (code, asof, code, asof),
+    ).fetchone()
+    return row["quarter"] if row and row["quarter"] else None
+
+
+def mode_financial_quarter_at(conn, asof: str) -> str | None:
+    """asof 시점 기준, 유효 재무데이터를 가진 종목들 중 가장 많이 쓰인 재무 기준분기(최빈값).
+
+    get_cross_section(_qvm)류 파이프라인(correlation/quantile_bucket_means 등)은 result에
+    종목별 quarter가 남지 않아(집계값만 반환) domain_backtest._build_data_asof가 재무
+    기준분기를 못 붙였다. metrics_at()을 통째로 재실행하는 대신(전종목 순회 비용 큼),
+    effective_quarter_at과 동일한 look-ahead 방지 조건(disclosed_date<=asof)만으로 종목별
+    최신분기를 SQL 윈도우함수 한 번에 구해 최빈값을 반환한다. 국내 상장사는 공시 마감기한이
+    비슷해 특정 시점엔 대부분 같은 분기로 수렴하므로 대표값으로 유의미하다.
+    financials가 계정과목(account_key)별로 여러 행을 가지므로 종목당 1표만 세도록 먼저
+    종목당 최신 분기 1개씩만 남긴 뒤 GROUP BY한다. effective_quarter_at과 동일하게
+    financials_revision(정정이력 보존)과 financials(도입 전 폴백)를 UNION해 그 시점까지
+    공시된 분기를 모은다. 데이터가 전혀 없으면 None.
+    """
+    row = conn.execute(
+        """
+        SELECT quarter FROM (
+            SELECT stock_code, MAX(quarter) AS quarter FROM (
+                SELECT stock_code, quarter FROM financials_revision
+                    WHERE disclosed_date IS NOT NULL AND disclosed_date <= ?
+                UNION
+                SELECT stock_code, quarter FROM financials
+                    WHERE disclosed_date IS NOT NULL AND disclosed_date <= ?
+            )
+            GROUP BY stock_code
+        )
+        GROUP BY quarter
+        ORDER BY COUNT(*) DESC
+        LIMIT 1
+        """,
+        (asof, asof),
     ).fetchone()
     return row["quarter"] if row else None
 
@@ -282,37 +331,40 @@ def metrics_at(conn, asof: str) -> list[dict]:
         if not close:
             continue
 
-        equity = _fin(conn, code, q, "total_equity")        # 부채비율 분모(자본총계)
-        book = controlling_equity(conn, code, q)            # ① PBR 분모(지배주주지분)
-        avg_eq = avg_controlling_equity(conn, code, q)      # ② ROE 분모(4분기 평균 지배주주지분)
-        liab = _fin(conn, code, q, "total_liabilities")
-        assets = _fin(conn, code, q, "total_assets")
-        ni_ttm = _sum_ttm(conn, code, q, "net_income")               # 연결 전체 (ROA용)
-        gp_ttm = _sum_ttm(conn, code, q, "gross_profit")             # GPA(수익성 팩터) 분자
-        ocf_ttm = _sum_ttm(conn, code, q, "operating_cashflow")      # CFO비율(질 팩터) 분자(TTM 영업현금흐름)
-        op_ttm = _sum_ttm(conn, code, q, "operating_profit")         # 이자보상배율 분자(TTM 영업이익)
+        # look-ahead 방지: asof 를 전달해 각 값을 financials_revision 의 "disclosed_date<=asof
+        # 최신 버전"으로 조회한다(정정공시 전 시점엔 원본값, 정정 후엔 정정값). 정정이력이 없는
+        # 도입 전 적재분은 _fin 내부에서 기존 financials 로 폴백한다.
+        equity = _fin(conn, code, q, "total_equity", asof=asof)        # 부채비율 분모(자본총계)
+        book = controlling_equity(conn, code, q, asof=asof)           # ① PBR 분모(지배주주지분)
+        avg_eq = avg_controlling_equity(conn, code, q, asof=asof)     # ② ROE 분모(4분기 평균 지배주주지분)
+        liab = _fin(conn, code, q, "total_liabilities", asof=asof)
+        assets = _fin(conn, code, q, "total_assets", asof=asof)
+        ni_ttm = _sum_ttm(conn, code, q, "net_income", asof=asof)               # 연결 전체 (ROA용)
+        gp_ttm = _sum_ttm(conn, code, q, "gross_profit", asof=asof)             # GPA(수익성 팩터) 분자
+        ocf_ttm = _sum_ttm(conn, code, q, "operating_cashflow", asof=asof)      # CFO비율(질 팩터) 분자(TTM 영업현금흐름)
+        op_ttm = _sum_ttm(conn, code, q, "operating_profit", asof=asof)         # 이자보상배율 분자(TTM 영업이익)
         # PER·ROE 분자는 지배주주 귀속 순이익. 미수집 시 연결 순이익으로 폴백.
-        ctrl_ni_ttm = _sum_ttm(conn, code, q, "controlling_net_income")
+        ctrl_ni_ttm = _sum_ttm(conn, code, q, "controlling_net_income", asof=asof)
         if ctrl_ni_ttm is None:
             ctrl_ni_ttm = ni_ttm
-        rev_ttm = _sum_ttm(conn, code, q, "revenue")
+        rev_ttm = _sum_ttm(conn, code, q, "revenue", asof=asof)
         # ③ 마진(영업이익률·순이익률)은 단일분기로 통일 (SoT 혼용금지, 질의 경로와 동일 정의)
-        op_q = _fin(conn, code, q, "operating_profit")
-        rev_q = _fin(conn, code, q, "revenue")
-        ni_q = _fin(conn, code, q, "net_income")
+        op_q = _fin(conn, code, q, "operating_profit", asof=asof)
+        rev_q = _fin(conn, code, q, "revenue", asof=asof)
+        ni_q = _fin(conn, code, q, "net_income", asof=asof)
         # 매출총이익률·매출원가율 입력 — 마진(operating_margin/net_margin)과 동일하게 단일분기.
-        gp_q = _fin(conn, code, q, "gross_profit")     # 매출총이익(단일분기 원본 계정)
-        cogs_q = _fin(conn, code, q, "cost_of_sales")  # 매출원가(단일분기 원본 계정)
+        gp_q = _fin(conn, code, q, "gross_profit", asof=asof)     # 매출총이익(단일분기 원본 계정)
+        cogs_q = _fin(conn, code, q, "cost_of_sales", asof=asof)  # 매출원가(단일분기 원본 계정)
 
         # 마법공식(EY/ROC) 입력 — 손익계산서 항목은 TTM(4분기 합), 재무상태표 항목은 시점 스냅샷.
-        tax_ttm = _sum_ttm(conn, code, q, "tax_expense")          # 법인세비용(TTM)
-        int_ttm = _sum_ttm(conn, code, q, "interest_expense")     # 이자비용(TTM)
-        cur_assets = _fin(conn, code, q, "current_assets")        # 유동자산(스냅샷)
-        cur_liab = _fin(conn, code, q, "current_liabilities")     # 유동부채(스냅샷)
-        noncur_assets = _fin(conn, code, q, "non_current_assets") # 비유동자산(스냅샷)
-        cash = _fin(conn, code, q, "cash")                        # 현금및현금성자산(스냅샷)
-        dep = _fin(conn, code, q, "depreciation")                 # 감가상각비(스냅샷, ROC 투하자본용)
-        dep_ttm = _sum_ttm(conn, code, q, "depreciation")         # 감가상각비(TTM, EBITDA용 — EBIT과 기간 일치)
+        tax_ttm = _sum_ttm(conn, code, q, "tax_expense", asof=asof)          # 법인세비용(TTM)
+        int_ttm = _sum_ttm(conn, code, q, "interest_expense", asof=asof)     # 이자비용(TTM)
+        cur_assets = _fin(conn, code, q, "current_assets", asof=asof)        # 유동자산(스냅샷)
+        cur_liab = _fin(conn, code, q, "current_liabilities", asof=asof)     # 유동부채(스냅샷)
+        noncur_assets = _fin(conn, code, q, "non_current_assets", asof=asof) # 비유동자산(스냅샷)
+        cash = _fin(conn, code, q, "cash", asof=asof)                        # 현금및현금성자산(스냅샷)
+        dep = _fin(conn, code, q, "depreciation", asof=asof)                 # 감가상각비(스냅샷, ROC 투하자본용)
+        dep_ttm = _sum_ttm(conn, code, q, "depreciation", asof=asof)         # 감가상각비(TTM, EBITDA용 — EBIT과 기간 일치)
 
         # 순이익 데이터 오류(자기자본 대비 비현실적 거대 = Q4 차분 폭발/원본 오류) 방어.
         # 순이익 기반 지표(PER·ROE·ROA)를 무효화해 다원넥스뷰 5.7경 같은 종목을 배제.
@@ -405,7 +457,7 @@ def metrics_at(conn, asof: str) -> list[dict]:
         # 재사용한다(값 정의는 아래 dict와 100% 동일). PEG는 성장 대비 밸류라 성장률>0일 때만
         # 의미가 있다(성장률<=0이면 None — src/ingest/metrics.py의 peg와 동일 관례).
         per = _div(cap, ctrl_ni_ttm) if (cap and ctrl_ni_ttm and ctrl_ni_ttm > 0) else None
-        ni_growth = _yoy(conn, code, q, "net_income")
+        ni_growth = _yoy(conn, code, q, "net_income", asof=asof)
         peg = (per / ni_growth) if (per is not None and ni_growth and ni_growth > 0) else None
 
         out.append({
@@ -450,8 +502,8 @@ def metrics_at(conn, asof: str) -> list[dict]:
             # 이자보상배율 = 영업이익(TTM) ÷ 이자비용(TTM). 배율이라 %가 아님. 이자비용>0일 때만(무이자
             # 기업은 이자보상배율 정의상 해당 없음 → None). int_ttm은 마법공식 EBIT에서 이미 조회한 값 재사용.
             "interest_coverage": _div(op_ttm, int_ttm) if (int_ttm and int_ttm > 0) else None,
-            "revenue_growth": _yoy(conn, code, q, "revenue"),
-            "op_growth": _yoy(conn, code, q, "operating_profit"),
+            "revenue_growth": _yoy(conn, code, q, "revenue", asof=asof),
+            "op_growth": _yoy(conn, code, q, "operating_profit", asof=asof),
             "ni_growth": ni_growth,
             "return_12m": return_12m,
         })
