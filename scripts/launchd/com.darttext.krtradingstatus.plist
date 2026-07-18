@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.darttext.krtradingstatus</string>
+
+    <!-- KRX 관리종목/매매거래정지 '오늘 현재' 스냅샷 누적. 매일 19:00 —
+         과거 이력은 무료로 못 구해(KRX/KIND 모두 조회일 무시, 오늘 스냅샷만) 매일 1회
+         스냅샷을 받아 직전 실행과 diff 해서 앞으로의 지정~해제 구간을 우리 쪽에서 누적한다.
+         관리종목/거래정지는 하루 단위로 바뀔 수 있어 상장폐지(주간)보다 자주 도는 게 맞다.
+         장 마감(15:30) 후 data.krx.co.kr 통계가 갱신되므로 저녁에 돌리고, KR 가격 수집
+         (naver/update prices 18:30)과 30분 분리해 19:00에 배치한다. 라이브 KRX 로그인은
+         이 잡 실행 시에만 일어난다(KRX_ID/KRX_PW 는 .env → os.environ). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-s</string>
+        <string>/Users/gyuyeong/projects/.venv/bin/python3</string>
+        <string>/Users/gyuyeong/projects/dart-text2sql-wiki/scripts/run_kr_trading_status.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>19</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/kr_trading_status.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyuyeong/projects/dart-text2sql-wiki/data/logs/kr_trading_status.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyuyeong/projects/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyuyeong</string>
+    </dict>
+</dict>
+</plist>

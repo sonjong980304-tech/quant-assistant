@@ -276,6 +276,35 @@ CREATE TABLE IF NOT EXISTS us_delisting (
     UNIQUE(stock_code, listing_date, delisting_date)
 );
 
+-- KR 관리종목/매매거래정지 상태 이력 (구간 기반, 스냅샷 누적). KRX/KIND 는 과거 조회일을
+-- 무시하고 '오늘 현재' 스냅샷만 반환해 과거 이력을 무료로 구할 수 없다 → 매 실행(매일 1회)
+-- 마다 '오늘 현재' 관리종목/거래정지 목록을 받아 직전 실행 스냅샷과 diff 해서 앞으로의
+-- 지정~해제 구간을 우리 쪽에서 누적으로 쌓는다. '직전 스냅샷'은 별도 저장 없이 이 테이블의
+-- 열린 구간(end_date IS NULL)에서 유도한다: 현재 목록에 새로 나타난 종목=지정 개시(start_date=
+-- 관측일, end_date=NULL), 사라진 종목=해제(end_date=관측일), 계속 있는 종목=구간 유지.
+-- us_delisting 과 동일한 구간+멱등 upsert 사상 — 한 종목이 지정→해제→재지정을 반복하면
+-- 여러 행(각 구간 1행)을 가진다. status_type 판별자로 관리종목/거래정지를 한 테이블에 담는다
+-- (macro_indicators.indicator, us_financials.statement_type 판별자 관례와 동일 — diff 알고리즘이
+-- 두 종류에 동일해 코드 중복을 없앤다). start_date 는 KRX 최초지정일이 아니라 '우리가 스냅샷에서
+-- 처음 관측한 날'이다(과거 이력이 없으니 정직하게 관측 시점만 기록). KRX 원본 최초지정일(관리)/
+-- 지정일시(정지)는 krx_designated_date 에 참고용으로 보관한다.
+-- ⚠️ 이 데이터는 backtest look-ahead 경로(metrics_at 등)에 절대 연결하지 않는다 — 과거 이력이
+-- 없어 연결하면 look-ahead/생존편향을 오히려 악화시킨다. '현재 시점' 라이브 필터링 전용
+-- (is_currently_administrative_or_halted). 자연어 SQL 질의 대상 아님(QUERYABLE_TABLES 미포함).
+CREATE TABLE IF NOT EXISTS kr_trading_status (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code         TEXT NOT NULL,   -- 종목코드 (6자리 단축코드, KRX ISU_SRT_CD/ISU_CD 정규화)
+    status_type        TEXT NOT NULL,   -- 'admin'(관리종목) | 'halt'(매매거래정지)
+    company_name       TEXT,            -- 종목명 (KRX ISU_NM)
+    market             TEXT,            -- 시장구분 (KRX MKT_NM, 예: 'KOSPI'|'KOSDAQ'|'KONEX'; 정지목록은 없을 수 있음)
+    reason             TEXT,            -- 지정/정지 사유 (관리=LIST_BZ_RSN_NM, 정지=HALT_RSN_NM)
+    start_date         TEXT NOT NULL,   -- 상태 시작 관측일 (우리가 스냅샷에서 처음 관측한 날, YYYY-MM-DD)
+    end_date           TEXT,            -- 상태 해제 관측일 (스냅샷에서 사라진 걸 관측한 날; NULL=현재 진행 중)
+    krx_designated_date TEXT,           -- KRX 원본 최초지정일/지정일시의 날짜부 (참고용, YYYY-MM-DD; 미상 NULL)
+    updated_at         TEXT,            -- 마지막 스냅샷 반영 시각 (ISO)
+    UNIQUE(stock_code, status_type, start_date)
+);
+
 -- 지표 정의 (백테스트 UI 자동생성용)
 CREATE TABLE IF NOT EXISTS metric_def (
     key         TEXT PRIMARY KEY,      -- metrics 컬럼명
