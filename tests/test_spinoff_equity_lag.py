@@ -18,6 +18,14 @@
    데이터부족 시 False).
 2) 배선: metrics_at 이 걸린 시점의 PBR/PSR/PER 만 None 으로 만들고, 가격전용(return_12m)·
    순수 재무비율(debt_ratio)은 건드리지 않으며, 다음 분기 공시 후엔 PBR 이 정상 계산되는지.
+
+대칭(급등) 방향 — 유상증자 시차
+--------------------------------
+같은 가드의 change>=ratio_high(2.0) 분기는 물적분할의 정반대 시차, 즉 유상증자(신주 발행)로
+시총(분자)은 즉시 급등하는데 자기자본(분모)은 다음 분기 공시 전까지 증자 전 값 그대로라 시총÷
+자기자본 비율이 급등하는 케이스도 대칭으로 잡는다. 물적분할 감사와 별개로 제기된 "유상증자 시총
+불연속" 우려가 이 급등 분기로 이미 커버되는지 아래 test_rights_offering_* 들이 회귀로 고정한다
+(신규 프로덕션 코드 없이 기존 대칭 로직만으로 커버됨을 증명 — 임계값/판정식은 물적분할과 공유).
 """
 from __future__ import annotations
 
@@ -183,6 +191,107 @@ def test_metrics_at_pbr_recovers_after_next_quarter(tmp_path):
     conn = _conn(tmp_path)
     _seed_spinoff_company(conn)
     row = _row(metrics_at(conn, "2023-08-20"), "000010")
+    assert row is not None
+    assert row["pbr"] is not None
+    assert row["psr"] is not None
+    assert row["per"] is not None
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 3) 대칭(급등) 방향 — 유상증자 시차: 물적분할의 정반대. 시총↑(신주 즉시 반영) / 자기자본은
+#    증자 전 값 그대로(다음 분기 공시 전) → 비율 급등 → change>=2.0 분기로 이미 커버됨을 증명.
+#    _seed_spinoff_company 를 그대로 뒤집는다: 자기자본은 증자반영분기(2023Q2)만 크고(1000),
+#    시총(=1주 가정 close)은 400→1000 으로 "여러 날에 걸쳐" 상승(하루 2배 점프면 블랭킷 가격
+#    이상치 가드가 종목을 통째로 빼므로 인접일 종가비가 항상 2.0 미만이 되게 완만히 계단상승).
+# ---------------------------------------------------------------------------
+_EQUITY_RIGHTS = {q: (1000.0 if q == "2023Q2" else 400.0) for q in _DISCLOSED}
+_PRICES_RIGHTS = [
+    ("2022-08-01", 400.0),   # return_12m(1년 전) 기준점 겸 증자 전
+    ("2023-04-25", 400.0),
+    ("2023-05-01", 400.0),   # 스테일 asof(2023-08-01)의 3개월 전 기준점
+    ("2023-05-20", 400.0),   # 정상화 asof(2023-08-20)의 3개월 전 기준점
+    ("2023-07-03", 400.0),
+    ("2023-07-05", 480.0),
+    ("2023-07-07", 570.0),
+    ("2023-07-11", 680.0),
+    ("2023-07-13", 810.0),
+    ("2023-07-17", 950.0),
+    ("2023-07-19", 1000.0),
+    ("2023-07-31", 1000.0),
+    ("2023-08-01", 1000.0),  # 스테일 구간(2023Q2 공시 2023-08-15 이전, 자기자본 400 그대로)
+    ("2023-08-15", 1000.0),
+    ("2023-08-20", 1000.0),  # 2023Q2 공시 이후(자기자본 1000 반영 → 정상화)
+    ("2023-08-25", 1000.0),
+]
+
+
+def _seed_rights_offering_company(conn, code="000030", name="증자테스트"):
+    conn.execute(
+        "INSERT INTO company(stock_code, name, market, sector) VALUES (?,?,?,?)",
+        (code, name, "KOSPI", "전기·전자"),
+    )
+    for q, disclosed in _DISCLOSED.items():
+        eq = _EQUITY_RIGHTS[q]
+        rows = [
+            ("controlling_equity", eq),
+            ("total_equity", eq),
+            ("net_income", 50.0),
+            ("controlling_net_income", 50.0),
+            ("revenue", 300.0),
+            ("total_liabilities", 500.0),
+        ]
+        for key, amount in rows:
+            conn.execute(
+                "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+                "VALUES (?,?,?,?,?)",
+                (code, q, disclosed, key, amount),
+            )
+    for d, v in _PRICES_RIGHTS:
+        conn.execute(
+            "INSERT INTO prices(stock_code, date, close, market_cap) VALUES (?,?,?,?)",
+            (code, d, v, v),
+        )
+    conn.commit()
+
+
+def test_flags_rights_offering_lag_window(tmp_path):
+    """스테일 구간: 시총 1000/유효 자기자본 400(증자 전) → 비율 2.5, 3개월 전 1.0 대비 급등 → True."""
+    conn = _conn(tmp_path)
+    _seed_rights_offering_company(conn)
+    assert is_equity_ratio_anomalous(conn, "000030", "2023-08-01") is True
+    conn.close()
+
+
+def test_rights_offering_not_flagged_after_next_quarter_disclosed(tmp_path):
+    """2023Q2 공시 후: 자기자본 1000 반영 → 비율 1.0 = 3개월 전 1.0, 급변 없음 → False(자동 정상화)."""
+    conn = _conn(tmp_path)
+    _seed_rights_offering_company(conn)
+    assert is_equity_ratio_anomalous(conn, "000030", "2023-08-20") is False
+    conn.close()
+
+
+def test_metrics_at_nulls_valuation_multiples_during_rights_offering_lag(tmp_path):
+    """스테일 구간(급등 방향): PBR/PSR/PER 은 None, 가격전용(return_12m)·순수 재무비율(debt_ratio)은 정상."""
+    conn = _conn(tmp_path)
+    _seed_rights_offering_company(conn)
+    row = _row(metrics_at(conn, "2023-08-01"), "000030")
+    assert row is not None  # 유니버스에서 완전히 빠지는 게 아니다
+    assert row["pbr"] is None
+    assert row["psr"] is None
+    assert row["per"] is None
+    # 시총(=현재 진짜 시가총액)과 가격전용·순수 재무비율은 급등 방향에서도 건드리지 않는다.
+    assert row["market_cap"] is not None
+    assert row["return_12m"] is not None
+    assert row["debt_ratio"] is not None
+    conn.close()
+
+
+def test_metrics_at_pbr_recovers_after_rights_offering_disclosed(tmp_path):
+    """2023Q2 공시 후: 자기자본 1000 반영 → PBR/PSR/PER 이 다시 정상 계산된다(자동 정상화)."""
+    conn = _conn(tmp_path)
+    _seed_rights_offering_company(conn)
+    row = _row(metrics_at(conn, "2023-08-20"), "000030")
     assert row is not None
     assert row["pbr"] is not None
     assert row["psr"] is not None
