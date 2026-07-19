@@ -14,7 +14,6 @@ import sqlite3
 import pytest
 
 from src.backtest.data_access import metrics_at
-from src.backtest.data_access_us import metrics_at_us
 from src.db import init_db
 
 
@@ -103,70 +102,11 @@ def test_metrics_at_preserves_existing_fields(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# US: metrics_at_us return_12m
-# --------------------------------------------------------------------------
-def _seed_us(tmp_path) -> sqlite3.Connection:
-    db = tmp_path / "r12us.db"
-    init_db(str(db))
-    conn = sqlite3.connect(str(db))
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, updated_at) "
-        "VALUES (?,?,?,?,?,?)",
-        ("AAPL", "Apple", "NASDAQ", "Technology", 1000.0, "2026-07-01"),
-    )
-    # 공시된 quarterly(effective_quarter_at_us) — disclosed_date<=asof.
-    conn.execute(
-        "INSERT INTO us_financials(stock_code, as_of_date, period_type, statement_type, "
-        "item_key, item_value, disclosed_date, source) VALUES (?,?,?,?,?,?,?,?)",
-        ("AAPL", "2025-03-31", "quarterly", "income_stmt", "Net Income", 10.0, "2025-05-15", "yfinance"),
-    )
-    conn.commit()
-    return conn
-
-
-def _add_us_price(conn, code, date_str, close):
-    conn.execute(
-        "INSERT INTO us_prices(stock_code, date, open, high, low, close, volume) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (code, date_str, close, close, close, close, 1000.0),
-    )
-    conn.commit()
-
-
-def test_metrics_at_us_computes_return_12m(tmp_path):
-    conn = _seed_us(tmp_path)
-    _add_us_price(conn, "AAPL", "2025-06-30", 200.0)
-    _add_us_price(conn, "AAPL", "2026-06-30", 250.0)
-    rows = metrics_at_us(conn, "2026-06-30")
-    assert len(rows) == 1
-    assert rows[0]["return_12m"] == pytest.approx(25.0)  # (250-200)/200*100
-
-
-def test_metrics_at_us_return_12m_ignores_future_prices(tmp_path):
-    conn = _seed_us(tmp_path)
-    _add_us_price(conn, "AAPL", "2025-06-30", 200.0)
-    _add_us_price(conn, "AAPL", "2026-06-30", 250.0)
-    _add_us_price(conn, "AAPL", "2026-12-31", 9999.0)  # 미래 — 참조 금지
-    rows = metrics_at_us(conn, "2026-06-30")
-    assert rows[0]["return_12m"] == pytest.approx(25.0)
-
-
-def test_metrics_at_us_return_12m_none_when_no_prior_year_price(tmp_path):
-    conn = _seed_us(tmp_path)
-    _add_us_price(conn, "AAPL", "2026-06-30", 250.0)
-    rows = metrics_at_us(conn, "2026-06-30")
-    assert rows[0]["return_12m"] is None
-
-
-# --------------------------------------------------------------------------
 # 스크리닝/프롬프트 필드 목록에 return_12m이 노출된다 (LLM이 존재를 알게)
 # --------------------------------------------------------------------------
 def test_return_12m_exposed_in_screening_and_pipeline_field_lists():
     from src.agents.domain_backtest import _PIPELINE_PROMPT
     from src.agents.domain_kr import _KR_SCREEN_FIELDS
-    from src.agents.domain_us import _US_SCREEN_FIELDS
 
     assert "return_12m" in _KR_SCREEN_FIELDS
-    assert "return_12m" in _US_SCREEN_FIELDS
     assert "return_12m" in _PIPELINE_PROMPT

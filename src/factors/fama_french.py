@@ -58,7 +58,7 @@ def classify_factor_intent(question: str, llm=None) -> dict | None:
 
 
 def _fetch_famafrench_table(dataset_name: str, start=None, end=None):
-    import pandas_datareader.data as pdr  # 지연 import — us_prices.py의 yfinance 패턴과 동일
+    import pandas_datareader.data as pdr  # 지연 import — 무거운 라이브러리는 필요 시점에만 로드한다
 
     tables = pdr.DataReader(dataset_name, "famafrench", start, end)
     return tables[0]

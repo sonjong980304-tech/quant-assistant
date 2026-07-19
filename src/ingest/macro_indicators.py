@@ -7,13 +7,13 @@
   - VIXCLS (VIX 변동성지수)         : FRED, pandas_datareader
   - CNN_FNG (CNN Fear&Greed, 0~100): CNN, Selenium (JS 동적 렌더링이라 예외적으로 사용)
 
-설계 원칙(기존 us_prices.py/naver_prices.py 관례 준수)
+설계 원칙(기존 수집기 관례 준수)
 ----------------------------------------------------
 - 실제 라이브러리/네트워크 호출은 모두 주입 가능한 함수 인자(fetch_fn/fetch_*)로 분리 —
   네트워크 없이 파싱·검증·재시도·upsert 순수 로직만 단위테스트한다(DI 관례).
 - 과거 백필 없음(스펙 Non-Goal) — 날짜범위 파라미터를 받지 않고 항상 오늘 날짜만 조회한다.
 - 지표별 수집 실패는 1회 재시도 후 격리 — 한 지표가 실패해도 나머지 지표는 계속 수집한다
-  (us_prices.py의 "종목별 실패 격리, continue"와 같은 정신).
+  (수집기의 "종목별 실패 격리, continue"와 같은 정신).
 """
 from __future__ import annotations
 

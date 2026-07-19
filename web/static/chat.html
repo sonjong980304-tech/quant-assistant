@@ -199,7 +199,7 @@ let _turns = [];        // /api/chat/history 로 받아온 턴 목록(캐시)
 let _selected = null;   // 현재 가운데에 보여주는 턴 인덱스
 let _live = false;      // 질문이 스트리밍 처리 중이면 오른쪽 패널을 진행상황으로 점유
 
-const DOMAIN_LABEL = {kr:'한국', us:'미국', macro:'매크로', backtest:'백테스트', free_exec:'자유 코드 실행'};
+const DOMAIN_LABEL = {kr:'한국', macro:'매크로', backtest:'백테스트', free_exec:'자유 코드 실행'};
 
 function esc(s){
   return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));

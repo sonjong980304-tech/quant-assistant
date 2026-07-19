@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from src.ingest.exchange_rate import get_usdkrw_rate, needs_exchange_rate
-from src.ingest.price_live import ensure_live_prices, ensure_live_prices_us, needs_live_price
+from src.ingest.price_live import ensure_live_prices, needs_live_price
 from src.llm import LLM, LLMClient, extract_json, extract_sql
 from src.sql_exec import run_select
 from src.version import build_data_version, now_iso
@@ -128,8 +128,8 @@ def make_nodes(deps: Deps) -> dict:
     def _mentioned_stock_codes(conn, table: str, text: str) -> list[str]:
         """text(질문)에 실제로 name이 언급된 종목의 stock_code만 골라 반환한다.
 
-        실사용 재현 버그: 이 스코핑 없이 테이블 전체(company 3,924건 + us_company
-        7,123건, 2026-07-14 실측)를 ensure_live_prices(_us)에 통째로 넘기면 "오늘
+        실사용 재현 버그: 이 스코핑 없이 테이블 전체(company 3,924건, 2026-07-14 실측)를
+        ensure_live_prices에 통째로 넘기면 "오늘
         삼성전자 종가"처럼 종목 하나만 필요한 질문에도 전체 종목의 실시간 시세를
         하나씩 외부 API(pykrx/yfinance)로 호출하게 돼 요청이 사실상 멈춘 것처럼
         보일 만큼(수천 건 순차 호출) 느려진다. instr()은 LIKE와 달리 name에 포함된
@@ -157,12 +157,9 @@ def make_nodes(deps: Deps) -> dict:
                 mention_text = f"{state.get('question', '')} {state.get('raw_question', '')}"
                 codes = _mentioned_stock_codes(deps.conn, "company", mention_text)
                 info = ensure_live_prices(deps.conn, codes, deps.today)
-                us_codes = _mentioned_stock_codes(deps.conn, "us_company", mention_text)
-                us_info = ensure_live_prices_us(deps.conn, us_codes, deps.today)
                 notes = _note(
                     state,
-                    f"live_price: KR 실시간 {info['fetched']}건/캐시 {info['cached']}건, "
-                    f"US 실시간 {us_info['fetched']}건/캐시 {us_info['cached']}건 ({info['today']})",
+                    f"live_price: 실시간 {info['fetched']}건/캐시 {info['cached']}건 ({info['today']})",
                 )
             except Exception as exc:  # noqa: BLE001 — 실시간 호출 실패는 질의를 막지 않는다
                 notes = _note(state, f"live_price: 스킵(오류: {exc})")

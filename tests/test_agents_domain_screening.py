@@ -17,9 +17,7 @@ from __future__ import annotations
 import json
 
 import src.agents.domain_kr as kr
-import src.agents.domain_us as us
 from src.agents.domain_kr import answer_kr_screening, is_screening_question
-from src.agents.domain_us import answer_us_screening
 
 
 # 크로스섹션 대체용 가짜 유니버스 행(실제 metrics_at 스키마의 부분집합).
@@ -134,21 +132,6 @@ def test_answer_kr_question_routes_low_per_phrasing_via_llm_screening_intent(mon
     monkeypatch.setattr(kr, "answer_kr_screening", spy_screening)
 
     result = kr.answer_kr_question("저PER 5종목", conn=None, llm_fn=lambda _p: "yes")
-    assert result is sentinel
-    assert called == ["저PER 5종목"]
-
-
-def test_answer_us_question_routes_low_per_phrasing_via_llm_screening_intent(monkeypatch):
-    sentinel = {"intent": "screening", "result": [{"name": "x"}], "errors": []}
-    called = []
-
-    def spy_screening(question, conn, **kwargs):
-        called.append(question)
-        return sentinel
-
-    monkeypatch.setattr(us, "answer_us_screening", spy_screening)
-
-    result = us.answer_us_question("저PER 5종목", conn=None, llm_fn=lambda _p: "yes")
     assert result is sentinel
     assert called == ["저PER 5종목"]
 
@@ -385,17 +368,6 @@ def test_answer_kr_screening_calls_on_progress_with_spec_detail():
     assert detail["asof"] == "2026-07-14"
 
 
-def test_answer_us_screening_calls_on_progress_with_spec_detail():
-    llm = _json_llm({"criteria": [{"key": "per", "direction": "high"}], "top_n": 2})
-    events = []
-    answer_us_screening(
-        "PER 높은 2개", conn=None, llm_fn=llm, cross_section_fn=_fake_rows, asof="2026-07-14",
-        on_progress=lambda step, summary, detail=None: events.append((step, summary, detail)),
-    )
-    assert len(events) == 1
-    assert events[0][2]["domain"] == "us"
-
-
 def test_answer_kr_screening_override_spec_skips_llm_entirely():
     """재실행(human-in-the-loop): 사용자가 편집한 spec을 주면 LLM 추출 단계를 완전히 건너뛴다."""
     def boom(_prompt):
@@ -435,36 +407,6 @@ def test_answer_kr_question_screening_threads_on_progress_to_screening(monkeypat
     assert captured.get("on_progress") is sentinel
 
 
-def test_answer_us_question_screening_threads_on_progress_to_screening(monkeypatch):
-    captured = {}
-
-    def spy_screening(question, conn, **kwargs):
-        captured.update(kwargs)
-        return {"intent": "screening", "result": [], "errors": []}
-
-    monkeypatch.setattr(us, "answer_us_screening", spy_screening)
-    sentinel = lambda *a, **k: None
-    us.answer_us_question("PER 낮은 5개 회사", conn=None, on_progress=sentinel)
-    assert captured.get("on_progress") is sentinel
-
-
-def test_answer_us_question_screening_with_year_resolves_asof_from_period(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        us, "answer_us_screening",
-        lambda question, conn, **kwargs: captured.update(kwargs) or {"intent": "screening", "result": [], "errors": []},
-    )
-
-    def fake_exec(sql, _conn):
-        assert "us_prices" in sql and "2024-12-31" in sql
-        return {"ok": True, "rows": [{"d": "2024-12-31"}]}
-
-    us.answer_us_question(
-        "2024년기준 PER 가장 낮은 5개 회사", conn=None, execute_sql_fn=fake_exec,
-    )
-    assert captured.get("asof") == "2024-12-31"
-
-
 def test_answer_kr_question_non_screening_does_not_use_screening_path(monkeypatch):
     called = []
     monkeypatch.setattr(
@@ -481,135 +423,12 @@ def test_answer_kr_question_non_screening_does_not_use_screening_path(monkeypatc
     assert result["intent"] != "screening"
 
 
-# ── US 스크리닝 ──────────────────────────────────────────────────────────────
-def test_answer_us_screening_llm_json_returns_ranked_rows():
-    llm = _json_llm({"criteria": [{"key": "per", "direction": "high"}], "top_n": 2})
-    result = answer_us_screening(
-        "PER 가장 높은 2개 회사", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_rows, asof="2026-07-14",
-    )
-    assert result["intent"] == "screening"
-    assert result["errors"] == []
-    assert [r["name"] for r in result["result"]] == ["고PER다", "중간나"]  # per 내림차순 상위 2개
-
-
-def test_answer_us_screening_hallucinated_field_reports_explicit_error():
-    llm = _json_llm({"criteria": [{"key": "psr", "direction": "low"}], "top_n": 3})
-    result = answer_us_screening(
-        "PSR 낮은 3개", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_rows, asof="2026-07-14",
-    )
-    assert result["result"] is None
-    assert result["errors"]
-
-
-def test_answer_us_question_routes_screening_question_to_screening(monkeypatch):
-    sentinel = {"intent": "screening", "result": [{"name": "x"}], "errors": []}
-    called = []
-    monkeypatch.setattr(
-        us, "answer_us_screening",
-        lambda question, conn, **kwargs: called.append(question) or sentinel,
-    )
-    tk_calls = []
-    monkeypatch.setattr(us, "resolve_ticker_us", lambda *a, **k: tk_calls.append(1) or None)
-
-    result = us.answer_us_question("PER이 가장 낮은 5개 회사", conn=None)
-    assert result is sentinel
-    assert called == ["PER이 가장 낮은 5개 회사"]
-    assert tk_calls == []  # 단일종목(resolve_ticker_us) 경로로 새지 않음
-
-
 # ── 미국 시장(거래소) 필터: 도메인별 스펙 분리 + exchanges 필터 (HA15 혼재질문 버그) ──────
 # 실사용 재현 버그: "코스피와 나스닥 각각 PER 낮은 5종목씩" 처럼 한 문장에 한국+미국 시장을
 # 동시에 언급하면, KR/US 두 호출이 같은 원본 텍스트를 같은 프롬프트로 받아 US 쪽 spec 의
 # markets 가 "코스피"에 오염돼(=["KOSPI"]) US 결과(exchange 값만 있는 rows)가 깨졌다.
 # 아래 테스트는 (1) 도메인별 프롬프트 스코프 분리, (2) US exchanges 필터 실제 적용,
 # (3) 단일시장/미지정 회귀 무결을 가짜 llm_fn(DI)로 실제 LLM 없이 검증한다.
-
-# US 유니버스 대체 행: metrics_at_us 는 exchange 값을 'market' 필드에 담는다(data_access_us.py).
-def _fake_us_rows(_conn, _asof):
-    return [
-        {"stock_code": "NAS1", "name": "나스닥가", "sector": "Technology", "market": "NASDAQ", "per": 5.0, "roe": 8.0},
-        {"stock_code": "NAS2", "name": "나스닥나", "sector": "Technology", "market": "NASDAQ", "per": 8.0, "roe": 10.0},
-        {"stock_code": "NYS1", "name": "뉴욕가", "sector": "Financials", "market": "NYSE", "per": 6.0, "roe": 9.0},
-    ]
-
-
-def _smart_scope_llm(prompt: str) -> str:
-    """도메인 스코프 지시를 따르는 LLM 흉내: US 프롬프트면 exchanges, KR 프롬프트면 markets 반환.
-
-    혼재 질문에서도 프롬프트가 '너는 이 도메인만 담당'을 명시하므로, 실제 LLM이 스코프를
-    지켜 각자 자기 시장만 채운다는 가정을 재현한다(오염 없음을 배선 레벨에서 검증).
-    """
-    if "미국 시장" in prompt:
-        return json.dumps(
-            {"criteria": [{"key": "per", "direction": "low"}], "top_n": 5, "exchanges": ["NASDAQ"]}
-        )
-    return json.dumps(
-        {"criteria": [{"key": "per", "direction": "low"}], "top_n": 5, "markets": ["KOSPI"]}
-    )
-
-
-def test_mixed_question_kr_and_us_specs_do_not_cross_contaminate():
-    q = "코스피와 나스닥 각각 PER 낮은 주식 5종목씩 알려줘"
-    kr_res = answer_kr_screening(
-        q, conn=None, llm_fn=_smart_scope_llm, cross_section_fn=_fake_rows, asof="2026-07-14"
-    )
-    us_res = answer_us_screening(
-        q, conn=None, llm_fn=_smart_scope_llm, cross_section_fn=_fake_us_rows, asof="2026-07-14"
-    )
-    # KR 호출: markets=["KOSPI"], exchanges 오염 없음, 결과는 KOSPI 종목만
-    assert kr_res["markets"] == ["KOSPI"]
-    assert kr_res["exchanges"] is None
-    assert kr_res["errors"] == []
-    assert all(r["market"] == "KOSPI" for r in kr_res["result"])
-    # US 호출: exchanges=["NASDAQ"], markets 오염 없음, 결과는 NASDAQ 종목만(NYSE 제외)
-    assert us_res["exchanges"] == ["NASDAQ"]
-    assert us_res["markets"] is None
-    assert us_res["errors"] == []
-    assert all(r["market"] == "NASDAQ" for r in us_res["result"])
-
-
-def test_answer_us_screening_exchanges_filter_excludes_other_exchanges():
-    llm = _json_llm(
-        {"criteria": [{"key": "per", "direction": "low"}], "top_n": 5, "exchanges": ["NASDAQ"]}
-    )
-    result = answer_us_screening(
-        "나스닥 저PER 5종목", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_us_rows, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    assert result["exchanges"] == ["NASDAQ"]
-    assert [r["name"] for r in result["result"]] == ["나스닥가", "나스닥나"]  # NYSE(뉴욕가) 제외
-
-
-def test_answer_us_screening_no_exchange_returns_all_exchanges():
-    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 5})  # exchanges 미지정
-    result = answer_us_screening(
-        "미국 저PER 5종목", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_us_rows, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    assert result["exchanges"] is None
-    assert {r["name"] for r in result["result"]} == {"나스닥가", "나스닥나", "뉴욕가"}  # 전체 대상
-
-
-def test_us_screening_prompt_scopes_to_us_market_only():
-    seen = []
-
-    def spy(prompt: str) -> str:
-        seen.append(prompt)
-        return json.dumps({"criteria": [{"key": "per", "direction": "low"}], "top_n": 5})
-
-    answer_us_screening(
-        "코스피와 나스닥 각각 저PER 5종목", conn=None, llm_fn=spy,
-        cross_section_fn=_fake_us_rows, asof="2026-07-14",
-    )
-    assert seen
-    assert "미국" in seen[0]
-    assert "exchanges" in seen[0]
-    assert "KOSPI" not in seen[0]  # 한국 전용 하드코딩 규칙이 US 프롬프트에 없어야 함
-
 
 def test_kr_screening_prompt_scopes_to_kr_market_only():
     seen = []
@@ -640,61 +459,6 @@ def test_answer_kr_screening_markets_filter_still_works():
     assert result["errors"] == []
     assert result["markets"] == ["KOSDAQ"]
     assert [r["name"] for r in result["result"]] == ["고PER다"]  # KOSDAQ 종목만(A/B는 KOSPI라 제외)
-
-
-def test_us_heuristic_fallback_uses_exchanges_not_markets():
-    """llm_fn 없음 → 휴리스틱 폴백. '나스닥' 키워드는 exchanges 로 잡고 markets 는 오염되지 않는다."""
-    result = answer_us_screening(
-        "나스닥 PER 낮은 5개", conn=None, llm_fn=None,
-        cross_section_fn=_fake_us_rows, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    assert result["exchanges"] == ["NASDAQ"]
-    assert result["markets"] is None
-    assert [r["name"] for r in result["result"]] == ["나스닥가", "나스닥나"]
-
-
-def test_us_heuristic_fallback_ignores_kospi_keyword():
-    """혼재 질문 + llm 없음: US 휴리스틱은 '코스피'를 markets 로 오염시키지 않고 '나스닥'만 잡는다."""
-    result = answer_us_screening(
-        "코스피와 나스닥 각각 PER 낮은 5개", conn=None, llm_fn=None,
-        cross_section_fn=_fake_us_rows, asof="2026-07-14",
-    )
-    assert result["markets"] is None
-    assert result["exchanges"] == ["NASDAQ"]
-
-
-# ── security_type 필터 배선 (증권종류 — 워런트/ADR 등 제외, HA15 후속(B)) ──────────────
-# answer_us_screening 은 cross_section_fn 이 기본값이든 테스트 주입값이든 관계없이
-# security_type 필터를 적용한다(top_n 선정 '이전'에 적용) — 아래는 그 배선이 실제로
-# 동작함을 fixture 레벨에서 빠르게 검증한다(실제 DB 경로 end-to-end 는
-# tests/test_agents_domain_us.py 에서 별도 검증).
-def _fake_us_rows_with_security_type(_conn, _asof):
-    return [
-        {"stock_code": "COM1", "name": "Common One Inc.", "sector": "Technology",
-         "market": "NASDAQ", "security_type": "common", "per": 10.0},
-        {"stock_code": "WRNT", "name": "Warrant Corp Warrant", "sector": "Technology",
-         "market": "NASDAQ", "security_type": "warrant", "per": 0.001},  # 왜곡된 극단적 저PER
-        {"stock_code": "ADRX", "name": "Foreign Co American Depositary Shares", "sector": "Technology",
-         "market": "NASDAQ", "security_type": None, "per": 0.002},  # 미분류 + 이름 키워드 폴백 제외 대상
-        {"stock_code": "COM2", "name": "Common Two Inc.", "sector": "Technology",
-         "market": "NASDAQ", "security_type": "common", "per": 15.0},
-    ]
-
-
-def test_answer_us_screening_excludes_warrant_and_adr_before_ranking():
-    llm = _json_llm({"criteria": [{"key": "per", "direction": "low"}], "top_n": 2})
-    result = answer_us_screening(
-        "나스닥 저PER 2종목", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_us_rows_with_security_type, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    codes = [r["stock_code"] for r in result["result"]]
-    # 필터가 top_n 선정보다 먼저 적용되지 않았다면 WRNT/ADRX의 왜곡된 저PER이 상위를
-    # 차지해 COM1/COM2가 밀려났을 것 — 정확히 보통주 2개만 남아야 한다.
-    assert codes == ["COM1", "COM2"]
-    assert "WRNT" not in codes
-    assert "ADRX" not in codes
 
 
 # ── _coerce_top_n: 상한 완화(50→4000, pipeline_exec.MAX_SIZE와 동일) ─────────
@@ -789,24 +553,6 @@ def test_answer_kr_screening_defaults_sector_neutral_false_to_combine():
         cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
     )
     assert captured.get("sector_neutral") is False
-
-
-def test_answer_us_screening_passes_sector_neutral_true_to_combine():
-    """공용 _run_screening을 타므로 US 경로도 대칭으로 sector_neutral을 전달한다."""
-    llm = _json_llm({
-        "criteria": [{"key": "per", "direction": "high"}], "top_n": 2, "sector_neutral": True,
-    })
-    captured = {}
-
-    def fake_combine(rows, criteria, **kwargs):
-        captured.update(kwargs)
-        return []
-
-    answer_us_screening(
-        "섹터 중립화해서 PER 높은 2개", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_rows, combine_fn=fake_combine, asof="2026-07-14",
-    )
-    assert captured.get("sector_neutral") is True
 
 
 # ── winsorize 기본 적용: 멀티팩터(2개 이상) z-score 스크리닝은 백테스트와 동일하게
@@ -950,22 +696,6 @@ def test_answer_kr_screening_single_extreme_returns_flat_list_backward_compat():
     assert result["both_extremes"] is False
     assert isinstance(result["result"], list)
     assert [r["name"] for r in result["result"]] == ["고PER다"]  # per 최댓값 1개
-
-
-def test_answer_us_screening_both_extremes_symmetric():
-    """US 경로도 공용 _run_screening을 타므로 both_extremes가 대칭 동작한다."""
-    llm = _json_llm({
-        "criteria": [{"key": "per", "direction": "high"}, {"key": "per", "direction": "low"}],
-        "top_n": 1, "both_extremes": True,
-    })
-    result = answer_us_screening(
-        "PER의 최댓값과 최솟값", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_rows, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    assert result["both_extremes"] is True
-    assert [r["name"] for r in result["result"]["highest"]] == ["고PER다"]
-    assert [r["name"] for r in result["result"]["lowest"]] == ["저PER가"]
 
 
 # ── 섹터중립 비교(sector_neutral_compare) — 섹터중립화 전/후를 한 번에 비교 ─────────────
@@ -1134,16 +864,3 @@ def test_answer_kr_screening_non_compare_result_shape_unchanged():
     assert result["sector_neutral_compare"] is False
     assert isinstance(result["result"], list)
 
-
-def test_answer_us_screening_sector_neutral_compare_symmetric():
-    # 공용 _run_screening을 타므로 US 경로도 대칭 동작.
-    llm = _json_llm({
-        "criteria": [{"key": "per", "direction": "low"}], "top_n": 2, "sector_neutral_compare": True,
-    })
-    result = answer_us_screening(
-        "PER 낮은 2개 섹터중립화 전후 비교", conn=None, llm_fn=llm,
-        cross_section_fn=_fake_rows, asof="2026-07-14",
-    )
-    assert result["errors"] == []
-    assert result["sector_neutral_compare"] is True
-    assert set(result["result"].keys()) == {"raw", "sector_neutral"}

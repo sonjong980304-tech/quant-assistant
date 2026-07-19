@@ -408,26 +408,6 @@ def test_answer_backtest_question_skips_generation_when_no_llm_fn(tmp_path):
     assert gen_calls == []
 
 
-def test_market_us_selects_us_snapshot_agent(tmp_path, monkeypatch):
-    """market='US'이면 기본 스냅샷 에이전트로 get_price_snapshot_us를 선택한다."""
-    import src.agents.domain_backtest as mod
-
-    picked = {"kr": 0, "us": 0}
-    monkeypatch.setattr(mod, "get_price_snapshot_kr",
-                        lambda *a, **k: picked.__setitem__("kr", picked["kr"] + 1) or [])
-    monkeypatch.setattr(mod, "get_price_snapshot_us",
-                        lambda *a, **k: picked.__setitem__("us", picked["us"] + 1) or [])
-
-    conn = _writable_conn(tmp_path)
-    answer_backtest_question(
-        "AAPL 백테스트", [{"op": "run_backtest", "params": {}, "out": "bt"}], conn,
-        stock_codes="AAPL", market="US",
-        run_pipeline_fn=lambda s, conn=None: dict(_BT_RESULT),
-    )
-
-    assert picked == {"kr": 0, "us": 1}
-
-
 # ── on_progress — 감사배선(run_audit_fn)으로 그대로 전달되고, steps 자동생성 시에도
 #    "실행계획 생성 중" 진행 이벤트를 낸다 ──────────────────────────────────────────
 def test_on_progress_passed_through_to_run_audit_fn(tmp_path):

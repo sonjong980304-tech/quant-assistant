@@ -20,9 +20,7 @@ import sqlite3
 
 import src.agents.domain_kr as kr
 from src.agents.domain_kr import _KR_SCREEN_FIELDS, _screening_prompt
-from src.agents.domain_us import _US_SCREEN_FIELDS
 from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS, metrics_at
-from src.backtest.data_access_us import METRIC_FIELD_DESCRIPTIONS_US
 from src.db import init_db
 
 _META_FIELDS = {
@@ -83,10 +81,6 @@ def test_kr_screen_fields_derived_from_single_source():
     assert set(_KR_SCREEN_FIELDS) == set(METRIC_FIELD_DESCRIPTIONS.keys())
 
 
-def test_us_screen_fields_derived_from_single_source():
-    assert set(_US_SCREEN_FIELDS) == set(METRIC_FIELD_DESCRIPTIONS_US.keys())
-
-
 # ---------------------------------------------------------------------------
 # (b) 프롬프트가 필드 설명을 동적으로 나열 + LLM이 그 설명만 보고(별칭사전 안 거치고) 매핑
 # ---------------------------------------------------------------------------
@@ -96,36 +90,12 @@ def test_screening_prompt_lists_operating_profit_description_kr():
     assert METRIC_FIELD_DESCRIPTIONS["operating_profit"] in prompt
 
 
-def test_screening_prompt_lists_operating_profit_description_us():
-    prompt = _screening_prompt("영업이익 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
-    assert "operating_profit" in prompt
-    assert METRIC_FIELD_DESCRIPTIONS_US["operating_profit"] in prompt
-
-
 def test_screening_prompt_lists_market_cap_description_kr():
     # 실서버 재현 버그 회귀: market_cap이 프롬프트 후보 목록에서 빠져 LLM이 total_assets를
     # 잘못 골랐다. 이제 "market_cap: 시가총액…" 문구가 프롬프트에 실제로 들어가야 한다.
     prompt = _screening_prompt("시가총액 가장 높은 기업", _KR_SCREEN_FIELDS, domain="KR")
     assert "market_cap" in prompt
     assert METRIC_FIELD_DESCRIPTIONS["market_cap"] in prompt
-
-
-def test_screening_prompt_lists_market_cap_description_us():
-    prompt = _screening_prompt("시가총액 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
-    assert "market_cap" in prompt
-    assert METRIC_FIELD_DESCRIPTIONS_US["market_cap"] in prompt
-
-
-def test_screening_prompt_us_domain_does_not_leak_kr_only_fields():
-    """US 프롬프트에는 US가 계산하지 않는 KR 전용 필드가 섞이지 않는다.
-
-    과거엔 revenue_growth/op_growth 등 성장률을 KR 전용으로 봤으나, us_financials(yfinance)에
-    분기 손익이 쌓여 있어 YoY 계산이 가능해져 US에도 정식 편입됐다(METRIC_FIELD_DESCRIPTIONS_US).
-    지금도 US에 없는 KR 전용 지표는 마법공식 계열(earnings_yield/roc — DART 전용 계산)이다.
-    """
-    prompt = _screening_prompt("이익수익률(마법공식) 가장 높은 기업", _US_SCREEN_FIELDS, domain="US")
-    assert "earnings_yield" not in prompt
-    assert "roc" not in prompt
 
 
 def test_llm_maps_operating_profit_from_prompt_description_not_alias_table():

@@ -43,9 +43,7 @@ from pydantic import BaseModel
 from src.agents.conversation import get_history, get_or_create_session, get_session, reset_session, run_turn, turn_to_csv
 from src.agents.domain_backtest import answer_backtest_question
 from src.agents.domain_kr import answer_kr_screening
-from src.agents.domain_us import answer_us_screening
 from src.agents.graph import run_hierarchical, run_streaming
-from src.agents.supervisor import US_DISABLED_MESSAGE
 from src.config import CONFIG
 from src.db import connect, connect_readonly
 from src.ingest.exchange_rate import fetch_usdkrw_rate_live
@@ -56,15 +54,6 @@ app = FastAPI(title="Quant Assistant")
 STATIC_DIR = Path(__file__).parent / "static"
 
 # sqlite conn은 스레드 귀속이므로 요청마다 새 읽기전용 연결을 연다(계층형 그래프가 소비).
-
-
-def _reject_if_us_domain(domain: Optional[str]) -> None:
-    """domain이 'us'면 명확한 사유로 요청을 거부한다(403). 미국 도메인은 현재 제품에서
-    비활성화 상태 — 관련 코드·데이터(us_* 테이블, data_access_us 등)는 그대로 보존돼 있어
-    이 게이트만 풀면 다시 활성화할 수 있다. 각 도메인 스위칭 엔드포인트(재실행/섹터/백테스트)
-    맨 앞에서 호출해 중복 없이 한 곳에서 정책을 강제한다."""
-    if (domain or "").strip().lower() == "us":
-        raise HTTPException(403, US_DISABLED_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +68,9 @@ class RerunReq(BaseModel):
     """휴먼인더루프 재실행 요청 — 실시간 트리에서 본 조건JSON/파이프라인을 사용자가
     편집한 뒤 그대로 재실행한다(LLM 생성 단계는 건너뛴다).
 
-    kind="screening": domain(kr|us) + spec(criteria/top_n/sectors/markets 등, 편집된 값)
+    kind="screening": domain(kr) + spec(criteria/top_n/sectors/markets 등, 편집된 값)
       + asof(선택, 기간 재지정).
-    kind="backtest": steps(편집된 파이프라인 JSON) + market(KR|US).
+    kind="backtest": steps(편집된 파이프라인 JSON) + market(KR).
     """
     kind: str
     question: str
@@ -193,9 +182,8 @@ def api_query_rerun(req: RerunReq):
     if not req.question.strip():
         raise HTTPException(400, "질문이 비어 있습니다.")
     if req.kind == "screening":
-        _reject_if_us_domain(req.domain)  # 미국 도메인 비활성화(코드는 보존, 진입만 차단)
-        if req.domain not in ("kr", "us"):
-            raise HTTPException(400, "domain은 'kr' 또는 'us'여야 합니다.")
+        if req.domain != "kr":
+            raise HTTPException(400, "domain은 'kr'여야 합니다.")
         if not isinstance(req.spec, dict):
             raise HTTPException(400, "재실행할 spec(조건 JSON)이 필요합니다.")
     elif req.kind == "backtest":
@@ -208,8 +196,7 @@ def api_query_rerun(req: RerunReq):
     try:
         llm_fn = _build_llm_fn(req.model)
         if req.kind == "screening":
-            screen_fn = answer_kr_screening if req.domain == "kr" else answer_us_screening
-            result = screen_fn(
+            result = answer_kr_screening(
                 req.question, conn, llm_fn=llm_fn, override_spec=req.spec, asof=req.asof,
             )
         else:
@@ -517,7 +504,7 @@ _MACRO_INDICES = [
 
 
 def _fetch_index_quote(ticker: str) -> dict:
-    import yfinance as yf  # 지연 import — us_prices.py의 기존 패턴과 동일
+    import yfinance as yf  # 지연 import — 무거운 라이브러리는 필요 시점에만 로드한다
 
     hist = yf.Ticker(ticker).history(period="5d")
     closes = hist["Close"].dropna()
@@ -553,7 +540,7 @@ def _fetch_krx_index_quote(naver_code: str) -> dict:
 @app.get("/api/macro")
 def api_macro():
     """거시지표 티커 응답. 항목별로 실패를 격리해 하나가 죽어도 전체 응답은 유지한다
-    (us_prices.py의 "종목별 실패 격리, 계속 진행" 관례와 동일).
+    (수집기 전반의 "종목별 실패 격리, 계속 진행" 관례와 동일).
 
     파마프렌치 팩터는 웹 티커에서 뺐다(사용자 요청) — 프롬프트로 직접 물어보면
     fama_french.py의 LLM 의도판단 경로로 여전히 조회 가능하다.
@@ -689,7 +676,7 @@ def api_allweather():
 # 백테스트 (모듈 B)
 # ---------------------------------------------------------------------------
 class BacktestReq(BaseModel):
-    domain: str = "kr"            # 'kr'(KOSPI/KOSDAQ) | 'us'(NASDAQ/NYSE/NYSE Amex). 기본 kr(회귀 보존)
+    domain: str = "kr"            # 'kr'(KOSPI/KOSDAQ). 기본 kr
     start_year: int = 2024
     end_year: int = 2026
     rebalance: str = "quarterly"
@@ -697,7 +684,7 @@ class BacktestReq(BaseModel):
     criteria: list = []           # [{"key","direction","weight"}]
     combine: str = "zscore"
     sectors: Optional[list] = None
-    markets: Optional[list] = None     # kr: ['KOSPI','KOSDAQ'] / us: ['NASDAQ','NYSE','NYSE Amex'] / None(전체)
+    markets: Optional[list] = None     # kr: ['KOSPI','KOSDAQ'] / None(전체)
     winsorize_z: Optional[float] = None  # z-score 이상치 완화 임계값(None이면 미적용, 기존 동작)
     winsorize_pct: Optional[float] = None  # 원본값 퍼센타일 winsorize(예: 0.01=상하위 1%, None이면 미적용)
     name: str = "전략"
@@ -718,11 +705,10 @@ def api_metric_defs():
 
 @app.get("/api/sectors")
 def api_sectors(domain: str = "kr"):
-    # kr: company(KRX 업종분류) / us: us_company(원본 taxonomy). 그 외 값은 사용자 입력 오류(400).
-    _reject_if_us_domain(domain)  # 미국 도메인 비활성화(코드는 보존, 진입만 차단)
-    if domain not in ("kr", "us"):
-        raise HTTPException(400, "domain은 'kr' 또는 'us'여야 합니다.")
-    table = "company" if domain == "kr" else "us_company"
+    # company(KRX 업종분류). 그 외 값은 사용자 입력 오류(400).
+    if domain != "kr":
+        raise HTTPException(400, "domain은 'kr'여야 합니다.")
+    table = "company"
     conn = connect()
     try:
         return [r["sector"] for r in conn.execute(
@@ -736,15 +722,13 @@ def api_backtest(req: BacktestReq):
     from src.backtest.data_access import build_benchmark_fn, build_callbacks, rebalance_dates
     from src.backtest.engine import run_backtest, save_backtest_run
 
-    # domain(kr|us): KR(KOSPI/KOSDAQ)와 US(NASDAQ/NYSE/NYSE Amex)는 통화·데이터소스가 달라
-    # 한 백테스트에서 섞지 않는다(프런트도 배타적 토글). 기본 'kr'로 기존 동작 100% 보존.
-    _reject_if_us_domain(req.domain)  # 미국 도메인 비활성화(코드는 보존, 진입만 차단)
-    if req.domain not in ("kr", "us"):
-        raise HTTPException(400, "domain은 'kr' 또는 'us'여야 합니다.")
+    # domain(kr): KOSPI/KOSDAQ 국내 종목만 백테스트한다. 기본 'kr'로 기존 동작 100% 보존.
+    if req.domain != "kr":
+        raise HTTPException(400, "domain은 'kr'여야 합니다.")
     if not req.criteria:
         raise HTTPException(400, "지표를 1개 이상 선택하세요.")
-    # markets 검증: 도메인별 허용 시장 외 값이 섞이면 사용자 입력 오류(400). markets=None(전체)은 통과.
-    allowed_markets = {"KOSPI", "KOSDAQ"} if req.domain == "kr" else {"NASDAQ", "NYSE", "NYSE Amex"}
+    # markets 검증: 허용 시장 외 값이 섞이면 사용자 입력 오류(400). markets=None(전체)은 통과.
+    allowed_markets = {"KOSPI", "KOSDAQ"}
     if req.markets:
         invalid = [m for m in req.markets if m not in allowed_markets]
         if invalid:
@@ -757,9 +741,8 @@ def api_backtest(req: BacktestReq):
                 for c in req.criteria]
     conn = connect()
     try:
-        # 가격 최신일(리밸런싱 날짜 절단 기준)은 도메인별 가격 테이블에서 뽑는다(KR=prices, US=us_prices).
-        price_table = "prices" if req.domain == "kr" else "us_prices"
-        maxd = conn.execute(f"SELECT MAX(date) FROM {price_table}").fetchone()[0]
+        # 가격 최신일(리밸런싱 날짜 절단 기준)은 prices 테이블에서 뽑는다.
+        maxd = conn.execute("SELECT MAX(date) FROM prices").fetchone()[0]
         full = rebalance_dates(req.start_year, req.end_year, req.rebalance)
         dates = [d for d in full if maxd and d <= maxd]
         # 진행 중(미완결) 구간 이어붙이기: 사용자가 요청한 마지막 리밸런싱이 아직 오지 않은
@@ -773,17 +756,10 @@ def api_backtest(req: BacktestReq):
             dates = dates + [maxd]
         if len(dates) < 2:
             raise HTTPException(400, "선택 기간에 데이터가 부족합니다(주가 시계열 범위 확인).")
-        # 도메인별 엔진 콜백/벤치마크. US는 us_company/us_prices/us_financials 어댑터를 쓰고
-        # 벤치마크로 S&P500 실제지수(^GSPC)를 쓴다(동일가중 유니버스 벤치마크가 아님).
-        if req.domain == "us":
-            from src.backtest.data_access_us import build_callbacks_us, build_sp500_benchmark_fn
-            mfn, pfn = build_callbacks_us(conn)
-            bench_fn = build_sp500_benchmark_fn(dates)
-            names_sql = "SELECT stock_code,name FROM us_company"
-        else:
-            mfn, pfn = build_callbacks(conn)
-            bench_fn = build_benchmark_fn(dates, mfn, pfn)
-            names_sql = "SELECT stock_code,name FROM company"
+        # 엔진 콜백/벤치마크(company/prices/financials 어댑터, 동일가중 유니버스 벤치마크).
+        mfn, pfn = build_callbacks(conn)
+        bench_fn = build_benchmark_fn(dates, mfn, pfn)
+        names_sql = "SELECT stock_code,name FROM company"
         params = {
             "n": req.n, "criteria": criteria, "combine": req.combine,
             "sectors": req.sectors, "markets": req.markets, "winsorize_z": req.winsorize_z,

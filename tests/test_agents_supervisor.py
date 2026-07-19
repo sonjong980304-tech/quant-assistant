@@ -36,20 +36,12 @@ def test_route_question_single_domain_kr():
     assert route_question("삼성전자 PER", fake_llm) == ["kr"]
 
 
-def test_route_question_multi_domain_kr_and_us():
-    """"삼성전자 vs 애플 비교" → mock LLM이 'kr, us' 응답 → 둘 다 반환."""
-    def fake_llm(prompt: str) -> str:
-        return "kr, us"
-
-    assert route_question("삼성전자 vs 애플 비교", fake_llm) == ["kr", "us"]
-
-
 def test_route_question_normalizes_order_and_dedupes():
-    """LLM이 순서를 뒤섞거나 중복을 내도 정규 순서(kr,us,macro,backtest)로 정리."""
+    """LLM이 순서를 뒤섞거나 중복을 내도 정규 순서(kr,macro,backtest)로 정리."""
     def fake_llm(prompt: str) -> str:
-        return "us kr us macro"
+        return "macro kr backtest kr"
 
-    assert route_question("복합 질문", fake_llm) == ["kr", "us", "macro"]
+    assert route_question("복합 질문", fake_llm) == ["kr", "macro", "backtest"]
 
 
 def test_route_question_parses_json_list_response():
@@ -157,15 +149,10 @@ def test_dispatch_domains_preserves_raw_results(monkeypatch):
         sup, "answer_kr_question",
         lambda question, conn, llm_fn=None: {"stock_code": "005930", "raw": "KR-DATA"},
     )
-    monkeypatch.setattr(
-        sup, "answer_us_question",
-        lambda question, conn, llm_fn=None: {"stock_code": "AAPL", "raw": "US-DATA"},
-    )
 
-    out = dispatch_domains(["kr", "us"], "삼성전자 vs 애플", conn=None, llm_fn=None)
+    out = dispatch_domains(["kr"], "삼성전자", conn=None, llm_fn=None)
 
     assert out["kr"] == {"stock_code": "005930", "raw": "KR-DATA"}
-    assert out["us"] == {"stock_code": "AAPL", "raw": "US-DATA"}
     # 라우팅되지 않은 도메인은 키가 없어야 한다(가공 없이 요청한 것만).
     assert "macro" not in out
     assert "backtest" not in out
@@ -216,8 +203,8 @@ def test_dispatch_domains_passes_on_progress_to_backtest_domain(monkeypatch):
     assert captured["on_progress"] is sentinel
 
 
-def test_dispatch_domains_passes_on_progress_to_kr_and_us_domains(monkeypatch):
-    """스크리닝 조건 JSON을 실시간으로 노출하려면 kr/us 도메인 호출에도 on_progress가
+def test_dispatch_domains_passes_on_progress_to_kr_domain(monkeypatch):
+    """스크리닝 조건 JSON을 실시간으로 노출하려면 kr 도메인 호출에도 on_progress가
     backtest와 동일하게 전달돼야 한다(기존엔 backtest만 전달되고 있었음)."""
     import src.agents.supervisor as sup
 
@@ -227,18 +214,12 @@ def test_dispatch_domains_passes_on_progress_to_kr_and_us_domains(monkeypatch):
         captured["kr"] = on_progress
         return {"stock_code": "005930"}
 
-    def spy_us(question, conn, llm_fn=None, on_progress=None):
-        captured["us"] = on_progress
-        return {"ok": True}
-
     monkeypatch.setattr(sup, "answer_kr_question", spy_kr)
-    monkeypatch.setattr(sup, "answer_us_question", spy_us)
 
     sentinel = lambda step, summary, detail=None: None
-    dispatch_domains(["kr", "us"], "삼성전자 vs 애플", conn=None, llm_fn=None, on_progress=sentinel)
+    dispatch_domains(["kr"], "삼성전자", conn=None, llm_fn=None, on_progress=sentinel)
 
     assert captured["kr"] is sentinel
-    assert captured["us"] is sentinel
 
 
 def test_dispatch_domains_absorbs_domain_exception(monkeypatch):
@@ -820,14 +801,14 @@ def test_route_question_calls_on_progress_with_routing_summary():
     events: list[tuple[str, str]] = []
 
     def fake_llm(prompt: str) -> str:
-        return "kr, us"
+        return "kr, macro"
 
-    route_question("삼성전자 vs 애플", fake_llm, on_progress=lambda step, summary: events.append((step, summary)))
+    route_question("삼성전자 매크로 신호", fake_llm, on_progress=lambda step, summary: events.append((step, summary)))
 
     assert events
     step, summary = events[0]
     assert step == "supervisor"
-    assert "한국" in summary and "미국" in summary
+    assert "한국" in summary and "매크로" in summary
 
 
 def test_route_question_without_on_progress_is_unaffected():
@@ -1072,55 +1053,6 @@ def test_answer_with_verification_returns_uncertain_immediately_when_routes_empt
     assert res["uncertain"] is True
     assert res["routes"] == []
     assert res["attempts"] == 0
-
-
-# ── 미국 도메인 비활성화 게이트 — 라우팅이 us를 잡아도 실행하지 않고 우아하게 거부한다.
-#    (미국 관련 코드·데이터는 보존되어 있으나 현재 제품에서는 진입을 막는다.) ────────────
-def test_answer_with_verification_us_only_question_returns_disabled_without_dispatch():
-    """미국만 필요한 질문은 dispatch/verify를 시도조차 하지 않고 즉시 '비활성화' 사유로
-    끝난다(크래시 없음). route_fn이 us만 반환해도 마찬가지다."""
-    dispatch_calls: list[int] = []
-
-    def stub_route(question, llm_fn):
-        return ["us"]
-
-    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
-        dispatch_calls.append(1)
-        return {}
-
-    res = answer_with_verification(
-        "애플 PER 알려줘", conn=None, llm_fn=None,
-        route_fn=stub_route, dispatch_fn=stub_dispatch,
-    )
-    assert dispatch_calls == []          # us 도메인은 dispatch 자체를 하지 않는다
-    assert res["uncertain"] is True
-    assert res["routes"] == []
-    assert res["attempts"] == 0
-    assert "미국" in res["reason"]       # 명확한 비활성화 사유
-
-
-def test_answer_with_verification_drops_us_from_mixed_domains_and_proceeds():
-    """복합 도메인(kr+us)에서는 us만 제외하고 나머지(kr)로 정상 진행한다 — 크래시 없이."""
-    dispatch_routes_seen: list[list[str]] = []
-
-    def stub_route(question, llm_fn):
-        return ["kr", "us"]
-
-    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
-        dispatch_routes_seen.append(list(routes))
-        return {"kr": {"stock_code": "005930", "financial": {"value": 12.5}}}
-
-    def valid_verify(question, domain_results, llm_fn):
-        return {"valid": True, "reason": "일치"}
-
-    res = answer_with_verification(
-        "삼성전자 vs 애플 PER 비교", conn=None, llm_fn=None,
-        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=valid_verify,
-    )
-    assert dispatch_routes_seen[0] == ["kr"]   # us는 빠지고 kr만 dispatch
-    assert res["routes"] == ["kr"]
-    assert res["uncertain"] is False
-    assert "us" not in res["domain_results"]
 
 
 def test_answer_with_verification_without_on_progress_is_unaffected():

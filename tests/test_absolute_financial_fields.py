@@ -21,9 +21,7 @@ import sqlite3
 
 import src.agents.domain_kr as kr
 from src.agents.domain_kr import _KR_SCREEN_FIELDS
-from src.agents.domain_us import _US_SCREEN_FIELDS
 from src.backtest.data_access import metrics_at
-from src.backtest.data_access_us import metrics_at_us
 from src.db import init_db
 
 
@@ -97,57 +95,6 @@ def test_metrics_at_preserves_existing_ratio_fields_regression(tmp_path):
     assert r["operating_margin"] == 6_000_000_000_000.0 / 70_000_000_000_000.0 * 100
 
 
-def _seed_us(tmp_path) -> sqlite3.Connection:
-    db = tmp_path / "abs_us.db"
-    init_db(str(db))
-    conn = sqlite3.connect(str(db))
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, updated_at) "
-        "VALUES (?,?,?,?,?,?)",
-        ("AAPL", "Apple", "NASDAQ", "Technology", 3.0e12, "2026-06-01"),
-    )
-    for item_key, value in (
-        ("Total Revenue", 100_000_000_000.0),
-        ("Operating Income", 30_000_000_000.0),
-        ("Net Income", 25_000_000_000.0),
-        ("Stockholders Equity", 60_000_000_000.0),
-    ):
-        conn.execute(
-            "INSERT INTO us_financials(stock_code, as_of_date, period_type, statement_type, "
-            "item_key, item_value, disclosed_date, source) VALUES (?,?,?,?,?,?,?,?)",
-            ("AAPL", "2026-03-31", "quarterly", "income_stmt" if item_key != "Stockholders Equity"
-             else "balance_sheet", item_key, value, "2026-05-15", "yfinance"),
-        )
-    conn.execute(
-        "INSERT INTO us_prices(stock_code, date, open, high, low, close, volume) "
-        "VALUES (?,?,?,?,?,?,?)",
-        ("AAPL", "2026-06-30", 200.0, 200.0, 200.0, 200.0, 1000.0),
-    )
-    conn.commit()
-    return conn
-
-
-def test_metrics_at_us_exposes_operating_profit_revenue_net_income(tmp_path):
-    conn = _seed_us(tmp_path)
-    rows = metrics_at_us(conn, "2026-06-30")
-    assert len(rows) == 1
-    r = rows[0]
-    assert r["operating_profit"] == 30_000_000_000.0
-    assert r["revenue"] == 100_000_000_000.0
-    assert r["net_income"] == 25_000_000_000.0
-    conn.close()
-
-
-def test_metrics_at_us_preserves_existing_ratio_fields_regression(tmp_path):
-    conn = _seed_us(tmp_path)
-    rows = metrics_at_us(conn, "2026-06-30")
-    r = rows[0]
-    for key in ("operating_margin", "net_margin", "per", "pbr", "roe"):
-        assert key in r
-    assert r["operating_margin"] == 30_000_000_000.0 / 100_000_000_000.0 * 100
-
-
 # ---------------------------------------------------------------------------
 # 2) _heuristic_screening_spec: 새 절대값 별칭 vs 기존 비율 별칭 (회귀, 충돌 금지)
 # ---------------------------------------------------------------------------
@@ -191,12 +138,6 @@ def test_heuristic_still_maps_net_income_growth_not_absolute_regression():
     assert _metric_for("순이익성장 가장 높은 기업") == "ni_growth"
 
 
-def test_heuristic_maps_operating_profit_absolute_for_us_domain_too():
-    """별칭표(_SCREEN_METRIC_ALIASES)는 KR/US 공유이므로 US 도메인 호출에서도 동일하게 동작."""
-    spec = kr._heuristic_screening_spec("나스닥에서 영업이익 가장 높은 기업", domain="US")
-    assert spec["criteria"][0]["key"] == "operating_profit"
-
-
 # ---------------------------------------------------------------------------
 # 3) 필드 목록 노출 (LLM 프롬프트가 존재를 알게)
 # ---------------------------------------------------------------------------
@@ -205,8 +146,3 @@ def test_kr_screen_fields_expose_absolute_financial_fields():
     assert "revenue" in _KR_SCREEN_FIELDS
     assert "net_income" in _KR_SCREEN_FIELDS
 
-
-def test_us_screen_fields_expose_absolute_financial_fields():
-    assert "operating_profit" in _US_SCREEN_FIELDS
-    assert "revenue" in _US_SCREEN_FIELDS
-    assert "net_income" in _US_SCREEN_FIELDS

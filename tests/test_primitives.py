@@ -569,48 +569,6 @@ def test_run_backtest_primitive_skips_benchmark_when_disabled():
     assert captured["benchmark_fn"] is None
 
 
-# --------------------------------------------------------------------------
-# 7b. run_backtest_primitive market="US" — 미국 콜백 + S&P500·유니버스 이중 벤치마크
-# --------------------------------------------------------------------------
-def test_run_backtest_primitive_us_uses_us_callbacks_and_dual_benchmark():
-    used = {"callbacks": False, "sp500": False, "universe": False}
-
-    def spy_callbacks(conn):
-        used["callbacks"] = True
-        return (lambda d: [], lambda d, c: None)
-
-    def spy_sp500(dates, fetch_fn=None):
-        used["sp500"] = True
-        return lambda d: 1.0  # 평탄한 S&P500 레벨
-
-    def spy_universe(dates, mfn, pfn):
-        used["universe"] = True
-        return lambda d: 1.0  # 평탄한 유니버스 레벨
-
-    def fake_backtest_fn(dates, metrics_fn, price_fn, params, benchmark_fn=None, weights=None):
-        # 엔진이 S&P500(메인) 벤치마크로 성과를 계산한 것처럼 흉내
-        return {"dates": dates, "navs": [1.0, 1.2], "benchmark": [1.0, 1.0],
-                "performance": {"cagr": 20.0, "benchmark_return": 0.0, "excess_return": 20.0, "beta": 0.0},
-                "holdings": [{"date": dates[0], "codes": []}]}
-
-    result = run_backtest_primitive(
-        "CONN", start_year=2026, end_year=2026, market="US", weights={"AAPL": 1.0},
-        dates_fn=lambda sy, ey, freq: ["2026-01-31", "2026-02-28"],
-        max_date_fn=lambda conn: "2026-12-31",
-        callbacks_fn=spy_callbacks,
-        benchmark_fn_factory=spy_universe,
-        sp500_fn_factory=spy_sp500,
-        backtest_fn=fake_backtest_fn,
-    )
-    assert used == {"callbacks": True, "sp500": True, "universe": True}  # US 콜백+두 벤치마크 모두 사용
-    # 두 벤치마크 레벨 시계열이 모두 결과에 포함
-    assert "benchmark_sp500" in result and "benchmark_universe" in result
-    # 성과에 S&P500(메인)과 유니버스(보조) 지표가 모두 존재
-    perf = result["performance"]
-    assert "benchmark_return" in perf   # S&P500(메인)
-    assert "universe_return" in perf    # 동일가중 유니버스(보조)
-
-
 def test_run_backtest_primitive_kr_default_has_no_us_benchmark_keys():
     """market 기본값(KR)이면 미국 이중벤치마크 키가 절대 생기지 않는다(하위호환·회귀 방지)."""
     def fake_backtest_fn(dates, metrics_fn, price_fn, params, benchmark_fn=None, weights=None):

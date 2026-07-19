@@ -26,21 +26,6 @@ def test_pipeline_user_prompt_still_formats_without_error():
     assert "2026-07-12" in text
 
 
-def test_pipeline_user_prompt_documents_market_param_for_us_backtest():
-    """run_backtest_primitive에 market='KR'|'US' 파라미터가 추가됐지만(미국데이터 3가지
-    작업), PIPELINE_USER 프롬프트에 문서화가 빠져 있어 자연어로 미국 종목 백테스트를
-    요청해도 LLM이 market='US'를 생성할 방법이 없던 갭(실측 curl로 발견)."""
-    assert "market=" in prompts.PIPELINE_USER or "\"market\"" in prompts.PIPELINE_USER
-    assert "US" in prompts.PIPELINE_USER.split("run_backtest(")[1][:800]
-
-
-def test_pipeline_user_prompt_has_us_backtest_example():
-    assert "AAPL" in prompts.PIPELINE_USER or "나스닥" in prompts.PIPELINE_USER or "미국" in prompts.PIPELINE_USER
-    idx = prompts.PIPELINE_USER.find("run_backtest")
-    tail = prompts.PIPELINE_USER[idx:]
-    assert '"market": "US"' in tail or "'market': 'US'" in tail
-
-
 def test_pipeline_user_prompt_documents_compute_technical_indicator():
     """compute_technical_indicator(9번째 프리미티브)가 실행기(PRIMITIVE_OPS)엔 등록됐지만
     PIPELINE_USER 프롬프트에 문서화가 빠지면, 자연어로 기술지표 질문을 해도 LLM이

@@ -76,18 +76,6 @@ def test_run_turn_keeps_session_empty_on_new_turn_failure():
     assert session.current_data is None
 
 
-def test_run_turn_us_only_question_is_gracefully_rejected():
-    """멀티턴 대화에서 미국 도메인 질문이 들어와도(비활성화 상태) 크래시 없이 실패 턴으로
-    처리되고, 명확한 비활성화 사유가 turn.error에 담긴다. 실제 answer_with_verification을
-    그대로 쓰며(verified_fn 미주입), llm_fn 없이 키워드 휴리스틱이 '애플'→us로 라우팅한다."""
-    session = _fresh_session()
-    turn = run_turn(session, "애플 PER 알려줘", conn=None, llm_fn=None)
-
-    assert turn.status == "fail"
-    assert "미국" in (turn.error or "")   # 비활성화 사유가 사용자에게 전달된다
-    assert session.has_data is False       # 실패 턴은 세션 데이터를 건드리지 않는다
-
-
 def test_run_turn_new_turn_success_keeps_tabular_data_for_csv():
     """실사용 재현: 신규 턴의 answer는 종합결론 텍스트라(그대로 CSV로는 못 바꿈) turn.data에
     원본 표를 따로 담아둬야 CSV 다운로드가 살아있다."""
@@ -602,13 +590,6 @@ def test_screening_csv_columns_multiple_metrics_preserve_order():
                        "result": [{"stock_code": "005930"}]}}
     # 순서: stock_code, name 다음에 criteria 순서(per, roe)
     assert _screening_csv_columns(evidence) == ["stock_code", "name", "per", "roe"]
-
-
-def test_screening_csv_columns_works_for_us_domain():
-    from src.agents.conversation import _screening_csv_columns
-
-    evidence = {"us": {"criteria": [{"key": "pe"}], "result": [{"stock_code": "AAPL"}]}}
-    assert _screening_csv_columns(evidence) == ["stock_code", "name", "pe"]
 
 
 def test_screening_csv_columns_none_when_no_criteria():

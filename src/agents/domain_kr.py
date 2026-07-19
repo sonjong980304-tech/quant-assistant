@@ -27,13 +27,12 @@ from src.agents.data_financial import _METRICS_TABLE_COLS, METRIC_SOURCE_MAP, re
 from src.agents.data_price_kr import get_price_history_kr, get_price_snapshot_kr
 from src.agents.exec_runtime import execute_sql
 from src.backtest.data_access import METRIC_FIELD_DESCRIPTIONS, price_return_over_months
-from src.backtest.data_access_us import METRIC_FIELD_DESCRIPTIONS_US
 from src.backtest.primitives import combine, get_cross_section
 from src.llm import extract_json
 from src.version import quarter_end_date
 
-# _screening_prompt는 KR/US 공용 함수(domain_us.py가 그대로 import해 재사용)라 두 도메인의
-# 지표 설명 단일 정의처(canonical source)를 모두 여기서 갖고 있다가 domain 인자로 고른다.
+# _screening_prompt는 국내 스크리닝 스펙 추출 프롬프트를 만들고, 지표 설명 단일 정의처
+# (canonical source)인 METRIC_FIELD_DESCRIPTIONS 에서 key→한글설명을 조회한다.
 
 # 종목코드는 정확히 6자리 숫자 하나(더 긴 숫자열의 일부가 아님) — 앞뒤에 다른 숫자가
 # 붙지 않은 경우만 인정한다("1200000원"처럼 7자리 금액에서 6자리 부분을 코드로 오려내지 않게).
@@ -475,20 +474,19 @@ def _screening_prompt(
     sectors: tuple[str, ...] = (),
     domain: str = "KR",
 ) -> str:
-    """스크리닝 스펙 추출 프롬프트. domain 에 따라 시장 판단 범위를 도메인 전용으로 스코프한다.
+    """스크리닝 스펙 추출 프롬프트. 시장 판단 범위를 국내(코스피/코스닥)로 스코프한다.
 
-    같은 원본 질문 텍스트를 KR/US 두 도메인이 각각 받더라도, 프롬프트 자체가 "너는 지금 이
-    도메인만 담당한다"를 명시해 다른 나라 시장 언급을 무시하게 만든다("코스피와 나스닥 각각…"
-    같은 혼재 질문에서 US 호출이 '코스피'에 오염되던 회귀 방지). 시장 구분은 하드코딩 키워드
-    규칙이 아니라 LLM이 질문 의미를 읽고 판단하며, 값 후보만 도메인별로 제한한다.
+    프롬프트 자체가 "너는 지금 한국 시장만 담당한다"를 명시해 다른 나라 시장 언급을
+    무시하게 만든다. 시장 구분은 하드코딩 키워드 규칙이 아니라 LLM이 질문 의미를 읽고
+    판단하며, 값 후보만 코스피/코스닥으로 제한한다.
 
-    지표 목록은 "key만"이 아니라 "key: 한글설명"으로 나열한다(METRIC_FIELD_DESCRIPTIONS(_US)
+    지표 목록은 "key만"이 아니라 "key: 한글설명"으로 나열한다(METRIC_FIELD_DESCRIPTIONS
     단일 정의처에서 조회) — LLM이 별도 한글→필드명 별칭사전 없이도 설명만 보고 "영업이익"
     질문을 operating_profit으로 스스로 매핑할 수 있게 한다. fields 는 노출할 key의 집합/순서만
-    결정하고, 설명 텍스트는 domain 에 맞는 딕셔너리에서 가져온다(둘이 항상 같은 목록이도록
-    _KR_SCREEN_FIELDS/_US_SCREEN_FIELDS 가 이 딕셔너리에서 파생되므로 자동 동기화된다).
+    결정하고, 설명 텍스트는 이 딕셔너리에서 가져온다(_KR_SCREEN_FIELDS 가 이 딕셔너리에서
+    파생되므로 자동 동기화된다).
     """
-    descriptions = METRIC_FIELD_DESCRIPTIONS_US if domain == "US" else METRIC_FIELD_DESCRIPTIONS
+    descriptions = METRIC_FIELD_DESCRIPTIONS
     fields_block = "\n".join(f"  - {k}: {descriptions.get(k, k)}" for k in fields)
     sector_hint = (
         f"실제 업종(sector) 목록: {', '.join(sectors)}.\n"
@@ -497,26 +495,15 @@ def _screening_prompt(
         "매핑할 항목이 전혀 없으면 sectors를 생략(null)하세요.\n"
         if sectors else ""
     )
-    if domain == "US":
-        market_key = "exchanges"
-        scope_line = (
-            "이 질문에서 미국 시장(나스닥/뉴욕증권거래소) 관련 조건만 판단하세요. 질문에 한국 등 "
-            "다른 나라 시장이 함께 언급돼 있어도 무시하고 미국 부분만 봅니다.\n"
-        )
-        market_rule = (
-            'exchanges: 질문이 미국 시장 중 나스닥만 뜻하면 ["NASDAQ"], 뉴욕증권거래소(NYSE)만 '
-            '뜻하면 ["NYSE"], 미국 시장 구분이 없거나 둘 다면 null.\n'
-        )
-    else:
-        market_key = "markets"
-        scope_line = (
-            "이 질문에서 한국 시장(코스피/코스닥) 관련 조건만 판단하세요. 질문에 미국 등 다른 "
-            "나라 시장이 함께 언급돼 있어도 무시하고 한국 부분만 봅니다.\n"
-        )
-        market_rule = (
-            'markets: 질문이 한국 시장 중 코스피만 뜻하면 ["KOSPI"], 코스닥만 뜻하면 '
-            '["KOSDAQ"], 한국 시장 구분이 없거나 둘 다면 null.\n'
-        )
+    market_key = "markets"
+    scope_line = (
+        "이 질문에서 한국 시장(코스피/코스닥) 관련 조건만 판단하세요. 질문에 다른 "
+        "나라 시장이 함께 언급돼 있어도 무시하고 한국 부분만 봅니다.\n"
+    )
+    market_rule = (
+        'markets: 질문이 한국 시장 중 코스피만 뜻하면 ["KOSPI"], 코스닥만 뜻하면 '
+        '["KOSDAQ"], 한국 시장 구분이 없거나 둘 다면 null.\n'
+    )
     return (
         "다음 질문은 여러 종목을 특정 지표로 순위 매겨 상위 N개를 뽑는 스크리닝 요청입니다.\n"
         "질문에서 조건만 추출해 JSON으로만 답하세요(설명/코드/SQL 금지).\n"
@@ -577,9 +564,8 @@ def _parse_screening_json(raw: str, domain: str = "KR") -> dict | None:
     criteria 를 정상 파싱하지 못하면 None(→ 결정론 휴리스틱 폴백). 존재하지 않는 필드명이
     섞여 있어도 여기서는 통과시키고, 실제 필드 검증은 combine 이 수행한다(조용한 빈 결과 방지).
 
-    시장 필터는 도메인 전용으로 읽는다 — KR 은 markets(코스피/코스닥), US 는 exchanges
-    (나스닥/뉴욕). 프롬프트가 도메인 스코프를 명시하므로 자기 도메인 키만 읽어 혼재 질문에서
-    다른 도메인 값이 섞이지 않게 한다(항상 두 키를 spec 에 두되 반대 도메인 값은 None).
+    시장 필터는 markets(코스피/코스닥)로 읽는다. 프롬프트가 국내 도메인 스코프를 명시하므로
+    질문에 다른 나라 시장이 섞여 있어도 한국 부분만 markets 로 반영한다.
     """
     data = extract_json(raw)
     if not isinstance(data, dict):
@@ -602,10 +588,7 @@ def _parse_screening_json(raw: str, domain: str = "KR") -> dict | None:
         "both_extremes": _coerce_sector_neutral(data.get("both_extremes")),
         "sector_neutral_compare": _coerce_sector_neutral(data.get("sector_neutral_compare")),
     }
-    if domain == "US":
-        spec["exchanges"] = data.get("exchanges") or None
-    else:
-        spec["markets"] = data.get("markets") or None
+    spec["markets"] = data.get("markets") or None
     return spec
 
 
@@ -674,9 +657,8 @@ def _heuristic_screening_spec(question: str, domain: str = "KR") -> dict | None:
     heuristic.py 의 지표/방향/개수 감지 관례를 스크리닝 지표(per/pbr/roe/…)에 맞춰 재현한다.
     지표를 하나도 못 찾으면 None(→ 호출부가 명시적 오류를 남김).
 
-    시장 필터도 도메인 스코프를 지킨다 — KR 은 코스피/코스닥만 markets 로, US 는 나스닥/뉴욕만
-    exchanges 로 잡는다. 혼재 질문("코스피와 나스닥…")의 US 폴백 경로에서 '코스피'가 markets 를
-    오염시키던 문제(LLM 프롬프트와 동일한 회귀)를 폴백 경로에서도 막는다.
+    시장 필터는 코스피/코스닥만 markets 로 잡는다(질문에 다른 나라 시장이 섞여 있어도
+    한국 부분만 본다 — LLM 프롬프트와 동일한 스코프를 폴백 경로에서도 유지).
     """
     q = (question or "").lower()
     metric = None
@@ -707,16 +689,10 @@ def _heuristic_screening_spec(question: str, domain: str = "KR") -> dict | None:
 
     markets = None
     exchanges = None
-    if domain == "US":
-        if "나스닥" in q or "nasdaq" in q:
-            exchanges = ["NASDAQ"]
-        elif "뉴욕" in q or "nyse" in q:
-            exchanges = ["NYSE"]
-    else:
-        if "코스피" in q or "kospi" in q:
-            markets = ["KOSPI"]
-        elif "코스닥" in q or "kosdaq" in q:
-            markets = ["KOSDAQ"]
+    if "코스피" in q or "kospi" in q:
+        markets = ["KOSPI"]
+    elif "코스닥" in q or "kosdaq" in q:
+        markets = ["KOSDAQ"]
 
     if both_extremes:
         criteria = [
@@ -755,8 +731,8 @@ def _extract_screening_spec(
     없고 "전기·전자"로 흡수돼 있어, 이 목록 없이는 LLM 이 구어체 업종명을 그대로 돌려줘
     조용히 빈 결과로 이어졌다) — 프롬프트에 포함시켜 LLM 이 실제 항목으로 매핑하게 한다.
 
-    domain 은 시장 판단 스코프(KR=코스피/코스닥→markets, US=나스닥/뉴욕→exchanges)를 프롬프트/
-    파싱/휴리스틱 전 경로에 일관되게 전달한다 — 혼재 질문의 도메인 간 오염 방지 핵심.
+    domain 은 시장 판단 스코프(코스피/코스닥→markets)를 프롬프트/파싱/휴리스틱 전 경로에
+    일관되게 전달한다(현재 국내 도메인 전용).
     """
     if llm_fn is not None:
         try:
@@ -798,7 +774,7 @@ def _resolve_screening_asof(
     """스크리닝 질문의 기간(period)을 실제 asof 날짜로 확정한다.
 
     period가 없으면(질문에 연도/분기 언급이 없으면) None을 그대로 반환한다 — 호출부가
-    이 None을 answer_kr_screening/answer_us_screening의 asof에 그대로 넘기면 기존과 동일하게
+    이 None을 answer_kr_screening의 asof에 그대로 넘기면 기존과 동일하게
     _default_screening_asof(전체 최신 거래일)로 폴백한다. period가 있으면 그 기간의 말일
     (연도→12/31, 분기→quarter_end_date) '이하' 최신 거래일을 찾는다 — 스크리닝은 combine이
     바로 쓸 수 있는 구체적 날짜(asof) 하나가 필요하므로, resolve_metric처럼 quarter/year를
@@ -858,15 +834,14 @@ def _run_screening(
     override_spec: dict | None = None,
     on_progress: Callable[..., None] | None = None,
 ) -> dict:
-    """스크리닝 공용 실행부(KR/US 대칭). 스펙추출 → asof해석 → 크로스섹션 → combine → rows 반환.
+    """스크리닝 실행부(국내 도메인). 스펙추출 → asof해석 → 크로스섹션 → combine → rows 반환.
 
     실패는 조용히 빈 결과가 아니라 result=None + errors 사유로 남긴다(이번 세션 초반 '필드 환각이
     조용히 빈 결과로 둔갑' 버그 재발 방지). combine 이 던지는 ValueError(존재하지 않는 필드 등)를
     명시적으로 잡아 사유를 기록한다.
 
-    domain 은 시장 필터 스코프를 가른다 — KR 은 spec["markets"](코스피/코스닥), US 는
-    spec["exchanges"](나스닥/뉴욕). 두 경우 모두 rows 의 'market' 필드로 필터링된다
-    (metrics_at_us 가 exchange 값을 'market' 에 담으므로 combine 의 markets= 인자를 그대로 재사용).
+    시장 필터는 spec["markets"](코스피/코스닥)를 rows 의 'market' 필드로 적용한다
+    (combine 의 markets= 인자를 그대로 재사용).
 
     override_spec(휴먼인더루프 재실행용): 주어지면 LLM/휴리스틱 추출(_extract_screening_spec)을
     완전히 건너뛰고 이 값을 그대로 spec으로 쓴다 — 사용자가 실시간 트리에서 본 조건 JSON을
@@ -967,9 +942,9 @@ def _run_screening(
         )
         return result
 
-    # 시장/거래소 필터: KR 은 markets(코스피/코스닥), US 는 exchanges(나스닥/뉴욕)를 rows 의
-    # 'market' 필드에 대해 적용한다(select_stocks 의 markets= 인자 재사용 — 대칭 구현).
-    market_filter = spec.get("exchanges") if domain == "US" else spec.get("markets")
+    # 시장 필터: markets(코스피/코스닥)를 rows 의 'market' 필드에 대해 적용한다
+    # (select_stocks 의 markets= 인자 재사용).
+    market_filter = spec.get("markets")
 
     sector_neutral = spec.get("sector_neutral", False)
     compare = result["sector_neutral_compare"]

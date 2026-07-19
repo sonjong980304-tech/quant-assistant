@@ -22,7 +22,6 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import src.backtest.data_access as bt_da  # noqa: E402
-import src.backtest.data_access_us as bt_da_us  # noqa: E402
 import src.backtest.engine as bt_engine  # noqa: E402
 import web.app as webapp  # noqa: E402
 
@@ -181,72 +180,9 @@ def test_unknown_metric_returns_400_not_500(monkeypatch):
     assert "존재하지 않는 필드" in r.json()["detail"]
 
 
-# ---------------------------------------------------------------------------
-# domain(kr|us) 스위칭 — 백테스트 패널의 한국/미국 시장 전환.
-# 회귀 핵심: domain 생략(기본 "kr") 시 기존 동작 100% 보존. US 경로는 KR 콜백을
-# 절대 타지 않아야 한다(통화·데이터소스가 달라 섞이면 무의미한 결과가 나옴).
-# ---------------------------------------------------------------------------
-def _kr_forbidden(*a, **k):
-    raise AssertionError("domain=us 경로에서 KR 백테스트 콜백이 호출되면 안 된다")
-
-
-def _us_forbidden(*a, **k):
-    raise AssertionError("domain=kr(기본값) 경로에서 US 백테스트 콜백이 호출되면 안 된다")
-
-
-class _FakeConnUS(_FakeConn):
-    """US 백테스트 경로가 쓰는 SQL(MAX(date) FROM us_prices / us_company)만 대응.
-
-    KR company 테이블을 조회하면 즉시 실패시켜(US 경로가 KR 종목명 매핑을 쓰지 않음을 증명)
-    도메인 격리를 강제한다.
-    """
-
-    def execute(self, sql, *args):
-        if "MAX(date)" in sql:
-            return _Cursor(one=["2026-12-31"])
-        if "FROM us_company" in sql:
-            return _Cursor(rows=[{"stock_code": "AAPL", "name": "Apple Inc."}])
-        if "FROM company" in sql:
-            raise AssertionError("US 경로가 KR company 테이블을 조회하면 안 된다")
-        return _Cursor(one=[None], rows=[])
-
-
-def _patch_us(monkeypatch):
-    monkeypatch.setattr(webapp, "connect", lambda *a, **k: _FakeConnUS())
-    monkeypatch.setattr(bt_da, "rebalance_dates",
-                        lambda sy, ey, rb: ["2024-01-31", "2024-04-30", "2024-07-31"])
-    # KR 콜백은 US 경로에서 절대 호출되면 안 된다.
-    monkeypatch.setattr(bt_da, "build_callbacks", _kr_forbidden)
-    monkeypatch.setattr(bt_da, "build_benchmark_fn", _kr_forbidden)
-    # US 콜백 + S&P500 벤치마크(yfinance 네트워크 차단용 주입).
-    monkeypatch.setattr(bt_da_us, "build_callbacks_us",
-                        lambda conn: ((lambda d: [{}]), (lambda code, d: None)))
-    monkeypatch.setattr(bt_da_us, "build_sp500_benchmark_fn",
-                        lambda dates, fetch_fn=None: (lambda d: None))
-    monkeypatch.setattr(bt_engine, "save_backtest_run", lambda *a, **k: None)
-
-
-def test_domain_us_backtest_is_disabled(monkeypatch):
-    """domain='us' 백테스트는 현재 비활성화 — 403으로 거부하고 US/KR 파이프라인 콜백은
-    어느 것도 호출되지 않는다(미국 관련 코드·데이터는 보존, 진입만 차단)."""
-    monkeypatch.setattr(bt_da_us, "build_callbacks_us", _us_forbidden)
-    monkeypatch.setattr(bt_da_us, "build_sp500_benchmark_fn", _us_forbidden)
-    monkeypatch.setattr(bt_da, "build_callbacks", _kr_forbidden)
-    client = TestClient(webapp.app)
-
-    r = client.post("/api/backtest", json={
-        "domain": "us", "markets": ["NASDAQ"],
-        "criteria": [{"key": "per", "direction": "low", "weight": 1}]})
-
-    assert r.status_code == 403, r.text
-    assert "미국" in r.json()["detail"]
-
-
 def test_domain_default_preserves_kr_pipeline(monkeypatch):
-    """domain 생략 시 기본 'kr' — 기존 KR 경로가 그대로 돌고 US 콜백은 호출되지 않는다(회귀 방지)."""
+    """domain 생략 시 기본 'kr' — 기존 KR 경로가 그대로 돈다(회귀 방지)."""
     _patch_common(monkeypatch)
-    monkeypatch.setattr(bt_da_us, "build_callbacks_us", _us_forbidden)
-    monkeypatch.setattr(bt_da_us, "build_sp500_benchmark_fn", _us_forbidden)
     captured = {}
 
     def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
@@ -264,7 +200,7 @@ def test_domain_default_preserves_kr_pipeline(monkeypatch):
 
 
 def test_invalid_domain_returns_400(monkeypatch):
-    """kr|us 이외의 domain은 사용자 입력 오류이므로 400."""
+    """kr 이외의 domain은 사용자 입력 오류이므로 400."""
     _patch_common(monkeypatch)
     client = TestClient(webapp.app)
 
@@ -274,21 +210,6 @@ def test_invalid_domain_returns_400(monkeypatch):
 
     assert r.status_code == 400, r.text
     assert "domain" in r.json()["detail"]
-
-
-def test_domain_us_disable_gate_precedes_market_validation(monkeypatch):
-    """미국 비활성화 게이트가 시장값 검증보다 먼저 걸린다 — us+KOSPI(원래는 시장 오류 400)라도
-    도메인 자체가 막혀 403이 먼저 반환된다(순서: 도메인 비활성화 > 시장 검증)."""
-    monkeypatch.setattr(bt_da_us, "build_callbacks_us", _us_forbidden)
-    monkeypatch.setattr(bt_da, "build_callbacks", _kr_forbidden)
-    client = TestClient(webapp.app)
-
-    r = client.post("/api/backtest", json={
-        "domain": "us", "markets": ["KOSPI"],
-        "criteria": [{"key": "per", "direction": "low", "weight": 1}]})
-
-    assert r.status_code == 403, r.text
-    assert "미국" in r.json()["detail"]
 
 
 def test_domain_kr_rejects_us_market(monkeypatch):
@@ -311,29 +232,12 @@ class _SectorConn:
         self.closed = False
 
     def execute(self, sql, *args):
-        if "FROM us_company" in sql:
-            return _Cursor(rows=[{"sector": "Healthcare"}, {"sector": "Technology"}])
         if "FROM company" in sql:
             return _Cursor(rows=[{"sector": "전기전자"}])
         return _Cursor(rows=[])
 
     def close(self):
         self.closed = True
-
-
-def test_sectors_domain_us_is_disabled(monkeypatch):
-    """GET /api/sectors?domain=us 는 비활성화 — 403으로 거부하고 DB 조회(connect)조차 하지
-    않는다(us_company 섹터 조회 코드는 보존, 진입만 차단)."""
-    def _forbid_connect(*a, **k):
-        raise AssertionError("미국 도메인은 비활성화 — DB 연결이 열리면 안 된다")
-
-    monkeypatch.setattr(webapp, "connect", _forbid_connect)
-    client = TestClient(webapp.app)
-
-    r = client.get("/api/sectors?domain=us")
-
-    assert r.status_code == 403, r.text
-    assert "미국" in r.json()["detail"]
 
 
 def test_sectors_domain_default_queries_kr_company(monkeypatch):

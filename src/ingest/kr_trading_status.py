@@ -7,7 +7,7 @@
 되지만, 우리가 주기적으로 저장+diff 하면 우리 쪽에서 구간 이력을 만들 수 있다. 이 데이터는
 과거 백테스트엔 못 쓰지만 라이브(현재 시점) 필터링엔 바로 유효하다.
 
-메커니즘(us_delisting 의 구간+멱등 사상 차용):
+메커니즘(구간+멱등 사상):
 - '직전 스냅샷'은 별도 저장 없이 kr_trading_status 의 열린 구간(end_date IS NULL)에서 유도한다.
 - 현재 스냅샷에 새로 나타난 종목 = 지정 개시 → 새 행(start_date=관측일, end_date=NULL).
 - 사라진 종목 = 해제 → 그 열린 구간에 end_date=관측일 기입.
@@ -20,7 +20,7 @@
 매매 실행기가 없으므로 함수·데이터 축적 인프라만 만들고 실제 호출부는 이번 스코프 아님).
 
 네트워크(KRX 로그인/HTTP)는 DI(fetch_admin_fn/fetch_halt_fn 주입)로 분리해 단위 테스트한다
-(기존 us_delisting/us_financials_sec 관례와 동일). 라이브 KRX 로그인은 스크립트를 사용자가
+(기존 수집기 관례와 동일). 라이브 KRX 로그인은 스크립트를 사용자가
 직접 실행할 때만 일어난다. KRX 자격증명(KRX_ID/KRX_PW)은 pykrx build_krx_session 이 os.environ
 에서만 읽으며(src.config 가 import 시 .env 로드), 값은 로그/출력에 남기지 않는다.
 """
@@ -291,7 +291,7 @@ def ingest_trading_status(
         halt_stats = _apply_snapshot(conn, STATUS_HALT, halt_rows, today, updated_at)
         conn.commit()
         return {"as_of": today, "admin": admin_stats, "halt": halt_stats}
-    except Exception as exc:  # noqa: BLE001 — 수집 실패는 격리·보고(us_delisting 관례)
+    except Exception as exc:  # noqa: BLE001 — 수집 실패는 격리·보고
         log_ingest({"source": "kr_trading_status", "status": "fail", "error": str(exc)})
         send_slack_alert(f"[kr_trading_status] 수집 실패: {exc}")
         raise

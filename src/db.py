@@ -140,80 +140,6 @@ CREATE TABLE IF NOT EXISTS metrics (
     UNIQUE(stock_code, quarter, price_date)
 );
 
--- 미국 시장 데이터 플레인 (한국용 company/prices/financials/metrics와 완전 분리,
--- 컬럼·제약 공유 없음. Text-to-SQL 연결은 별도 작업으로 미룸 — QUERYABLE_TABLES
--- 미포함). .omc/specs/brainstorming-us-market-data-plane.md 참고.
-CREATE TABLE IF NOT EXISTS us_company (
-    stock_code     TEXT PRIMARY KEY,   -- 티커 심볼 (예: 'AAPL')
-    name           TEXT NOT NULL,      -- 회사명
-    exchange       TEXT,               -- 'NASDAQ' | 'NYSE' | 'NYSE Amex'
-    sector         TEXT,               -- investing.com 원본 taxonomy 그대로(재분류 없음)
-    market_cap     REAL,               -- 시가총액 (달러, 파싱된 숫자)
-    security_type  TEXT,               -- 증권종류 캐시('common'|'warrant'|'adr'|'preferred'|'unit'|'right'|'other'|NULL=미분류).
-                                        -- scripts/backfill_us_security_type.py가 회사명을 LLM으로
-                                        -- 배치 분류해 채운다(스크리닝 런타임은 이 캐시만 읽음).
-    financial_currency TEXT,           -- us_financials 원본 보고통화(yfinance financialCurrency,
-                                        -- 예:'USD'|'KRW'). 주가(us_prices)는 항상 달러 거래지만
-                                        -- 외국기업 ADR은 재무제표 자체를 본국통화로 보고하는 경우가
-                                        -- 있어(예: SK텔레콤 SKM='KRW') 둘이 다를 수 있다. NULL=미수집.
-                                        -- scripts/backfill_us_financial_currency.py가 채운다.
-    updated_at     TEXT                -- 마지막 수집 시각 (ISO)
-);
-
-CREATE TABLE IF NOT EXISTS us_prices (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code     TEXT NOT NULL,      -- 티커 심볼
-    date           TEXT NOT NULL,      -- 날짜 (YYYY-MM-DD)
-    open           REAL,               -- 시가 (yfinance 수정주가 기준)
-    high           REAL,               -- 고가
-    low            REAL,               -- 저가
-    close          REAL,               -- 종가
-    volume         REAL,               -- 거래량
-    UNIQUE(stock_code, date)
-);
-
-CREATE TABLE IF NOT EXISTS us_financials (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code     TEXT NOT NULL,      -- 티커 심볼
-    as_of_date     TEXT NOT NULL,      -- 기준일 (YYYY-MM-DD)
-    period_type    TEXT NOT NULL,      -- 'annual' | 'quarterly'
-    statement_type TEXT NOT NULL,      -- 'income_stmt' | 'balance_sheet' | 'cashflow'
-    item_key       TEXT NOT NULL,      -- yfinance 원본 항목명 (예: 'Total Revenue')
-    item_value     REAL,               -- 항목 값
-    disclosed_date TEXT,               -- 공시일 근사 (YYYY-MM-DD, quarterly=기말+45일/annual=기말+90일, look-ahead 방지용)
-    source         TEXT,               -- 출처 (예: 'yfinance')
-    collected_at   TEXT,               -- 수집 시각 (ISO)
-    UNIQUE(stock_code, as_of_date, period_type, statement_type, item_key)
-);
-
--- SEC EDGAR XBRL 재무데이터 플레인 (yfinance 기반 us_financials와 완전 분리된 신규 테이블).
--- SEC companyfacts(무료 공식)의 원시 XBRL 팩트를 축소 없이 그대로 저장한다 — 계산에 당장
--- 쓰는 15~20개로 줄이지 않고(향후 신규 지표 추가 시 재수집 불필요), 태그·값·단위·회계연도(fy)·
--- 회계분기(fp)·양식(form)·제출일(filed)·기간(start/end)·프레임·접수번호까지 보관한다.
--- disclosed_date 근사(us_financials의 기말+45/90일)와 달리 SEC 실제 filed(제출일)를 그대로
--- 저장해 look-ahead(미래참조) 방지를 더 정확히 한다. 자연어 SQL 노출 대상 아님(QUERYABLE_TABLES
--- 미포함 — metrics/macro와 동일 관례). .omc/specs/brainstorming-sec-edgar-us-financials-backfill.md 참고.
-CREATE TABLE IF NOT EXISTS us_financials_sec (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code     TEXT NOT NULL,      -- 티커 심볼 (us_company와 연결)
-    cik            TEXT NOT NULL,      -- SEC 회사고유번호 (10자리 zero-pad, 예: '0000320193')
-    tag            TEXT NOT NULL,      -- XBRL 태그명 (예: 'Revenues', 'NetIncomeLoss', 'Assets')
-    taxonomy       TEXT,               -- 분류체계 ('us-gaap' | 'dei' | 'ifrs-full' 등)
-    unit           TEXT,               -- 단위 ('USD' | 'shares' | 'USD/shares' 등)
-    value          REAL,               -- 팩트 값
-    period_start   TEXT,               -- 기간 시작일 (duration 팩트, YYYY-MM-DD; instant 팩트는 NULL)
-    period_end     TEXT NOT NULL,      -- 기간 종료일 / 기준일 (YYYY-MM-DD) — as_of_date에 대응
-    fy             INTEGER,            -- 회계연도 (예: 2009)
-    fp             TEXT,               -- 회계분기 ('Q1'|'Q2'|'Q3'|'FY')
-    form           TEXT,               -- 제출 양식 ('10-Q'|'10-K'|'10-K/A'|'10-Q/A' 등)
-    filed          TEXT,               -- 실제 제출일 (YYYY-MM-DD) — disclosed_date로 사용(look-ahead 방지)
-    frame          TEXT,               -- CY 프레임 식별자 (있을 때만, 예: 'CY2009Q1')
-    accn           TEXT,               -- 접수번호 (예: '0001193125-09-214859')
-    source         TEXT,               -- 출처 ('sec_companyfacts_zip' | 'sec_companyfacts_api')
-    collected_at   TEXT,               -- 수집 시각 (ISO)
-    UNIQUE(stock_code, tag, unit, period_start, period_end, form, accn)
-);
-
 -- LLM Wiki: 질문 → SQL (SQL 캐시 / 시점 무관)
 CREATE TABLE IF NOT EXISTS wiki (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,34 +183,15 @@ CREATE TABLE IF NOT EXISTS delisting (
     delisting_date TEXT                -- 상장폐지일 (YYYY-MM-DD)
 );
 
--- 미국 상장폐지 (구간 기반, 생존편향 검증용). KR delisting(stock_code 단일 PK + 날짜 하나)과
--- 달리 미국은 상장폐지된 티커가 나중에 다른 회사에 재사용되는 경우가 흔하다(예: TWTR). 단순
--- "delisting_date보다 뒤면 무조건 죽음"으로 판정하면 재상장 이후 시점을 오탐(잘못된 하드차단)
--- 한다 → 티커 하나에 여러 행(상장~폐지 구간 여러 개)을 허용하고, 판정은 asof가 어느 구간에
--- 드는지로 한다(data_access_us._is_alive_us). 소스=FMP delisted-companies(symbol/companyName/
--- exchange/ipoDate/delistedDate). 상장일 미상이면 listing_date=''(빈문자열 센티널) — SQLite
--- UNIQUE가 NULL을 매번 다른 값으로 취급해 upsert 멱등성이 깨지는 것을 막는다(us_financials_sec
--- period_start 관례와 동일). .omc/specs/brainstorming-us-delisting-survivorship.md 참고.
-CREATE TABLE IF NOT EXISTS us_delisting (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    stock_code     TEXT NOT NULL,      -- 티커 심볼 (us_company와 간접 연결, PK 아님)
-    company_name   TEXT,               -- 회사명 (FMP companyName)
-    exchange       TEXT,               -- 거래소 (FMP exchange)
-    listing_date   TEXT,               -- 상장일 (FMP ipoDate, YYYY-MM-DD; 미상이면 '')
-    delisting_date TEXT,               -- 상장폐지일 (FMP delistedDate, YYYY-MM-DD)
-    updated_at     TEXT,               -- 마지막 수집 시각 (ISO)
-    UNIQUE(stock_code, listing_date, delisting_date)
-);
-
 -- KR 관리종목/매매거래정지 상태 이력 (구간 기반, 스냅샷 누적). KRX/KIND 는 과거 조회일을
 -- 무시하고 '오늘 현재' 스냅샷만 반환해 과거 이력을 무료로 구할 수 없다 → 매 실행(매일 1회)
 -- 마다 '오늘 현재' 관리종목/거래정지 목록을 받아 직전 실행 스냅샷과 diff 해서 앞으로의
 -- 지정~해제 구간을 우리 쪽에서 누적으로 쌓는다. '직전 스냅샷'은 별도 저장 없이 이 테이블의
 -- 열린 구간(end_date IS NULL)에서 유도한다: 현재 목록에 새로 나타난 종목=지정 개시(start_date=
 -- 관측일, end_date=NULL), 사라진 종목=해제(end_date=관측일), 계속 있는 종목=구간 유지.
--- us_delisting 과 동일한 구간+멱등 upsert 사상 — 한 종목이 지정→해제→재지정을 반복하면
+-- 구간 기반 멱등 upsert 사상 — 한 종목이 지정→해제→재지정을 반복하면
 -- 여러 행(각 구간 1행)을 가진다. status_type 판별자로 관리종목/거래정지를 한 테이블에 담는다
--- (macro_indicators.indicator, us_financials.statement_type 판별자 관례와 동일 — diff 알고리즘이
+-- (macro_indicators.indicator 판별자 관례와 동일 — diff 알고리즘이
 -- 두 종류에 동일해 코드 중복을 없앤다). start_date 는 KRX 최초지정일이 아니라 '우리가 스냅샷에서
 -- 처음 관측한 날'이다(과거 이력이 없으니 정직하게 관측 시점만 기록). KRX 원본 최초지정일(관리)/
 -- 지정일시(정지)는 krx_designated_date 에 참고용으로 보관한다.
@@ -343,7 +250,7 @@ CREATE TABLE IF NOT EXISTS kr_stock_changes (
 -- 보류·보고한다(추측성 오분류 방지). start_date/end_date 는 DART 접수일(rcept_dt)이라 kr_trading_
 -- status 의 '관측일'과 달리 실제 사건일에 가깝다. start_report_nm/end_report_nm 에 트리거 공시
 -- 제목을 남겨 사람이 각 경계를 감사·검증할 수 있게 한다.
--- us_delisting/kr_trading_status 와 동일한 구간+멱등 upsert 사상 — 한 종목이 지정→해제→재지정을
+-- kr_trading_status 와 동일한 구간+멱등 upsert 사상 — 한 종목이 지정→해제→재지정을
 -- 반복하면 여러 행(각 구간 1행). UNIQUE(stock_code, status_type, start_date) 로 재수집 멱등이고,
 -- 열린 구간(end_date NULL)이 나중에 해제 공시로 닫히면 그 행의 end_date 만 갱신한다.
 -- ⚠️ 이번 스코프에선 backtest(data_access asof)에 연결하지 않는다 — 데이터 품질을 사용자가 검증한
@@ -388,11 +295,11 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 -- 대신 "나중에야 알 수 있었던 정정값"을 쓰는 look-ahead(미래참조) 편향. 이 테이블은 적재마다
 -- 새 행을 INSERT(같은 rcept_no 재수집은 멱등)해 모든 버전을 보존한다. 백테스트 look-ahead
 -- 크리티컬 경로만(effective_quarter_at/_fin/_sum_ttm/_yoy 등) 이 테이블에서 "disclosed_date<=asof
--- 중 가장 최근 disclosed_date" 버전을 고른다(SEC us_financials_sec 의 filed 상한과 동일 사상).
+-- 중 가장 최근 disclosed_date" 버전을 고른다(공시일 상한 기반 look-ahead 방지).
 -- 기존 financials 테이블과 그 소비자(goldset/legacy/data_financial 등)는 전혀 건드리지 않는다.
 -- rcept_no: DART 접수번호(공시 고유 id). 같은 공시 재수집=같은 rcept_no → UNIQUE 로 멱등,
 -- 진짜 새 rcept_no(정정공시)만 새 행. 접수번호 미상(추정 공시일 폴백)이면 disclosed_date 를
--- 센티널로 넣어(us_delisting listing_date='' 관례와 동일) NULL 로 인한 멱등성 깨짐을 막는다.
+-- 센티널로 넣어(빈문자열 센티널 관례) NULL 로 인한 멱등성 깨짐을 막는다.
 CREATE TABLE IF NOT EXISTS financials_revision (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     stock_code     TEXT NOT NULL,      -- 종목코드
@@ -480,9 +387,7 @@ CREATE TABLE IF NOT EXISTS all_weather_snapshot (
 
 # 읽기 전용 쿼리에 노출되는 테이블 (Text-to-SQL 대상).
 # metrics(사전계산 스냅샷)는 제외 — 모든 지표는 financials/prices 원본에서 질의 시점에 계산한다.
-# us_company/us_prices/us_financials: .omc/specs/brainstorming-us-nl-sql-integration.md —
-# 질문 내용과 무관하게 항상 KR+US 스키마를 동시 노출한다(Round6, 별도 사전판단 단계 없음).
-QUERYABLE_TABLES = ["company", "financials", "prices", "us_company", "us_prices", "us_financials"]
+QUERYABLE_TABLES = ["company", "financials", "prices"]
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -530,46 +435,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("open", "high", "low", "volume"):
         if col not in pcols:
             conn.execute(f"ALTER TABLE prices ADD COLUMN {col} REAL")
-    ucols = {r["name"] for r in conn.execute("PRAGMA table_info(us_financials)")}
-    if "disclosed_date" not in ucols:
-        conn.execute("ALTER TABLE us_financials ADD COLUMN disclosed_date TEXT")
-    ucompany_cols = {r["name"] for r in conn.execute("PRAGMA table_info(us_company)")}
-    if "security_type" not in ucompany_cols:
-        conn.execute("ALTER TABLE us_company ADD COLUMN security_type TEXT")
-    if "financial_currency" not in ucompany_cols:
-        conn.execute("ALTER TABLE us_company ADD COLUMN financial_currency TEXT")
-    if "cik" not in ucompany_cols:
-        # SEC 티커↔CIK 매핑 결과 저장용(us_financials_sec 수집·조회의 조인 키).
-        conn.execute("ALTER TABLE us_company ADD COLUMN cik TEXT")
-    # us_financials(EAV, 700만+ 행)는 UNIQUE(stock_code, as_of_date, period_type,
-    # statement_type, item_key) 자동 인덱스만 있었다 — as_of_date가 period_type/
-    # statement_type/item_key보다 앞이라 backtest/data_access_us.py의
-    # effective_quarter_at_us/_ttm_us/_yoy_us(모두 stock_code+period_type[+statement_type
-    # +item_key]로 필터 후 as_of_date로 정렬/범위조회) 패턴에 안 맞아 종목당 풀스캔이
-    # 발생했다(백테스트 US 12개 지표 확장 후 metrics_at_us가 다년치 분기 백테스트에서
-    # 수십 초 걸려 브라우저 fetch가 "Load failed"로 끊기는 원인). disclosed_date 컬럼이
-    # 이 함수 위쪽에서 이미 보장된 뒤라 여기서 만들어야 구 스키마 DB에서도 안전하다
-    # (SCHEMA_DDL 쪽에 두면 disclosed_date ALTER 전에 실행돼 컬럼없음 에러가 남).
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_us_fin_quarter ON us_financials"
-        "(stock_code, period_type, disclosed_date, as_of_date)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_us_fin_ttm ON us_financials"
-        "(stock_code, period_type, statement_type, item_key, as_of_date)"
-    )
-    # us_financials_sec 조회 패턴 인덱스: data_access_us_sec 의 effective_quarter_at_sec/
-    # _ttm_sec/_yoy_sec 는 (stock_code, tag[, form]) 로 필터 후 period_end 로 정렬/범위조회하고
-    # filed 로 look-ahead 를 거른다. UNIQUE 자동 인덱스는 앞 컬럼이 tag/unit 이라 이 패턴에
-    # 안 맞으므로 별도로 만든다(us_financials 인덱스 추가와 동일 취지).
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_us_sec_ttm ON us_financials_sec"
-        "(stock_code, tag, period_end)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_us_sec_filed ON us_financials_sec"
-        "(stock_code, filed, period_end)"
-    )
     conn.commit()
 
 

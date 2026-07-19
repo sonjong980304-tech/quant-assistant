@@ -31,7 +31,6 @@ from typing import Callable
 
 from ..llm import extract_json
 from .data_access import _is_alive, effective_quarter_at
-from .data_access_us import _is_alive_us  # US 생존편향 판정(us_delisting 구간 기반, KR과 대칭)
 from .pipeline_exec import MAX_TIMEOUT  # 새 상수 만들지 않고 기존 타임아웃 상한 재사용
 
 
@@ -43,18 +42,16 @@ def check_survivorship(conn, holdings: list[dict], is_alive_fn: Callable | None 
     """① 생존편향 하드차단: 보유종목 중 그 시점 기준 이미 상장폐지된 종목이 있으면 차단한다.
 
     각 리밸런싱 시점(holdings의 date=asof)에 보유한 종목이 그 시점에 실제로 살아있었는지를
-    상장폐지 테이블로 재검증한다. 정상 경로에서는 metrics_at/metrics_at_us의 _is_alive(_us)가
+    상장폐지 테이블로 재검증한다. 정상 경로에서는 metrics_at의 _is_alive가
     이미 죽은 종목을 걸러내므로 사실상 항상 통과한다 — 이 함수는 그 가드가 회귀로 깨졌을 때를
     잡는 **방어적 이중화 안전망**이다(스펙 §3.2 ①). 위반이 하나라도 있으면 blocked=True로
     사유·증거(종목코드)를 반환.
 
-    market에 따라 기본 판정 함수가 다르다(둘 다 bool 반환이라 판정 루프는 동일):
-    KR=data_access._is_alive(delisting 테이블), US=data_access_us._is_alive_us(us_delisting
-    구간 기반 — 미국 티커 재사용/재상장을 정확히 처리, 재상장 이후 시점 오탐 방지).
+    기본 판정 함수는 data_access._is_alive(delisting 테이블)이다(bool 반환).
     is_alive_fn을 명시 주입하면 그것을 우선한다(테스트 주입용).
     """
     if is_alive_fn is None:
-        is_alive_fn = _is_alive_us if market == "US" else _is_alive
+        is_alive_fn = _is_alive
     evidence = []
     for h in holdings or []:
         asof = h.get("date")
@@ -357,9 +354,8 @@ def post_audit(result: dict, conn, question: str, llm_fn: Callable | None = None
     (하드차단 시 정상 결과를 폐기하므로 소프트경고는 무의미). llm_fn이 없으면(LLM 미가용)
     소프트검사도 생략한다.
 
-    market="US"도 이제 KR과 동일하게 생존편향을 실제 하드차단한다(us_delisting 구간 기반
-    _is_alive_us). 과거의 "검증불가(unverifiable)" 별도 상태는 제거됐다 — 상장폐지 이력이
-    없으면 KR과 동일하게 조용히 통과한다. steps(실제 파이프라인)를 넘기면 run_soft_inspectors에
+    생존편향은 delisting 테이블 기반 _is_alive로 실제 하드차단한다 — 상장폐지 이력이
+    없으면 조용히 통과한다. steps(실제 파이프라인)를 넘기면 run_soft_inspectors에
     그대로 전달해, result에 performance/holdings가 없는 순수 통계 파이프라인도 정확히 판단하게 한다.
     반환: {"blocked": bool, "hard": [verdict...], "soft": [verdict...]}
     """

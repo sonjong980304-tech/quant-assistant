@@ -2,7 +2,7 @@
 
 .omc/specs/brainstorming-naver-fnguide-crawlers.md AC5(네이버)/AC10(FnGuide) 최소
 2초 딜레이, AC12(requests+BeautifulSoup만, Selenium 미추가) 대상. investing.com
-Selenium 크롤러(us_universe.py)와는 별개 — 그쪽은 브라우저 자동화가 스펙상 허용됨.
+Selenium 크롤러와는 별개 — 그쪽은 브라우저 자동화가 스펙상 허용됨.
 """
 from __future__ import annotations
 

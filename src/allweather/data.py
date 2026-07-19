@@ -11,7 +11,7 @@
   국내 금현물 가격도 결국 국제 금값×환율로 움직이는 구조라 이 합성이 실제 노출과 근접하다.
 - 무위험이자율은 미국 3개월 국채(^IRX)를 리밸런싱 시점별 과거값으로 조회한다(AC6/AC7).
 
-실제 yfinance 호출은 지연 import + 주입 가능한 fetch_fn 으로 분리한다(us_prices.py 등 기존 DI 관례).
+실제 yfinance 호출은 지연 import + 주입 가능한 fetch_fn 으로 분리한다(기존 DI 관례).
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ TICKERS: dict[str, str] = {
 # yfinance 종가 공통 조회
 # ---------------------------------------------------------------------------
 def _yf_close_series(ticker: str) -> pd.Series:
-    """yfinance 수정종가 Series (지연 import — us_prices.py 패턴). auto_adjust=True 명시."""
+    """yfinance 수정종가 Series (지연 import — 무거운 라이브러리는 필요 시점에만 로드). auto_adjust=True 명시."""
     import yfinance as yf
 
     df = yf.Ticker(ticker).history(period="max", auto_adjust=True)

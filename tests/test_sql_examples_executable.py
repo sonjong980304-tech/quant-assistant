@@ -40,15 +40,6 @@ def _seeded_conn(tmp_path):
         "('005930','2026Q1','2026-05-15','controlling_equity',2800000)"
     )
     conn.execute("INSERT INTO prices(stock_code, date, close, market_cap) VALUES ('005930','2026-07-10',70000,300000000)")
-    conn.execute(
-        "INSERT INTO us_company(stock_code, name, exchange, sector, market_cap, updated_at) VALUES "
-        "('AAPL','Apple Inc.','NASDAQ','Technology',3000000000000,'2026-07-12T00:00:00')"
-    )
-    conn.execute("INSERT INTO us_prices(stock_code, date, close) VALUES ('AAPL','2026-07-10',210.5)")
-    conn.execute(
-        "INSERT INTO us_financials(stock_code, as_of_date, period_type, statement_type, item_key, item_value) VALUES "
-        "('AAPL','2026-03-31','quarterly','income_stmt','Net Income',20000000000)"
-    )
     conn.commit()
     return conn
 

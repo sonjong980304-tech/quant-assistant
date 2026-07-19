@@ -161,9 +161,6 @@
         <b>국가 · 시장</b> <span class="meta">(한국 · 시장 미선택 = 전체)</span>
         <div class="chips" style="margin-top:8px">
           <label class="chip"><input type="radio" name="bt_domain" value="kr" checked style="margin-right:4px" onchange="onDomainChange()">한국 (KOSPI/코스닥)</label>
-          <!-- 미국 도메인 비활성화(현재 한국 주식만 지원). 재활성화하려면 아래 라디오 주석을 해제하세요.
-          <label class="chip"><input type="radio" name="bt_domain" value="us" style="margin-right:4px" onchange="onDomainChange()">미국 (NASDAQ/NYSE/NYSE Amex)</label>
-          -->
         </div>
         <div id="bt_markets" class="chips" style="margin-top:8px"></div>
       </div>
@@ -279,7 +276,7 @@ function runQuery(){
 let _treeES=null;
 // step → 트리 깊이(들여쓰기). 백엔드가 도메인/데이터/검증 노드를 추가로 방출해도(HA-13 이후)
 // 프론트 분기 없이 자연스럽게 계층이 깊어지도록 매핑한다. 미지의 step은 도메인(1)로 본다.
-const TREE_LABEL={supervisor:'총괄',kr:'한국',us:'미국',macro:'매크로',backtest:'백테스트',
+const TREE_LABEL={supervisor:'총괄',kr:'한국',macro:'매크로',backtest:'백테스트',
   data:'데이터요청',verify:'검증',audit:'감사',code:'생성 코드'};
 function treeDepth(step){
   if(step==='supervisor') return 0;                          // 총괄
@@ -439,7 +436,7 @@ function startStreamTree(q, btn){
 // ===== 계층형 총괄 그래프 응답 렌더 (HA-13) =====
 // 응답: {question, routes:[...], domain_results:{도메인:원본dict}, conclusion, uncertain, attempts, reason}
 // (diagCard / evaluation / sql / rows-columns 등 legacy 응답 필드는 신규 아키텍처에 없어 제거됨)
-const DOMAIN_LABELS={kr:'한국주식',us:'미국주식',macro:'매크로',backtest:'백테스트',free_exec:'자유 코드 실행(폴백)'};
+const DOMAIN_LABELS={kr:'한국주식',macro:'매크로',backtest:'백테스트',free_exec:'자유 코드 실행(폴백)'};
 
 // 도메인마다 dict 구조가 조금씩 달라(과설계 방지) 하나의 범용 재귀 렌더러로
 // 원본 데이터를 가공 없이 그대로 병기한다(AC4). 원시값은 fmtCell(조/억·콤마 포맷)로 표시.
@@ -563,11 +560,9 @@ function renderQuery(s){
 
 // ===== 백테스트 =====
 let BT_LOADED=false;
-// 도메인별 시장 체크박스 옵션. 현재 미국 도메인은 비활성화되어 한국만 노출한다.
-// (미국 시장 옵션은 재활성화 시 주석을 해제하면 그대로 복구된다 — 서버 측 us 코드/데이터는 보존됨.)
+// 도메인별 시장 체크박스 옵션(한국 전용).
 const BT_MARKET_OPTIONS={
   kr:[['KOSPI','코스피'],['KOSDAQ','코스닥']],
-  // us:[['NASDAQ','NASDAQ'],['NYSE','NYSE'],['NYSE Amex','NYSE Amex']],
 };
 function btDomain(){const el=document.querySelector('input[name="bt_domain"]:checked');return el?el.value:'kr';}
 function renderBtMarkets(domain){
@@ -638,8 +633,8 @@ async function runBacktest(){
   finally{btn.disabled=false;}
 }
 function renderBacktest(d, domain='kr', outlierLabel){
-  // 벤치마크 라벨은 도메인별로 다르다: kr=시장 동일가중 유니버스, us=S&P500 실제지수(^GSPC).
-  const benchLabel=domain==='us'?'S&P500':'시장(동일가중)';
+  // 벤치마크 라벨: 시장 동일가중 유니버스.
+  const benchLabel='시장(동일가중)';
   const p=d.performance;
   const stat=(n,l)=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
   const cards=stat((p.cagr??'-')+'%','CAGR')+stat((p.total_return??'-')+'%','누적수익')

@@ -74,7 +74,7 @@ def ingest_naver_prices(
     commit_every개 종목마다 주기적으로 commit한다. 기본값 1(종목마다 즉시 commit) —
     전종목 순회는 종목당 2초 지연이 있어 수천 종목 기준 수시간 걸릴 수 있는데,
     commit_every가 크면 그만큼 오래 쓰기 트랜잭션이 열려있어 동시에 뜬 웹 서버의 다른
-    쓰기가 `database is locked`로 실패한다(us_financials.py에서 실제로 발생·확인됨).
+    쓰기가 `database is locked`로 실패한다(대량 수집에서 실제로 발생·확인됨).
     종목마다 commit하면 (1) 프로세스가 죽어도(예: 전원 종료) 진행이 안 날아가고,
     (2) 잠금 구간이 수 밀리초로 줄어 동시 접근과 공존 가능하다.
     """

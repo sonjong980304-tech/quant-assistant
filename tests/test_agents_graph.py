@@ -39,10 +39,6 @@ def _seed_valid_domains(monkeypatch) -> None:
         sup, "answer_kr_question",
         lambda question, conn, llm_fn=None, on_progress=None: {"stock_code": "005930", "financial": {"value": 12.5}},
     )
-    monkeypatch.setattr(
-        sup, "answer_us_question",
-        lambda question, conn, llm_fn=None, on_progress=None: {"ok": True, "stock_code": "AAPL", "financial": {"value": 30.0}},
-    )
 
 
 # ── HierarchicalState — 최소 상태 필드 존재(TypedDict, total=False) ────────────
@@ -226,12 +222,12 @@ def test_event_has_only_step_and_summary_no_detail(monkeypatch):
 def test_event_summary_reports_uncertain_on_failure(monkeypatch):
     def fake_awv(question, conn, llm_fn, steps=None, on_progress=None):
         return {"uncertain": True, "reason": "3회 실패", "attempts": 3,
-                "routes": ["kr", "us"], "domain_results": {}}
+                "routes": ["kr", "backtest"], "domain_results": {}}
 
     monkeypatch.setattr(graph_mod, "answer_with_verification", fake_awv)
     out = supervisor_node({"question": "q"}, conn=None, llm_fn=None)
     summary = out["events"][0]["summary"]
-    assert "한국" in summary and "미국" in summary   # 도메인 라벨
+    assert "한국" in summary and "백테스트" in summary   # 도메인 라벨
     assert "불확실" in summary or "실패" in summary
     assert "3회" in summary
 
@@ -240,10 +236,9 @@ def test_event_summary_reports_uncertain_on_failure(monkeypatch):
 
 def test_run_streaming_emits_supervisor_event(monkeypatch):
     """HA-12 확장: 라우팅→도메인별→검증 단계별로 여러 이벤트가 실시간 순서대로 방출된다.
-    미국 도메인은 현재 비활성화되어(관련 코드는 보존) dispatch되지 않으므로, 질문이 kr+us로
-    라우팅돼도 실제 실행 단계에는 kr만 나타난다."""
+    라우팅에 없는 도메인 토큰은 무시되므로 실제 실행 단계에는 kr만 나타난다."""
     _seed_valid_domains(monkeypatch)
-    events = list(run_streaming("삼성전자 vs 애플 비교", conn=None, llm_fn=_multi_domain_fake_llm))
+    events = list(run_streaming("삼성전자 종가 알려줘", conn=None, llm_fn=_multi_domain_fake_llm))
 
     steps_order = [e["step"] for e in events]
     assert len(events) >= 4                     # 라우팅1 + kr 시작/완료 + 검증 4건 이상

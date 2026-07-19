@@ -113,23 +113,6 @@ def test_extract_chart_data_kr_price_history(monkeypatch):
     assert "005930" in title
 
 
-def test_extract_chart_data_us_price_history(monkeypatch):
-    import src.agents.supervisor as sup
-
-    monkeypatch.setattr(
-        sup, "get_price_history_us",
-        lambda conn, code, **k: [
-            {"stock_code": "AAPL", "date": "2026-01-01", "close": 190.0},
-            {"stock_code": "AAPL", "date": "2026-01-02", "close": 195.0},
-        ],
-    )
-    domain_results = {"us": {"ok": True, "stock_code": "AAPL", "price": [{"close": 195.0}]}}
-    dates, series, title = sup._extract_chart_data(domain_results, conn=None)
-    assert dates == ["2026-01-01", "2026-01-02"]
-    assert list(series.values())[0] == [190.0, 195.0]
-    assert "AAPL" in title
-
-
 def test_extract_chart_data_macro_spread_only(monkeypatch):
     import src.agents.supervisor as sup
 

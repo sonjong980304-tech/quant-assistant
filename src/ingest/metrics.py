@@ -79,7 +79,7 @@ def _sum_ttm(conn, code, quarter, key, asof=None):
 
 
 # ── 시점별 상장주식수 조회 (시가총액 = 종가 × 그 시점 상장주식수) ──────────────────
-# US(SEC) 선례 src/backtest/data_access_us_sec._shares_outstanding_at 과 동일 사상의 KR 버전.
+# 시점별 상장주식수를 disclosed_date<=asof 기준으로 고르는 KR 버전.
 # 기존 ingest 는 _collect_shares 로 "오늘 기준 최신 주식수" 상수 하나를 과거 전 기간에 곱해,
 # 유상증자·자사주소각·액면분할 등으로 주식수가 바뀐 종목의 과거 시총이 부정확했다.
 # financials.shares_outstanding(분기별, disclosed_date)에서 asof 시점까지 공시된 최신값을 골라

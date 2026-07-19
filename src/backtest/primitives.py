@@ -514,21 +514,17 @@ def _resolve_engine_inputs(
     conn, start_year, end_year, rebalance, market, dates_fn, max_date_fn,
     callbacks_fn, benchmark_fn_factory, backtest_fn,
 ):
-    """리밸런싱 날짜 해석 + market별 콜백/벤치마크/백테스트 함수 기본값 선택.
+    """리밸런싱 날짜 해석 + 콜백/벤치마크/백테스트 함수 기본값 선택.
 
     run_backtest_primitive와 search_strategy가 공유하는 준비 단계(둘 다 "무거운 연산(전종목
-    metrics_at 반복) 전 사전상한 검사 → market별 콜백 선택" 순서가 동일) — 중복 제거용 공용 헬퍼.
+    metrics_at 반복) 전 사전상한 검사 → 콜백 선택" 순서가 동일) — 중복 제거용 공용 헬퍼.
     """
     from .data_access import build_benchmark_fn as _build_benchmark_fn
     from .data_access import build_callbacks as _build_callbacks
     from .engine import run_backtest as _run_backtest
 
     dates = _resolve_rebalance_dates(conn, start_year, end_year, rebalance, dates_fn, max_date_fn)
-    if market == "US":
-        from .data_access_us import build_callbacks_us as _build_callbacks_us
-        callbacks_fn = callbacks_fn or _build_callbacks_us
-    else:
-        callbacks_fn = callbacks_fn or _build_callbacks
+    callbacks_fn = callbacks_fn or _build_callbacks
     benchmark_fn_factory = benchmark_fn_factory or _build_benchmark_fn
     backtest_fn = backtest_fn or _run_backtest
     return dates, callbacks_fn, benchmark_fn_factory, backtest_fn
@@ -561,10 +557,7 @@ def run_backtest_primitive(
     /api/backtest 호출 관례와 동일 — build_callbacks/build_benchmark_fn/rebalance_dates 재사용).
     *_fn 인자는 테스트 주입용(기본은 실제 DB 기반 구현).
 
-    market: "KR"(기본)이면 기존 한국 콜백/단일 벤치마크로 100% 기존 동작.
-    "US"이면 data_access_us 콜백을 쓰고, 벤치마크를 이중 계산한다 — S&P500 실제지수(^GSPC,
-    메인, 성과의 benchmark_return/excess_return/beta)와 동일가중 유니버스(보조, universe_*).
-    무거운 NAV 시뮬레이션은 1번만 하고 유니버스 벤치마크 성과만 추가 계산해 병합한다.
+    market는 "KR"(국내 전용)로, 한국 콜백/단일 벤치마크(동일가중 유니버스)로 실행한다.
 
     안전: rebalance 시점 수(window)가 상한을 넘거나 start_year가 너무 이르면, 무거운 연산
     (전종목 metrics_at 반복인 callbacks_fn/benchmark_fn_factory)을 시작하기 '전'에 거부한다
@@ -580,50 +573,8 @@ def run_backtest_primitive(
     params = {"n": n, "criteria": criteria or [], "combine": combine, "sectors": sectors,
               "markets": markets, "rebalance": rebalance}
 
-    if market == "US":
-        return _run_us_backtest(
-            dates, metrics_fn, price_fn, params, weights, with_benchmark, rebalance,
-            benchmark_fn_factory, sp500_fn_factory, backtest_fn,
-        )
-
-    # KR(기본) — 기존 동작 100% 그대로(하위호환)
     bench_fn = benchmark_fn_factory(dates, metrics_fn, price_fn) if with_benchmark else None
     return backtest_fn(dates, metrics_fn, price_fn, params, benchmark_fn=bench_fn, weights=weights)
-
-
-def _run_us_backtest(dates, metrics_fn, price_fn, params, weights, with_benchmark, rebalance,
-                     benchmark_fn_factory, sp500_fn_factory, backtest_fn) -> dict:
-    """미국 백테스트: S&P500(메인)+동일가중 유니버스(보조) 이중 벤치마크로 실행/병합한다.
-
-    무거운 NAV 시뮬레이션(backtest_fn)은 1번만 호출하고 메인 벤치마크(S&P500)를 엔진에 넣어
-    성과를 계산한다. 유니버스 벤치마크는 그 결과 navs에 performance()만 다시 적용(순수·경량)해
-    universe_* 키로 병합한다 — 전종목 순회 같은 무거운 연산은 중복 실행하지 않는다.
-    """
-    from .data_access_us import build_sp500_benchmark_fn as _build_sp500_benchmark_fn
-
-    sp500_fn_factory = sp500_fn_factory or _build_sp500_benchmark_fn
-    sp500_fn = sp500_fn_factory(dates) if with_benchmark else None
-    universe_fn = benchmark_fn_factory(dates, metrics_fn, price_fn) if with_benchmark else None
-
-    result = backtest_fn(dates, metrics_fn, price_fn, params, benchmark_fn=sp500_fn, weights=weights)
-
-    if with_benchmark and isinstance(result, dict) and "navs" in result:
-        from .engine import PERIODS_PER_YEAR
-        from .performance import performance as _performance
-
-        ppy = PERIODS_PER_YEAR.get(rebalance, 4)
-        out_dates = result.get("dates") or dates
-        universe_levels = [universe_fn(d) for d in out_dates]
-        perf = result.get("performance") or {}
-        if len(universe_levels) == len(result["navs"]) and all(x is not None for x in universe_levels):
-            perf_uni = _performance(result["navs"], ppy, benchmark=universe_levels)
-            perf["universe_return"] = perf_uni.get("benchmark_return")
-            perf["universe_excess_return"] = perf_uni.get("excess_return")
-            perf["universe_beta"] = perf_uni.get("beta")
-        result["performance"] = perf
-        result["benchmark_sp500"] = result.get("benchmark")  # 메인 벤치마크(S&P500) 레벨 별칭
-        result["benchmark_universe"] = universe_levels        # 보조 벤치마크(동일가중 유니버스) 레벨
-    return result
 
 
 # --------------------------------------------------------------------------

@@ -284,29 +284,6 @@ def test_without_on_progress_is_unaffected(tmp_path):
     assert len(out["warnings"]) == 4
 
 
-def test_us_market_survivorship_hard_block_propagates(tmp_path):
-    # AC5: market="US"가 배선을 타고 흘러 실제 생존편향 하드차단까지 도달하는지 확인.
-    # (과거엔 "검증불가" 소프트경고였으나, 이제 us_delisting 기반 실제 하드차단으로 전환됨.)
-    conn = _seeded_conn(tmp_path)
-    conn.execute(
-        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
-        "VALUES (?,?,?,?,?)", ("DEAD", "죽은미국사", "NYSE", "2013-01-01", "2020-01-01"))
-    conn.commit()
-    us_result = {
-        "dates": ["2025-09-30", "2025-12-31"], "navs": [1.0, 1.1], "benchmark": None,
-        "performance": {"cagr": 5.0},
-        "holdings": [{"date": "2021-06-30", "codes": ["DEAD"]}],
-    }
-    steps = [{"op": "run_backtest", "params": {"market": "US"}, "out": "bt"}]
-    run_pipeline_fn = lambda s, conn=None: dict(us_result)
-    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn, llm_fn=None, market="US")
-
-    assert out["blocked"] is True
-    assert out["result"] is None
-    sins = {v["sin"] for v in out["hard"] if v.get("blocked")}
-    assert "survivorship" in sins
-
-
 # --------------------------------------------------------------------------
 # fail-closed 안전원칙(SoT §3.4/§3.5, AC9/AC11): 하드차단 3종의 검사기 "자체가"
 # 내부 예외로 죽어도, '차단 안 됨=통과'로 새지 않고 반드시 안전측(결과 폐기·차단)으로

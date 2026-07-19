@@ -18,10 +18,9 @@ import numpy as np
 # criteria 예: [{"key": "per", "direction": "low", "weight": 0.5},
 #               {"key": "roe", "direction": "high", "weight": 0.5}]
 
-# 미국 주식은 한 회사가 Class A/B/C 등 복수 클래스로 별도 티커 상장되는 경우가 흔하다
-# (예: "Alphabet Inc. Class A Common Stock" / "Alphabet Inc. Class C Capital Stock").
-# 이 접미어를 제거하면 같은 회사가 같은 그룹 키로 묶인다. 한국 종목명(순수 한글)은 이
-# 접미어가 없어 이름 그대로가 곧 그룹 키가 되므로 기존 동작에 영향이 없다.
+# 종목명에 'Class A/B/C' 같은 주식 종류 영문 접미어가 붙은 경우 이를 제거하면 같은
+# 회사가 같은 그룹 키로 묶인다. 한국 종목명(순수 한글)은 이 접미어가 없어 이름 그대로가
+# 곧 그룹 키가 되므로 기존 동작에 영향이 없다.
 _SHARE_CLASS_SUFFIX_RE = re.compile(
     r"[,.]?\s*Class\s+[A-Za-z0-9]+\s*"
     r"(Common Stock|Capital Stock|Common Shares?|Ordinary Shares?)?\.?\s*$",

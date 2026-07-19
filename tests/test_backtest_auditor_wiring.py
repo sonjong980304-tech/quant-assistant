@@ -151,37 +151,6 @@ def test_soft_warnings_attached_without_hiding_result(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# US 백테스트: 상장폐지 종목 보유 시 생존편향 하드차단이 배선을 타고 노출된다(AC5)
-# (과거엔 '검증불가' 소프트경고였으나, 이제 us_delisting 기반 실제 하드차단으로 전환됨)
-# --------------------------------------------------------------------------
-def test_us_backtest_hard_blocks_delisted_holding(tmp_path, monkeypatch):
-    from src.backtest import pipeline_exec as pe
-
-    us_result = {
-        "dates": ["2025-09-30", "2025-12-31"], "navs": [1.0, 1.1], "benchmark": None,
-        "performance": {"cagr": 5.0},
-        "holdings": [{"date": "2021-06-30", "codes": ["DEAD"]}],
-    }
-    monkeypatch.setattr(pe, "run_pipeline", lambda steps, conn=None: dict(us_result))
-
-    db = _db_with_company(tmp_path)
-    conn0 = sqlite3.connect(db)
-    conn0.execute(
-        "INSERT INTO us_delisting(stock_code, company_name, exchange, listing_date, delisting_date) "
-        "VALUES (?,?,?,?,?)", ("DEAD", "죽은미국사", "NYSE", "2013-01-01", "2020-01-01"))
-    conn0.commit()
-    conn0.close()
-
-    nodes = make_nodes(_deps(FakeLLM("{}", available=False), db))
-    state = {"route": "pipeline", "raw_question": "미국 백테스트",
-             "pipeline": [{"op": "run_backtest", "params": {"market": "US"}, "out": "bt"}]}
-    out = nodes["execute_node"](state)
-    # 하드차단 → 정상 결과 없이 에러(차단 사유)만 반환
-    assert out["error"] and "상장폐지" in out["error"]
-    assert out.get("audit_warnings") in (None, [])
-
-
-# --------------------------------------------------------------------------
 # search_strategy(역백테스트) 파이프라인 — architect 검토(MAJOR) 반영:
 # run_backtest가 아니라 search_strategy op일 때도 스누핑 소프트경고가 1회 첨부된다.
 # --------------------------------------------------------------------------

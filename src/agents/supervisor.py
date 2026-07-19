@@ -2,8 +2,8 @@
 
 .omc/state/sessions/f6b79d90-b7b2-4b4f-b4f7-405a8355724e/prd.json 의 HA-10 참고.
 
-계층: **이 총괄 에이전트** → 도메인 에이전트(HA-6 domain_kr / HA-7 domain_us /
-HA-8 domain_macro / HA-9 domain_backtest) → 데이터 에이전트. 이 파일은 이미 완성된 4개
+계층: **이 총괄 에이전트** → 도메인 에이전트(HA-6 domain_kr /
+HA-8 domain_macro / HA-9 domain_backtest) → 데이터 에이전트. 이 파일은 이미 완성된
 도메인 에이전트의 answer_*_question() 을 **그대로 재사용**하며, 판정/재무/주가 계산 로직을
 새로 만들지 않는다 — 오직 (1)라우팅 (2)도메인 실행·종합 (3)정합성 검증 (4)재시도 오케스트레이션
 네 가지 "총괄" 책임만 담당한다.
@@ -16,7 +16,7 @@ LangGraph 노드 함수(`def supervisor_node(state: GraphState) -> dict` 형태)
 을 호출하고 반환 dict를 state 갱신분으로 돌려주기만 하면 된다 — 총괄 로직 자체는 여기서 끝난다.
 
 - route_question(question, llm_fn) -> list[str]
-      질문 → 도메인 리스트(["kr"] | ["us"] | ["kr","us"] | ["macro"] | ["backtest"] ...).
+      질문 → 도메인 리스트(["kr"] | ["macro"] | ["backtest"] ...).
 - dispatch_domains(routes, question, conn, llm_fn, steps=None) -> dict
       각 도메인 answer_*_question 을 호출해 **원본 결과를 가공 없이** 도메인별 키로 보존.
 - verify_answer(question, domain_results, llm_fn) -> {"valid": bool, "reason": str}
@@ -45,29 +45,19 @@ from src.agents.charting import (
     render_scatter_chart_base64,
 )
 from src.agents.data_price_kr import get_price_history_kr
-from src.agents.data_price_us import get_price_history_us
 from src.agents.domain_backtest import answer_backtest_question
 from src.agents.domain_kr import answer_kr_question
 from src.agents.domain_macro import answer_macro_question, get_macro_history
-from src.agents.domain_us import answer_us_question
 from src.agents.exec_fallback import run_free_exec_fallback
 from src.llm import extract_json
 
 # 정규 도메인 순서 — LLM 응답의 순서/중복과 무관하게 항상 이 순서로 정렬해 결정론을 보장한다.
-_DOMAINS: tuple[str, ...] = ("kr", "us", "macro", "backtest")
+_DOMAINS: tuple[str, ...] = ("kr", "macro", "backtest")
 
 # on_progress 이벤트 라벨용 — web/static/index.html의 TREE_LABEL/treeDepth와 동일한 도메인
 # 이름(step)을 그대로 써야 프론트가 별도 분기 없이 트리 깊이를 매긴다(graph.py의
 # _DOMAIN_LABELS와 같은 매핑이지만, graph.py가 이 모듈을 import하므로 순환을 피해 로컬로 둔다).
-_DOMAIN_LABELS_KO: dict[str, str] = {"kr": "한국", "us": "미국", "macro": "매크로", "backtest": "백테스트"}
-
-# 미국 도메인 비활성화 사유(단일 출처) — web/app.py의 거부 응답과 자연어 라우팅 게이트가
-# 같은 문구를 쓴다. 미국 관련 코드·데이터(domain_us / data_access_us / us_* 테이블 등)는
-# 그대로 보존돼 있어 이 게이트만 풀면 다시 활성화할 수 있다(현재는 제품 진입만 차단).
-US_DISABLED_MESSAGE = (
-    "미국 도메인은 현재 비활성화되어 있습니다. 이 서비스는 현재 한국 주식만 지원합니다"
-    "(미국 관련 코드·데이터는 보존되어 있어 추후 다시 활성화할 수 있습니다)."
-)
+_DOMAIN_LABELS_KO: dict[str, str] = {"kr": "한국", "macro": "매크로", "backtest": "백테스트"}
 
 # llm_fn 미주입 시 사용하는 라우팅 휴리스틱. 도메인별 대표 키워드(부분일치).
 _ROUTE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -92,7 +82,6 @@ _ROUTE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "퀄리티 밸류 모멘텀", "퀄리티·밸류·모멘텀",
     ),
     "macro": ("매크로", "금리차", "스프레드", "장단기", "공포탐욕", "vix", "레짐", "매크로 신호"),
-    "us": ("애플", "apple", "미국", "나스닥", "s&p", "테슬라", "엔비디아", "aapl", "tsla", "nvda"),
     # "삼성" 외 국내 시가총액 상위 종목의 흔한 약칭도 넣는다 — LLM 라우팅(_route_prompt)이
     # 일시적으로 실패해 이 휴리스틱으로 폴백했을 때 "하이닉스 12개월 수익률"처럼 시장 자체를
     # 언급하지 않는 개별 종목 질문이 라우팅되지 않던 실사용 버그 재현.
@@ -121,10 +110,10 @@ def route_question(
 ) -> list[str]:
     """질문을 보고 처리에 필요한 도메인 리스트(복수 가능)를 반환한다.
 
-    llm_fn(주입 시)에 라우팅을 위임하고, 그 응답 텍스트에서 도메인 토큰(kr/us/macro/
-    backtest)을 추출해 **정규 순서(_DOMAINS)로 정렬·중복제거**한다(예: "삼성전자 vs 애플"
-    → LLM이 'kr, us' 응답 → ["kr","us"]). LLM 응답이 JSON 리스트든 콤마 나열이든
-    도메인 토큰만 뽑으므로 형식에 관대하다.
+    llm_fn(주입 시)에 라우팅을 위임하고, 그 응답 텍스트에서 도메인 토큰(kr/macro/
+    backtest)을 추출해 **정규 순서(_DOMAINS)로 정렬·중복제거**한다(예: "삼성전자 최근 종가와
+    골든크로스 전략" → LLM이 'kr, backtest' 응답 → ["kr","backtest"]). LLM 응답이 JSON
+    리스트든 콤마 나열이든 도메인 토큰만 뽑으므로 형식에 관대하다.
 
     llm_fn 이 None이거나 응답에서 도메인을 하나도 못 찾으면 키워드 휴리스틱으로 폴백하고,
     그래도 못 찾으면 빈 리스트([])를 반환한다(SoT [ROUTING]: 무관한 질문에 억지로 기본
@@ -154,15 +143,15 @@ def route_question(
 def _route_prompt(question: str) -> str:
     return (
         "다음 사용자 질문을 처리하려면 어떤 도메인 에이전트가 필요한지 고르세요.\n"
-        "가능한 도메인: kr(국내주식 재무/주가), us(미국주식 재무/주가), "
+        "가능한 도메인: kr(국내주식 재무/주가), "
         "macro(매크로 신호/금리차), backtest(전략 백테스트, 그리고 전종목 횡단면 지표 분석 — "
         "팩터/지표 간 상관관계·산점도, 분위수, 히스토그램/분포도. 특정 지표(PBR 등)를 구간으로 "
         "나눠 히스토그램/분포를 그리는 질문은 개별 종목 조회가 아니라 반드시 backtest입니다. "
         "퀄리티·밸류·모멘텀(QVM)처럼 여러 팩터를 윈저라이즈·섹터중립 z-score·가중합성해 "
         "하나의 복합/종합 점수로 스크리닝하거나 그 전략으로 리밸런싱 백테스트하는 질문도 "
-        "backtest입니다 — 이건 kr/us의 단일 지표 기준 스크리닝(예: 'PER 낮은 순 10개')과는 "
-        "다른 계산(compute_qvm_scores/run_qvm_backtest)이 필요하므로 절대 kr/us로 보내지 마세요).\n"
-        "여러 도메인이 필요하면 모두 나열하세요(예: 국내 vs 미국 비교 → kr, us).\n"
+        "backtest입니다 — 이건 kr의 단일 지표 기준 스크리닝(예: 'PER 낮은 순 10개')과는 "
+        "다른 계산(compute_qvm_scores/run_qvm_backtest)이 필요하므로 절대 kr로 보내지 마세요).\n"
+        "여러 도메인이 필요하면 모두 나열하세요(예: 국내 종목 스크리닝 + 백테스트 → kr, backtest).\n"
         "도메인 키워드만 콤마로 구분해 답하세요.\n\n"
         f"질문: {question}\n답:"
     )
@@ -217,13 +206,13 @@ def _series_from_history(rows: list[dict], date_key: str, value_key: str) -> tup
 
 
 def _extract_chart_data(domain_results: dict, conn) -> tuple[list, dict, str] | None:
-    """domain_results에서 그릴 시계열을 우선순위(backtest > kr/us 가격 > macro)로 하나만 고른다.
+    """domain_results에서 그릴 시계열을 우선순위(backtest > kr 가격 > macro)로 하나만 고른다.
 
     반환: (dates, {"라벨": [값들], ...}, title). 그릴 데이터가 전혀 없으면(스크리닝 결과처럼
     단일 시계열이 아닌 경우 등) 조용히 None(에러 아님 — 차트 없이 텍스트 응답만).
 
     이번 스코프는 "질문당 차트 1개"이므로 여러 조건이 동시에 해당해도 위 우선순위로 하나만
-    그린다. kr/us 가격 시계열은 성능상 domain_results에 없으므로 get_price_history_*로
+    그린다. kr 가격 시계열은 성능상 domain_results에 없으므로 get_price_history_kr로
     최근 1년 종가를 조회하고, macro는 spread 시계열 하나만 그린다(다른 지표 동시 표시 안 함).
     """
     # 1) 백테스트 — 이미 시계열 전체(dates/navs/benchmark)를 담고 있어 재조회 불필요.
@@ -237,15 +226,14 @@ def _extract_chart_data(domain_results: dict, conn) -> tuple[list, dict, str] | 
                 series["벤치마크"] = list(bench)
             return list(res["dates"]), series, "백테스트 결과"
 
-    # 2) 단일 종목 가격 — kr/us 도메인 결과에 stock_code가 있으면(단일종목 조회 케이스)
+    # 2) 단일 종목 가격 — kr 도메인 결과에 stock_code가 있으면(단일종목 조회 케이스)
     #    최근 1년 종가 시계열을 조회해 그린다(스크리닝 결과엔 stock_code가 없어 자연히 제외).
-    for domain, history_fn in (("kr", get_price_history_kr), ("us", get_price_history_us)):
-        d = domain_results.get(domain)
-        if isinstance(d, dict) and d.get("stock_code"):
-            code = d["stock_code"]
-            dates, closes = _series_from_history(history_fn(conn, code), "date", "close")
-            if closes:
-                return dates, {f"{code} 종가": closes}, f"{code} 최근 종가 추이"
+    d = domain_results.get("kr")
+    if isinstance(d, dict) and d.get("stock_code"):
+        code = d["stock_code"]
+        dates, closes = _series_from_history(get_price_history_kr(conn, code), "date", "close")
+        if closes:
+            return dates, {f"{code} 종가": closes}, f"{code} 최근 종가 추이"
 
     # 3) 매크로 — spread(장단기금리차) 시계열 하나만.
     macro = domain_results.get("macro")
@@ -459,7 +447,7 @@ def dispatch_domains(
 ) -> dict:
     """routes 의 각 도메인 answer_*_question 을 호출하고 **원본 결과를 가공 없이** 보존한다.
 
-    반환: {"kr": {...}, "us": {...}, "macro": {...}, "backtest": {...}} — routes 에 포함된
+    반환: {"kr": {...}, "macro": {...}, "backtest": {...}} — routes 에 포함된
     도메인만 키로 담는다. 복합 도메인 질문에서 각 도메인의 원본 데이터를 그대로 노출해야
     하므로(나중에 종합결론과 별도로 병기됨) 여기서는 어떤 가공/요약도 하지 않는다.
 
@@ -479,8 +467,6 @@ def dispatch_domains(
         try:
             if domain == "kr":
                 results["kr"] = answer_kr_question(question, conn, llm_fn=llm_fn, **domain_kwargs)
-            elif domain == "us":
-                results["us"] = answer_us_question(question, conn, llm_fn=llm_fn, **domain_kwargs)
             elif domain == "macro":
                 results["macro"] = answer_macro_question(question, conn)
             elif domain == "backtest":
@@ -528,9 +514,6 @@ def _domain_has_data(result: dict) -> bool:
         return True
     # backtest: 차단되지 않고 결과가 있으면.
     if result.get("result") is not None and not result.get("blocked"):
-        return True
-    # us: ok=True(스키마상 error 없음).
-    if result.get("ok") and (result.get("financial") or result.get("price")):
         return True
     return False
 
@@ -618,7 +601,7 @@ def verify_answer(
         # 합산 검증이 실제로 실패하면(진짜 문제) 아래에서 도메인별로 세분화해 원인을
         # 특정한다 — 실패한 도메인만 부분 재-dispatch할 수 있도록.
 
-    # 도메인별로 개별 판정한다 — 복합 도메인 질문(kr+us 등)에서 일부 도메인만 검증에
+    # 도메인별로 개별 판정한다 — 복합 도메인 질문(kr+backtest 등)에서 일부 도메인만 검증에
     # 실패해도 그 도메인만 부분 재-dispatch할 수 있도록(answer_with_verification이 이
     # per_domain을 읽어 실패한 도메인만 재시도한다. 이미 통과한 도메인을 매번 다시
     # 실행하는 낭비를 없앤다). 이 프로젝트 스펙(AC3)이 요구하는 "검증 실패 시 최대 3회
@@ -809,7 +792,7 @@ def _summarize_one(domain: str, result: dict) -> str:
         return f"오류: {result['error']}"
     if domain == "macro":
         return f"종합신호={result.get('overall')} (스프레드 레짐={result.get('spread', {}).get('regime')})"
-    if domain in ("kr", "us"):
+    if domain == "kr":
         fin = result.get("financial")
         price = result.get("price")
         bits = []
@@ -886,7 +869,7 @@ def answer_with_verification(
          성공하면 domain_results에 "free_exec" 키로 결과를 추가하고 uncertain=False로
          반환한다. 실패하면 기존과 동일하게 "불확실성 명시" 응답을 반환한다(uncertain=True).
 
-    복합 도메인(kr+us 등) 질문에서는 verify_fn이 반환하는 verdict["per_domain"]을 읽어,
+    복합 도메인(kr+backtest 등) 질문에서는 verify_fn이 반환하는 verdict["per_domain"]을 읽어,
     이미 검증을 통과한 도메인은 그대로 두고 **실패한 도메인만** 다음 시도에서 재-dispatch한다
     (매번 전체 도메인을 다시 실행하는 낭비를 없앤다). verify_fn이 per_domain을 안 주면(예:
     단위테스트가 주입하는 단순 fake) 기존처럼 전체 routes를 재-dispatch한다 — 하위호환.
@@ -917,24 +900,6 @@ def answer_with_verification(
 
     routes = route_fn(question, llm_fn, **progress_kwargs)
 
-    # 미국 도메인은 현재 제품에서 비활성화 상태다(관련 코드·데이터는 보존 — 추후 재활성화 가능).
-    # 라우팅이 us를 잡아도 실제로 실행(dispatch)하지 않도록 여기서 걸러낸다. 미국만 필요한
-    # 질문이면 dispatch/verify를 시도하는 낭비 없이 즉시 '비활성화' 사유로 우아하게 끝낸다
-    # (크래시 없음). 복합 도메인(kr+us 등)이면 us만 빼고 나머지로 정상 진행한다. route_question/
-    # dispatch_domains 자체는 손대지 않아 미국 라우팅·조회 능력은 그대로 보존된다(정책만 여기서 차단).
-    if "us" in routes:
-        routes = [r for r in routes if r != "us"]
-        if not routes:
-            if on_progress:
-                on_progress("supervisor", US_DISABLED_MESSAGE)
-            return {
-                "uncertain": True,
-                "reason": US_DISABLED_MESSAGE,
-                "attempts": 0,
-                "domain_results": {},
-                "routes": [],
-            }
-
     if not routes:
         # 라우팅이 도메인을 하나도 못 찾음(unknown) — dispatch/verify를 시도하는 낭비 없이
         # 즉시 불확실 응답으로 끝낸다(완전히 무관한 질문에 억지로 도메인을 갖다붙이지 않는다).
@@ -942,7 +907,7 @@ def answer_with_verification(
             on_progress("supervisor", "질문을 이해하지 못했습니다 — 처리 가능한 도메인을 찾지 못함")
         return {
             "uncertain": True,
-            "reason": "질문을 이해하지 못했습니다. 국내/미국 주식, 매크로 지표, 백테스트 중 "
+            "reason": "질문을 이해하지 못했습니다. 국내 주식, 매크로 지표, 백테스트 중 "
                       "어떤 것에 대한 질문인지 좀 더 구체적으로 말씀해 주세요.",
             "attempts": 0,
             "domain_results": {},

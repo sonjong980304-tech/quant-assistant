@@ -18,14 +18,6 @@ from __future__ import annotations
 from src.legacy.graph import prompts
 
 
-def test_sql_user_has_simple_us_price_example_with_currency():
-    """단순 'OO 최신 종가' 패턴 예시가 있고 currency 컬럼을 포함한다."""
-    assert "테슬라 최신 종가" in prompts.SQL_USER
-    idx = prompts.SQL_USER.index("테슬라 최신 종가")
-    snippet = prompts.SQL_USER[idx:idx + 300]
-    assert "'USD' AS currency" in snippet
-
-
 def test_sql_user_documents_sector_empty_string_convention():
     """미분류 업종은 빈 문자열이라는 관례가 문서화되고, 예시도 IS NOT NULL이 아닌 != ''를 쓴다."""
     assert "sector != ''" in prompts.SQL_USER
@@ -39,15 +31,6 @@ def test_sql_user_documents_sector_empty_string_convention():
 def test_sql_user_clarifies_ranking_guards_dont_apply_to_single_company_lookup():
     """정합성 가드는 순위/스크리닝 질의 전용이며 단일회사 조회에는 적용하지 않는다는 원칙이 있다."""
     assert "특정 회사 1곳" in prompts.SQL_USER or "단일" in prompts.SQL_USER
-
-
-def test_sql_user_has_single_company_roe_example_without_ranking_guard():
-    """'애플 ROE 알려줘' 단일조회 예시는 ni.ttm<e.eq 랭킹가드 없이 currency 포함으로 존재한다."""
-    assert "애플 ROE" in prompts.SQL_USER
-    idx = prompts.SQL_USER.index("애플 ROE")
-    snippet = prompts.SQL_USER[idx:idx + 500]
-    assert "'USD' AS currency" in snippet
-    assert "ni.ttm < e.eq" not in snippet and "ni.ttm<e.eq" not in snippet
 
 
 def test_sql_user_still_formats_without_error():

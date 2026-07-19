@@ -13,7 +13,7 @@ pykrx `get_stock_major_changes(ticker)` 는 종목별로 날짜(index)와 상호
 (name_before/name_after)으로도 종목코드를 찾는다(domain_kr.find_stock_code 폴백). 액면변경(분할/
 병합)은 저장만 해두고 이번 스코프에서 분할보정 도구엔 연결하지 않는다(범위 밖).
 
-네트워크(pykrx 호출)는 DI(fetch_fn 주입)로 분리해 단위 테스트한다(us_delisting/kr_trading_status
+네트워크(pykrx 호출)는 DI(fetch_fn 주입)로 분리해 단위 테스트한다(kr_trading_status
 관례와 동일). 라이브 pykrx 호출은 스크립트를 사용자가 직접 실행할 때만 일어난다. 전종목 순회는
 기존 per-ticker pykrx 모듈(krx.py)과 동일한 관례를 그대로 재사용한다: 종목별로 재시도/지연 없이
 1회 호출하고 실패는 격리(스킵+Slack 알림)한 뒤 다음 종목으로 계속한다(pykrx 가 조회 실패를 빈

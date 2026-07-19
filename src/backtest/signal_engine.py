@@ -16,7 +16,7 @@
 {dates, navs, benchmark, performance, holdings:[{date, codes}]} 를 지킨다.
 
 지표 계산(SERIES kind=indicator)은 primitives.compute_indicator_series(전 구간 TA-Lib 배열)를
-재사용하고, 가격 시계열은 data_access.price_history_batch(KR)/data_access_us.us_price_history_batch(US)를
+재사용하고, 가격 시계열은 data_access.price_history_batch를
 재사용한다 — 모두 DI로 주입 가능(기본은 실제 구현)해 TA-Lib/DB 없이 단위테스트가 된다.
 """
 from __future__ import annotations
@@ -159,8 +159,8 @@ def run_signal_backtest(
     반환: {dates, navs, benchmark:None, performance, holdings:[{date, codes}]}
     (engine.run_backtest와 동일 형식 → auditor.post_audit이 무수정으로 소비 가능).
 
-    price_history_fn/indicator_series_fn은 테스트 주입용(기본=KR/US 배치 가격조회 + TA-Lib
-    전구간 지표). market='US'면 us_prices, 그 외 prices를 기본으로 쓴다.
+    price_history_fn/indicator_series_fn은 테스트 주입용(기본=국내 배치 가격조회 + TA-Lib
+    전구간 지표). prices 테이블을 기본으로 쓴다.
     """
     codes = [str(c) for c in (stock_codes or [])]
     if not (1 <= len(codes) <= _MAX_SIGNAL_CODES):
@@ -174,10 +174,7 @@ def run_signal_backtest(
             raise ValueError(f"{label}.op이 유효하지 않습니다: {rule.get('op')} ({sorted(_VALID_OPS)}만 가능)")
 
     if price_history_fn is None:
-        if market == "US":
-            from .data_access_us import us_price_history_batch as price_history_fn
-        else:
-            from .data_access import price_history_batch as price_history_fn
+        from .data_access import price_history_batch as price_history_fn
     if indicator_series_fn is None:
         from .primitives import compute_indicator_series as indicator_series_fn
 
