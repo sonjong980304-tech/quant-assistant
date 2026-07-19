@@ -67,6 +67,11 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px}
   .meta{color:var(--muted);font-size:12.5px}
   .muted{color:var(--muted);font-size:12.5px}
+  /* 고정(sticky) 실행중 상태줄 — 지금 어떤 단계가 도는지 오른쪽 패널 상단에 고정 표시(아래 로그는 계속 쌓임). */
+  .live-status{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;
+    margin-bottom:10px;padding:8px 12px;border-radius:9px;background:var(--panel2);
+    border:1px solid var(--line);color:var(--text);font-weight:600;font-size:12.5px}
+  .live-status.done{color:var(--accent2)} .live-status.fail{color:var(--bad)}
   .err{color:var(--bad)}
   .top-answer .label{color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px}
   /* 핵심 수정: 종합결론 문자열을 JSON.stringify로 감싸 리터럴 \n 이 보이던 문제를 없애고,
@@ -425,7 +430,7 @@ function sendQuestion(){
   const progressBody=document.getElementById('progressBody');
   sendBtn.disabled=true; ta.disabled=true;
   _live=true;
-  progressBody.innerHTML='';
+  progressBody.innerHTML='<div class="live-status" id="chatStatus"><span class="spinner"></span> 지금 실행 중: 시작…</div>';
 
   if(_chatES){ _chatES.close(); _chatES=null; }
 
@@ -445,11 +450,16 @@ function sendQuestion(){
   _chatES.onmessage=(e)=>{
     const ev=JSON.parse(e.data);
     if(ev.step){
+      // ev.step은 도메인명이 아니라 사람이 읽을 수 있는 한글 진행 메시지 그 자체(_chat_event_stream 배선).
+      const st=document.getElementById('chatStatus');
+      if(st){ st.innerHTML='<span class="spinner"></span> 지금 실행 중: '+esc(ev.step); }
       progressBody.insertAdjacentHTML('beforeend', `<div class="meta"><span class="spinner"></span> ${esc(ev.step)}</div>`);
       progressBody.scrollTop = progressBody.scrollHeight;
     }
   };
   _chatES.addEventListener('done', async (e)=>{
+    const st=document.getElementById('chatStatus');
+    if(st){ st.className='live-status done'; st.textContent='✓ 완료'; }
     const data=JSON.parse(e.data);
     if(data.session_id){
       sessionId=data.session_id;

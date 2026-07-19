@@ -103,6 +103,11 @@
   .tree-sum{color:var(--text)}
   .tree-done{margin-top:10px;color:var(--accent2);font-weight:600}
   .tree-fail{margin-top:10px;color:var(--bad);font-weight:600}
+  /* 고정(sticky) 실행중 상태줄 — 지금 어떤 에이전트/단계가 도는지 한눈에. 아래 로그(.tree)는 그대로 유지. */
+  .live-status{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;
+    margin:10px 0;padding:8px 12px;border-radius:9px;background:var(--panel2);
+    border:1px solid var(--line);color:var(--text);font-weight:600;font-size:13px}
+  .live-status.done{color:var(--accent2)} .live-status.fail{color:var(--bad)}
 
   /* ===== 계층형 응답 · 도메인별 원본 데이터 범용 KV 렌더 (HA-13) ===== */
   table.kvt{width:100%;border-collapse:collapse;margin:2px 0}
@@ -389,8 +394,10 @@ function startStreamTree(q, btn){
   if(_treeES){ _treeES.close(); _treeES=null; }              // 이전 스트림 정리(중복 실행 방지)
   const box=document.getElementById('treeResult');
   box.innerHTML='<div class="card"><b>🌳 계층형 에이전트 · 실시간 진행</b>'+
+    '<div class="live-status" id="treeStatus"><span class="spinner"></span> 지금 실행 중: 총괄 에이전트 시작…</div>'+
     '<div class="tree" id="treeNodes"><div class="meta"><span class="spinner"></span> 총괄 에이전트 시작…</div></div></div>';
   const nodes=document.getElementById('treeNodes');
+  const statusEl=document.getElementById('treeStatus');
   let got=false;
   const model=document.getElementById('modelSel').value||'';
   const url='/api/query/stream?question='+encodeURIComponent(q)+(model?'&model='+encodeURIComponent(model):'');
@@ -399,11 +406,14 @@ function startStreamTree(q, btn){
     let ev; try{ ev=JSON.parse(e.data); }catch(_){ return; }
     if(!ev || !ev.step) return;
     if(!got){ nodes.innerHTML=''; got=true; }                 // 첫 이벤트 도착 시 로딩표시 제거
+    // 고정 상태줄: 지금 이 순간 실행 중인 에이전트/단계를 매 이벤트마다 갱신(로그는 아래에 계속 쌓인다).
+    statusEl.innerHTML='<span class="spinner"></span> 지금 실행 중: '+esc(TREE_LABEL[ev.step]||ev.step);
     nodes.insertAdjacentHTML('beforeend', treeNode(ev.step, ev.summary||'', ev.detail, q));
   };
   _treeES.addEventListener('done',(e)=>{                      // 정상 종료 마커 → 닫기(자동 재연결·재실행 방지)
     if(_treeES){ _treeES.close(); _treeES=null; }
     if(!got){ nodes.innerHTML='<div class="meta">진행 이벤트가 없었습니다.</div>'; }
+    statusEl.className='live-status done'; statusEl.textContent='✓ 완료';
     nodes.insertAdjacentHTML('beforeend','<div class="tree-done">✓ 완료</div>');
     // 완료 후엔 코드 블록을 접어 화면을 정리한다(편집·재실행은 계속 가능 — 펼치면 그대로 있음).
     nodes.querySelectorAll('details.code-details[open]').forEach(d=>d.removeAttribute('open'));
@@ -421,12 +431,14 @@ function startStreamTree(q, btn){
   _treeES.addEventListener('fail',(e)=>{                      // 서버가 보낸 실패 이벤트
     if(_treeES){ _treeES.close(); _treeES=null; }
     let msg=''; try{ msg=(JSON.parse(e.data)||{}).message||''; }catch(_){}
+    statusEl.className='live-status fail'; statusEl.textContent='⚠ 실패';
     nodes.insertAdjacentHTML('beforeend',`<div class="tree-fail">⚠ 실패: ${esc(msg||'스트림 오류')}</div>`);
     document.getElementById('qResult').innerHTML=`<div class="card err">오류: ${esc(msg||'스트림 오류')}</div>`;
     if(btn) btn.disabled=false;
   });
   _treeES.onerror=()=>{                                        // 연결 끊김(EventSource 기본 error) → 닫아 재연결 방지
     if(_treeES){ _treeES.close(); _treeES=null; }
+    statusEl.className='live-status fail'; statusEl.textContent='⚠ 연결 실패';
     if(!got){ nodes.innerHTML='<div class="meta err">스트림 연결 실패</div>'; }
     document.getElementById('qResult').innerHTML='<div class="card err">오류: 스트림 연결 실패</div>';
     if(btn) btn.disabled=false;
