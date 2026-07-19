@@ -83,8 +83,8 @@
 |---|---|
 | `supervisor.py` | 총괄 — 라우팅(`route_question`)→도메인 실행(`dispatch_domains`)→정합성 검증(`verify_answer`)→최대 3회 재시도→종합결론(`answer_with_verification` 하나로 통합). 차트 요청 시 `_build_charts`(결정론적 3케이스) 우선 시도 후 빈 결과면 `chart_agent`로 폴백. |
 | `graph.py` | 총괄 함수를 LangGraph `StateGraph` 노드로 감싸 `.stream()`으로 실행 — 자세한 노드 구조는 아래 "노드별" 참고. |
-| `domain_kr.py` | 한국 종목 — 단일/비교/스크리닝 3갈래 분기. "SK하이닉스"뿐 아니라 "하이닉스" 같은 구어체 약칭도 실재 회사면 인식. |
-| `domain_us.py` | 미국 종목 — 티커 인식 후 완전히 분리된 US 전용 테이블 조회. |
+| `domain_kr.py` | 한국 종목 — 단일/비교/스크리닝 3갈래 분기. 단일·비교 경로에서는 다시 질문을 재무·순수 시세·기술지표로 분류(`classify_intent`)해 필요한 축만(또는 여럿) 호출. "SK하이닉스"뿐 아니라 "하이닉스" 같은 구어체 약칭도 실재 회사면 인식. |
+| `domain_us.py` | 미국 종목 — 코드·데이터는 보존되어 있으나 현재 제품에서 비활성화(게이트). (원래: 티커 인식 후 완전히 분리된 US 전용 테이블 조회.) |
 | `domain_macro.py` | 매크로 — 재계산 없이 배치가 미리 적재한 `macro_signal` 최신 1행만 읽음. |
 | `domain_backtest.py` | 전략 백테스트·팩터분석 — LLM이 파이썬을 직접 안 쓰고 `{"pipeline":[...]}` JSON 조립 지시서만 생성, 실행은 별도 검증된 엔진이 담당. 종료연도를 질문에 안 밝히면 오늘이 속한 연도를 기본값으로 쓴다. |
 | `data_financial.py` | DART/FnGuide 재무 데이터 조회(공용, KR·US 양쪽에서 재사용). 어느 소스·어느 분기 값인지 함께 반환. |
@@ -114,9 +114,13 @@
 
 ## 웹: 계층형 멀티에이전트 아키텍처
 
-질문 하나가 **총괄 에이전트 → (병렬) 도메인 에이전트 4종 → 데이터 에이전트 → 총괄 에이전트의
-정합성 검증** 순서로 흐릅니다. 아래 다이어그램에서 색깔 있는 박스 하나하나가 독립된 에이전트
-(파일)입니다 — GitHub에서 이 파일을 열면 실제 도형으로 렌더링됩니다.
+질문 하나가 **총괄 에이전트 → (병렬) 활성 도메인 에이전트 3종(한국·매크로·백테스트) → 데이터
+에이전트 → 총괄 에이전트의 정합성 검증** 순서로 흐릅니다. 아래 다이어그램에서 색깔 있는 박스
+하나하나가 독립된 에이전트(파일)입니다 — GitHub에서 이 파일을 열면 실제 도형으로 렌더링됩니다.
+한국주식 에이전트는 질문을 **재무·순수 시세·기술지표** 세 축으로 분류(`classify_intent`)해,
+필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께 호출합니다. (미국주식 에이전트
+`domain_us.py`는 코드·데이터가 보존돼 있으나 현재 비활성화되어 이 활성 아키텍처 그림에서는
+제외했습니다 — [왜 한국 주식인가](#왜-한국-주식인가--미국-도메인은-왜-껐나) 참고.)
 
 ```mermaid
 flowchart TB
@@ -125,16 +129,11 @@ flowchart TB
 
     Q --> SUP
 
-    subgraph KR_BOX["🇰🇷 한국주식 에이전트 — domain_kr.py"]
+    subgraph KR_BOX["🇰🇷 한국주식 에이전트 — domain_kr.py<br/>질문을 재무·주가·기술지표로 분류(classify_intent) → 필요한 축만, 또는 여럿 동시 호출"]
         direction TB
-        KR_FIN["📑 data_financial.py<br/>DART · FnGuide"]
-        KR_PRICE["📈 data_price_kr.py<br/>주가 · 기술지표"]
-    end
-
-    subgraph US_BOX["🇺🇸 미국주식 에이전트 — domain_us.py"]
-        direction TB
-        US_FIN["📑 data_financial.py<br/>(재무 에이전트 공용)"]
-        US_PRICE["📈 data_price_us.py<br/>주가 · 기술지표"]
+        KR_FIN["📑 재무 · data_financial.py<br/>DART · FnGuide (resolve_metric)"]
+        KR_PRICE["📈 주가 · data_price_kr.py<br/>순수 시세 (종가/시가/거래량)"]
+        KR_TECH["📐 기술지표 · data_price_kr.py + primitives.py<br/>compute_technical_indicator (이동평균·RSI·MACD·볼린저, TA-Lib)"]
     end
 
     subgraph MACRO_BOX["🌐 매크로 에이전트 — domain_macro.py"]
@@ -151,12 +150,10 @@ flowchart TB
     end
 
     SUP -->|"라우팅 (복수 도메인 동시 가능)"| KR_BOX
-    SUP -->|라우팅| US_BOX
     SUP -->|라우팅| MACRO_BOX
     SUP -->|라우팅| BT_BOX
 
     KR_BOX --> VERIFY
-    US_BOX --> VERIFY
     MACRO_BOX --> VERIFY
     BT_BOX --> VERIFY
 
@@ -169,15 +166,13 @@ flowchart TB
     classDef sup fill:#1f2a44,stroke:#0d1424,color:#ffffff,font-weight:bold
     classDef result fill:#fff9db,stroke:#f08c00,color:#5c3d00,font-weight:bold
     classDef kr fill:#fff0f0,stroke:#e03131,color:#7d1a1a
-    classDef us fill:#eef3ff,stroke:#3b5bdb,color:#1a2c66
     classDef macro fill:#eefbf0,stroke:#2f9e44,color:#164a24
     classDef bt fill:#f6eeff,stroke:#9c36b5,color:#4a1766
 
     class Q q
     class SUP,VERIFY sup
     class RESULT result
-    class KR_BOX,KR_FIN,KR_PRICE kr
-    class US_BOX,US_FIN,US_PRICE us
+    class KR_BOX,KR_FIN,KR_PRICE,KR_TECH kr
     class MACRO_BOX,MACRO_DATA macro
     class BT_BOX,BT_PIPE,BT_HARD,BT_SOFT bt
 ```
@@ -260,8 +255,8 @@ ROE/ROA/ROC/마진/성장률 등 전체 지표를 그 시점 기준으로 즉석
 | 계층 | 파일 | 하는 일 |
 |---|---|---|
 | 총괄 | `supervisor.py` | `route_question`(질문을 보고 kr/us/macro/backtest 중 몇 개 도메인이 필요한지 결정 — LLM 우선, 실패 시 키워드 휴리스틱) → `dispatch_domains`(해당 도메인들을 호출해 원본 결과를 **가공 없이** 보존) → `verify_answer`(도메인 결과가 원래 질문에 실제로 답이 되는지 규칙+LLM으로 재확인) → 불일치면 실패 사유를 피드백해 **최대 3회**까지만 재도전 → `synthesize_conclusion`(종합 결론 문장 생성). 3회를 넘겨도 실패하면 그제서야 아래 exec_fallback을 정확히 1회 시도합니다. |
-| 도메인 | `domain_kr.py` | 국내 종목. 질문을 단일종목/다중종목(비교질문)/스크리닝(조건검색) 3갈래로 나눕니다. 스크리닝은 LLM이 "PER 낮은 순 10개"처럼 **조건(criteria)·개수(top_n)만 JSON으로 뽑고**, 실제 정렬·계산은 `get_cross_section`+`combine`이 결정론적으로 수행합니다(LLM이 숫자를 직접 계산하지 않음 — 계산은 항상 코드가, 판단만 LLM이). 종목명 인식은 "SK하이닉스"처럼 공식명 전체 언급뿐 아니라 "하이닉스"같이 그룹·지주 접두어(SK/LG/삼성 등)를 생략한 구어체도, company 테이블에 실재하는 회사일 때만 후보로 인정하는 방식으로 지원합니다. |
-| 도메인 | `domain_us.py` | 미국 종목. 티커 인식(`resolve_ticker_us`) 후 국내와 완전히 분리된 US 전용 테이블(`us_company`/`us_prices`/`us_financials`)을 조회합니다. |
+| 도메인 | `domain_kr.py` | 국내 종목. 질문을 단일종목/다중종목(비교질문)/스크리닝(조건검색) 3갈래로 나눕니다. 단일·다중종목 경로에서는 다시 `classify_intent`가 질문을 **재무·순수 시세·기술지표** 세 축으로 분류해(LLM 우선, 실패 시 키워드 폴백; 여러 축이면 여러 하위 에이전트를 함께 호출) 필요한 데이터만 조회합니다 — 재무는 `data_financial.py`, 순수 시세는 `data_price_kr.py`, 기술지표(이동평균/RSI/MACD/볼린저)는 `data_price_kr.py`가 `compute_technical_indicator`(TA-Lib, `src/backtest/primitives.py`)로 계산해 시세에 부착합니다. 스크리닝은 LLM이 "PER 낮은 순 10개"처럼 **조건(criteria)·개수(top_n)만 JSON으로 뽑고**, 실제 정렬·계산은 `get_cross_section`+`combine`이 결정론적으로 수행합니다(LLM이 숫자를 직접 계산하지 않음 — 계산은 항상 코드가, 판단만 LLM이). 종목명 인식은 "SK하이닉스"처럼 공식명 전체 언급뿐 아니라 "하이닉스"같이 그룹·지주 접두어(SK/LG/삼성 등)를 생략한 구어체도, company 테이블에 실재하는 회사일 때만 후보로 인정하는 방식으로 지원합니다. |
+| 도메인 | `domain_us.py` | 미국 종목. **코드·데이터는 그대로 보존돼 있으나 현재 제품에서 비활성화(게이트)**되어 어느 진입점으로도 진입하지 않습니다(요청 시 "미국 도메인 비활성화" 안내 반환). 원래 동작: 티커 인식(`resolve_ticker_us`) 후 국내와 완전히 분리된 US 전용 테이블(`us_company`/`us_prices`/`us_financials`)을 조회. |
 | 도메인 | `domain_macro.py` | **재계산을 하지 않습니다** — launchd로 매일 미리 계산·적재된 `macro_signal` 테이블의 최신 1행을 읽어오기만 합니다(질문이 들어올 때마다 신호를 다시 판정하면 매번 값이 흔들릴 수 있어, "판단은 배치로 1회, 조회는 캐시만"이라는 이 프로젝트 공통 원칙을 여기서도 씁니다). |
 | 도메인 | `domain_backtest.py` | 전략 백테스트·팩터분석(상관관계/분위수/히스토그램/QVM 등)을 담당합니다. LLM이 파이썬을 쓰지 않고 `{"pipeline":[{"op":..., "params":..., "out":...}]}` 형태의 **JSON 조립 지시서**만 생성하면(`generate_backtest_steps`), 그 JSON을 먼저 정적 검증(`validate_pipeline_steps` — 존재하지 않는 연산·파라미터 거부)한 뒤 `pipeline_exec.run_pipeline`이 실제 계산을 수행합니다. |
 | 데이터 | `data_price_kr.py` / `data_price_us.py` / `data_financial.py` | 최하위 계층. 도메인 에이전트가 필요로 하는 주가/재무 데이터를 실제로 조회해줍니다. DB에 직접 `conn.execute()`를 쓰지 않고 **반드시 `exec_runtime.execute_sql`을 경유**합니다 — 이렇게 하나의 통로로 강제해야 아래 "SQL/Python 실행" 절의 안전장치(읽기전용 연결, 스키마 사전검증, 타임아웃)를 모든 SQL 호출이 빠짐없이 통과합니다. `data_financial.py`의 `resolve_metric`은 DART/FnGuide 두 소스 중 어느 쪽 값인지, 어느 분기 값인지까지 함께 반환합니다. |

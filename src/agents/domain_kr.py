@@ -8,7 +8,7 @@ src/agents/data_price_kr.py). 이미 "한국주식 도메인"으로 라우팅된
 핵심 책임:
 1) 질문에서 종목명(예: "삼성전자") 또는 6자리 종목코드를 찾아 stock_code로 변환한다
    (company 테이블, execute_sql(HA-1 실행기) 경유 — conn.execute() 직접 호출 금지).
-2) 질문이 재무데이터/주가·기술지표/둘 다 중 무엇을 요구하는지 판단해(classify_intent)
+2) 질문이 재무데이터/순수 시세/기술지표 중 무엇을(여러 개 동시 가능) 요구하는지 판단해(classify_intent)
    해당 데이터 에이전트에 위임한다.
 3) 결과를 종합해 반환한다 — 재무 결과(resolve_metric)와 주가 결과(get_price_snapshot_kr)
    를 각각 구분 가능한 키에 담는다.
@@ -75,9 +75,17 @@ _METRIC_KO_ALIASES: dict[str, str] = {
     "투자의견": "analyst_opinion",
 }
 
+# 순수 시세(종가/시가/거래량 등) 키워드 — get_price_snapshot_kr(indicators=None) 경로.
 _PRICE_KEYWORDS: list[str] = [
-    "주가", "가격", "시가", "고가", "저가", "종가", "거래량",
-    "이동평균", "이평선", "rsi", "macd", "볼린저", "차트", "기술적",
+    "주가", "가격", "시가", "고가", "저가", "종가", "거래량", "차트",
+]
+
+# 기술지표 키워드 — 순수 시세와 별개 축이다. TA-Lib 기반 compute_technical_indicator
+# (src/backtest/primitives.py, 이동평균/RSI/MACD/볼린저밴드)로 가격 시계열에서 파생 계산된다.
+# get_price_snapshot_kr(indicators=[...]) 경로로 흐른다.
+_TECHNICAL_KEYWORDS: list[str] = [
+    "이동평균", "이평선", "이평", "골든크로스", "데드크로스", "기술적", "기술지표",
+    "rsi", "macd", "볼린저", "sma", "ema", "bollinger",
 ]
 
 _FINANCIAL_KEYWORDS: list[str] = (
@@ -1393,79 +1401,115 @@ def resolve_computed_metric(
     }
 
 
-def _intent_prompt(question: str) -> str:
-    """classify_intent 용 LLM 판단 프롬프트(재무/주가/둘다). route_question 의 _route_prompt 와 동일 관례.
+# ── 질문 → 기술지표 스펙 추출 (technical 축이 켜졌을 때만 사용) ────────────────────
+# classify_intent 가 technical 로 판단하면 어떤 기술지표를 원하는지 뽑아
+# compute_technical_indicator(src/backtest/primitives.py, TA-Lib) 스펙 리스트로 만든다.
+# 지원 지표명은 primitives._SUPPORTED_INDICATORS(sma/ema/rsi/macd/bollinger)와 일치한다.
+_INDICATOR_KEYWORD_SPECS: list[tuple[tuple[str, ...], dict]] = [
+    (("골든크로스", "데드크로스", "이동평균", "이평선", "이평", "단순이동평균", "sma"), {"name": "sma"}),
+    (("지수이동평균", "ema"), {"name": "ema"}),
+    (("rsi",), {"name": "rsi"}),
+    (("macd",), {"name": "macd"}),
+    (("볼린저", "bollinger", "bband"), {"name": "bollinger"}),
+]
 
-    시장 구분(markets/exchanges)과 마찬가지로, 재무 vs 주가 구분도 하드코딩 키워드가 아니라
-    LLM 이 질문 의미를 읽고 판단하게 한다. LLM 은 코드가 아니라 정해진 셋(financial/price/both)
-    중 하나만 고른다.
+
+def _extract_indicators(question: str) -> list[dict]:
+    """질문에서 요청된 기술지표를 뽑아 compute_technical_indicator 용 스펙 리스트로 반환한다.
+
+    classify_intent 가 technical 로 판단했을 때만 호출된다(그 외에는 순수 시세). 키워드로
+    특정 지표를 못 집으면(예: LLM 이 키워드 없이 technical 로만 판단) 대표 지표인 이동평균(sma)
+    으로 안전 폴백한다 — technical 축이 켜졌으면 최소 하나의 지표는 계산해야 하기 때문이다.
+    """
+    q = question.lower()
+    specs: list[dict] = []
+    for keywords, spec in _INDICATOR_KEYWORD_SPECS:
+        if any(k in q for k in keywords):
+            specs.append(dict(spec))
+    return specs or [{"name": "sma"}]
+
+
+def _intent_prompt(question: str) -> str:
+    """classify_intent 용 LLM 판단 프롬프트(재무/주가/기술지표). route_question 의 _route_prompt 와 동일 관례.
+
+    시장 구분(markets/exchanges)과 마찬가지로, 재무 vs 주가 vs 기술지표 구분도 하드코딩
+    키워드가 아니라 LLM 이 질문 의미를 읽고 판단하게 한다. LLM 은 정해진 셋
+    (financial/price/technical) 중 **필요한 것을 모두** 고른다(단독 또는 조합).
     """
     return (
-        "다음 질문이 어떤 데이터를 원하는지 판단하세요.\n"
+        "다음 질문이 어떤 데이터를 원하는지 판단하세요. 해당하는 것을 모두 고르세요(여러 개 가능).\n"
         "- financial: 재무데이터(매출/영업이익/순이익/PER/PBR/ROE 등). 매출성장률·12개월 수익률·"
         "모멘텀처럼 값으로 계산되는 '지표' 요청도 financial 로 봅니다(단순 시세 조회가 아님).\n"
-        "- price: 주가·기술지표(종가/시가/거래량/이동평균/RSI/MACD/볼린저 등)\n"
-        "- both: 재무와 주가를 모두 원함\n"
-        "financial, price, both 중 하나만 답하세요.\n\n"
+        "- price: 순수 시세(종가/시가/고가/저가/거래량 등)\n"
+        "- technical: 기술지표(이동평균/이평선/RSI/MACD/볼린저밴드 등 가격 시계열로 계산하는 지표)\n"
+        "financial, price, technical 중 필요한 것을 모두 쉼표로 구분해 답하세요(예: 'financial, price').\n\n"
         f"질문: {question}\n답:"
     )
 
 
-_INTENT_TOKEN_RE = re.compile(r"\b(financial|price|both)\b")
+_INTENT_TOKEN_RE = re.compile(r"\b(financial|price|technical)\b")
 
 
-def _parse_intent(raw: str | None) -> str | None:
-    r"""LLM 응답에서 financial/price/both 를 뽑는다. 명확한 신호가 없으면 None(→ 키워드 폴백).
+def _parse_intent(raw: str | None) -> tuple[str, ...] | None:
+    r"""LLM 응답에서 financial/price/technical 을 모두 뽑아 정렬 튜플로 돌려준다.
 
-    단어경계(\b) 매칭이라 'financials' 같은 부분문자열에 오탐하지 않는다. 한국어 응답
-    (재무/주가/둘)도 관대하게 수용한다. 재무·주가가 함께 잡히면 안전하게 both 로 본다.
+    여러 축이 잡히면 모두 담는다(여러 서브에이전트를 함께 부르기 위함). 명확한 신호가
+    전혀 없으면 None(→ 키워드 폴백). 단어경계(\b) 매칭이라 'financials' 같은 부분문자열에
+    오탐하지 않는다. 한국어 응답(재무/시세·주가/기술지표)도 관대하게 수용한다.
     """
     t = (raw or "").lower()
     found = set(_INTENT_TOKEN_RE.findall(t))
     if "재무" in t:
         found.add("financial")
-    if "주가" in t:
+    if "시세" in t or "주가" in t:
         found.add("price")
-    if "둘" in t:
-        found.add("both")
+    if "기술" in t:
+        found.add("technical")
     if not found:
         return None
-    if "both" in found or ("financial" in found and "price" in found):
-        return "both"
-    if "financial" in found:
-        return "financial"
-    return "price"
+    return tuple(sorted(found))
 
 
-def _classify_intent_heuristic(question: str) -> str:
-    """키워드 기반 intent 판단(LLM 미가용/불명확 시 안전망). 둘 다/불명확이면 both 로 폴백한다.
+def _classify_intent_heuristic(question: str) -> tuple[str, ...]:
+    """키워드 기반 intent 판단(LLM 미가용/불명확 시 안전망). 재무/주가/기술지표 세 축을
+    독립적으로 판단해, 해당하는 축을 모두 담은 정렬 튜플을 돌려준다.
 
-    기존 classify_intent 의 결정론 판단부를 그대로 분리한 것 — return_12m/'수익률' 같은 계산전용
-    재무지표 키워드(_COMPUTED_KO_ALIASES)를 financial 로 보호하던 회귀 방지 로직도 여기 유지된다.
+    아무 축도 안 잡히면(불명확) 놓치는 것보다 과다조회가 안전하므로 재무+주가로 폴백한다
+    — 기술지표는 무거운 TA-Lib 계산이라 명시적 신호가 있을 때만 켠다. return_12m/'수익률'
+    같은 계산전용 재무지표 키워드(_COMPUTED_KO_ALIASES)를 financial 로 보호하던 회귀 방지
+    로직도 여기 유지된다.
     """
     q = question.lower()
     needs_financial = any(k in q for k in _FINANCIAL_KEYWORDS) or any(
         k in q for k in _COMPUTED_KO_ALIASES
     )
     needs_price = any(k in q for k in _PRICE_KEYWORDS)
-    if needs_financial and needs_price:
-        return "both"
+    needs_technical = any(k in q for k in _TECHNICAL_KEYWORDS)
+    found: set[str] = set()
     if needs_financial:
-        return "financial"
+        found.add("financial")
     if needs_price:
-        return "price"
-    return "both"
+        found.add("price")
+    if needs_technical:
+        found.add("technical")
+    if not found:
+        return ("financial", "price")
+    return tuple(sorted(found))
 
 
-def classify_intent(question: str, llm_fn: Callable[[str], str] | None = None) -> str:
-    """질문이 재무데이터/주가데이터/둘 다 중 무엇을 요구하는지 판단한다.
+def classify_intent(
+    question: str, llm_fn: Callable[[str], str] | None = None
+) -> tuple[str, ...]:
+    """질문이 재무/주가/기술지표 중 무엇을 요구하는지 판단한다(여러 축 동시 가능).
 
-    반환: "financial" | "price" | "both".
+    반환: {"financial", "price", "technical"} 의 정렬된 부분집합 튜플(항상 비어있지 않음).
+    - 하나만 필요하면 그 축만 담긴 튜플 → 단독 서브에이전트 호출
+    - 여러 개 필요하면 여러 축 → 여러 서브에이전트(함수) 를 함께 호출
     route_question(총괄 라우팅)과 동일하게 **LLM 우선**이다 — llm_fn 이 주어지면 먼저 LLM 에
-    판단을 위임하고(_intent_prompt), 응답에서 financial/price/both 를 뽑는다. LLM 이 없거나
-    응답에서 판단을 못 뽑으면(파싱 실패/예외) 키워드 휴리스틱(_classify_intent_heuristic)으로
-    폴백한다 — 안전망은 유지한다(예: return_12m/'수익률' 은 폴백에서 financial 로 보호). 끝까지
-    불명확하면 놓치는 것보다 과다조회가 안전하므로 both 로 폴백한다.
+    판단을 위임하고(_intent_prompt), 응답에서 축을 모두 뽑는다. LLM 이 없거나 응답에서 판단을
+    못 뽑으면(파싱 실패/예외) 키워드 휴리스틱(_classify_intent_heuristic)으로 폴백한다 —
+    안전망은 유지한다(예: return_12m/'수익률' 은 폴백에서 financial 로 보호). 끝까지 불명확하면
+    놓치는 것보다 과다조회가 안전하므로 재무+주가로 폴백한다(무거운 기술지표는 제외).
     """
     if llm_fn is not None:
         try:
@@ -1579,7 +1623,7 @@ def _answer_kr_multi_entity_question(
             "stock_code": None,
             "stock_codes": stock_codes,
             "question": question,
-            "intent": "financial",
+            "intent": ("financial",),
             "financial": None,
             "price": None,
             "entities": entities,
@@ -1590,13 +1634,18 @@ def _answer_kr_multi_entity_question(
         return result
 
     intent = classify_intent(question, llm_fn=llm_fn)
-    metric = _extract_metric(question) if intent in ("financial", "both") else None
+    metric = _extract_metric(question) if "financial" in intent else None
+    # technical 축이 켜졌으면(기술지표 요청) 질문에서 지표 스펙을 뽑아 채운다. 호출부가
+    # indicators 를 명시했으면 그것을 우선한다(테스트 주입/명시 조회). 순수 시세면 None.
+    active_indicators = indicators
+    if "technical" in intent and not active_indicators:
+        active_indicators = _extract_indicators(base_question)
 
     entities: list[dict] = []
     for code in stock_codes:
         entity: dict = {"stock_code": code, "financial": None, "price": None, "errors": []}
 
-        if intent in ("financial", "both"):
+        if "financial" in intent:
             if metric is None:
                 entity["errors"].append("재무 지표를 인식하지 못함")
             elif metric in _COMPUTED_ONLY_FIELDS:
@@ -1625,14 +1674,17 @@ def _answer_kr_multi_entity_question(
                 else:
                     entity["financial"] = financial
 
-        if intent in ("price", "both"):
+        if "price" in intent or "technical" in intent:
             # period가 명시됐으면(예: "25년 기준") 그 시점 이하 최근 거래일 종가를 가져온다
             # (_resolve_screening_asof가 quarter/annual→날짜로 변환) — 재무 쪽만 과거 시점을
             # 반영하고 가격은 항상 오늘 최신값을 보여줘 서로 다른 기준시점이 뒤섞이던 버그
             # 수정. period가 None이면 asof=None → get_price_snapshot_kr 기존 최신값 경로.
+            # technical 이면 active_indicators 가 채워져 지표까지 계산되고, 순수 시세면 None.
             price_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
             price, err = _call_with_retry(
-                lambda c=code: price_snapshot_fn(conn, c, asof=price_asof, indicators=indicators)
+                lambda c=code: price_snapshot_fn(
+                    conn, c, asof=price_asof, indicators=active_indicators
+                )
             )
             if err:
                 entity["errors"].append(f"주가데이터 조회 실패: {err}")
@@ -1806,9 +1858,9 @@ def answer_kr_question(
         {
             "stock_code": str | None,
             "question": str,
-            "intent": "financial" | "price" | "both" | None,
+            "intent": tuple[str, ...] | None,   # {"financial","price","technical"} 의 부분집합
             "financial": dict | None,     # resolve_metric() 또는 resolve_computed_metric() 결과
-            "price": list[dict] | None,   # get_price_snapshot_kr() 결과
+            "price": list[dict] | None,   # get_price_snapshot_kr() 결과(technical 이면 지표 포함)
             "errors": list[str],
         }
     질문이 서로 다른 분기/연도를 2개 이상 지목하면(예: "25년과 26년 1분기") financial 대신
@@ -1874,7 +1926,7 @@ def answer_kr_question(
     # N개월 전 종가 대비 수익률)로 계산한다. intent 분류/_extract_metric을 건너뛰고 조기 반환한다.
     recent_months = _parse_recent_return_months(base_question)
     if recent_months is not None:
-        result["intent"] = "financial"
+        result["intent"] = ("financial",)
         asof = _default_screening_asof(conn, "prices", execute_sql_fn)
         financial, err = _call_with_retry(
             lambda: price_return_fn(conn, stock_code, asof, recent_months)
@@ -1889,8 +1941,12 @@ def answer_kr_question(
 
     intent = classify_intent(question, llm_fn=llm_fn)
     result["intent"] = intent
+    # technical 축이 켜졌으면 질문에서 지표 스펙을 뽑아 채운다(호출부 명시값 우선). 순수 시세면 None.
+    active_indicators = indicators
+    if "technical" in intent and not active_indicators:
+        active_indicators = _extract_indicators(base_question)
 
-    if intent in ("financial", "both"):
+    if "financial" in intent:
         metric = _extract_metric(question)
         if metric is None:
             result["errors"].append("재무 지표를 인식하지 못함")
@@ -1930,13 +1986,16 @@ def answer_kr_question(
             else:
                 result["financial"] = financial
 
-    if intent in ("price", "both"):
+    if "price" in intent or "technical" in intent:
         # period가 명시됐으면 그 시점 이하 최근 거래일 종가를 가져온다(다중종목 경로와
         # 동일 원칙 — 재무 쪽만 과거 시점 반영하고 가격은 항상 오늘 최신값이라 서로 다른
         # 기준시점이 뒤섞이던 버그 수정). period가 None이면 asof=None → 기존 최신값 경로.
+        # technical 이면 active_indicators 가 채워져 지표까지 계산되고, 순수 시세면 None.
         price_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
         price, err = _call_with_retry(
-            lambda: price_snapshot_fn(conn, stock_code, asof=price_asof, indicators=indicators)
+            lambda: price_snapshot_fn(
+                conn, stock_code, asof=price_asof, indicators=active_indicators
+            )
         )
         if err:
             result["errors"].append(f"주가데이터 조회 실패: {err}")

@@ -32,8 +32,6 @@ from typing import Callable
 
 from src.agents.data_price_us import get_price_history_us, get_price_snapshot_us
 from src.agents.domain_kr import (
-    _intent_prompt,
-    _parse_intent,
     _parse_period,
     _resolve_screening_asof,
     _run_screening,
@@ -66,13 +64,56 @@ _NON_TICKER_KEYWORDS = {
 }
 
 
+# 미국 도메인은 재무 vs 주가를 2갈래(financial/price/both) 문자열로 가른다. 한국 도메인
+# (domain_kr)이 재무/순수시세/기술지표 3갈래 튜플로 확장되면서 공용 _intent_prompt/_parse_intent
+# 를 더는 공유하지 않는다 — 미국은 (제품에서 게이트로 비활성화된 상태로) 기존 2갈래 동작을
+# 그대로 보존하려고 아래 로컬 사본을 쓴다.
+def _intent_prompt(question: str) -> str:
+    """_classify_intent 용 LLM 판단 프롬프트(재무/주가/둘다). LLM 은 financial/price/both 중 하나만 고른다."""
+    return (
+        "다음 질문이 어떤 데이터를 원하는지 판단하세요.\n"
+        "- financial: 재무데이터(매출/영업이익/순이익/PER/PBR/ROE 등). 매출성장률·12개월 수익률·"
+        "모멘텀처럼 값으로 계산되는 '지표' 요청도 financial 로 봅니다(단순 시세 조회가 아님).\n"
+        "- price: 주가·기술지표(종가/시가/거래량/이동평균/RSI/MACD/볼린저 등)\n"
+        "- both: 재무와 주가를 모두 원함\n"
+        "financial, price, both 중 하나만 답하세요.\n\n"
+        f"질문: {question}\n답:"
+    )
+
+
+_INTENT_TOKEN_RE = re.compile(r"\b(financial|price|both)\b")
+
+
+def _parse_intent(raw: str | None) -> str | None:
+    r"""LLM 응답에서 financial/price/both 를 뽑는다. 명확한 신호가 없으면 None(→ 키워드 폴백).
+
+    단어경계(\b) 매칭이라 부분문자열 오탐이 없고, 한국어 응답(재무/주가/둘)도 관대하게
+    수용한다. 재무·주가가 함께 잡히면 안전하게 both 로 본다.
+    """
+    t = (raw or "").lower()
+    found = set(_INTENT_TOKEN_RE.findall(t))
+    if "재무" in t:
+        found.add("financial")
+    if "주가" in t:
+        found.add("price")
+    if "둘" in t:
+        found.add("both")
+    if not found:
+        return None
+    if "both" in found or ("financial" in found and "price" in found):
+        return "both"
+    if "financial" in found:
+        return "financial"
+    return "price"
+
+
 def _classify_intent(question: str, llm_fn: Callable[[str], str] | None = None) -> str:
     """질문이 재무/주가/둘다 중 무엇을 원하는지 판단한다('financial' | 'price' | 'both').
 
     HA-6 classify_intent(domain_kr)와 동일하게 **LLM 우선**이다 — llm_fn 이 주어지면 먼저 LLM 에
-    판단을 위임하고(공용 _intent_prompt/_parse_intent 재사용), 응답에서 판단을 못 뽑으면(파싱
-    실패/예외) 아래 키워드 휴리스틱으로 폴백한다. 양쪽 키워드가 다 있거나 둘 다 없으면 'both'로
-    안전 폴백한다 — 필요한 데이터를 빠뜨리는 것보다 과다 조회가 낫다는 원칙.
+    판단을 위임하고(로컬 _intent_prompt/_parse_intent), 응답에서 판단을 못 뽑으면(파싱 실패/예외)
+    아래 키워드 휴리스틱으로 폴백한다. 양쪽 키워드가 다 있거나 둘 다 없으면 'both'로 안전
+    폴백한다 — 필요한 데이터를 빠뜨리는 것보다 과다 조회가 낫다는 원칙.
     """
     if llm_fn is not None:
         try:

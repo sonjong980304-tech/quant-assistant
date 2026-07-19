@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from src.agents.domain_kr import (
+    _extract_indicators,
     _extract_metric,
     _parse_period,
     _parse_periods,
@@ -346,20 +347,37 @@ def test_find_stock_code_full_name_regression_with_group_prefix_fix(tmp_path):
         conn.close()
 
 
-# ── classify_intent: 재무/주가/둘다 판단 ─────────────────────────────────────
+# ── classify_intent: 재무/주가/기술지표 3갈래 판단(여러 개 동시 가능) ─────────────────
+# 반환은 {"financial","price","technical"} 의 정렬된 부분집합 튜플 — 하나면 단독 서브에이전트,
+# 여러 개면 여러 서브에이전트를 함께 부른다.
 
 def test_classify_intent_detects_financial_only():
-    assert classify_intent("삼성전자 PER 알려줘") == "financial"
-    assert classify_intent("삼성전자 매출액 얼마야") == "financial"
+    assert classify_intent("삼성전자 PER 알려줘") == ("financial",)
+    assert classify_intent("삼성전자 매출액 얼마야") == ("financial",)
 
 
 def test_classify_intent_detects_price_only():
-    assert classify_intent("삼성전자 주가 알려줘") == "price"
-    assert classify_intent("삼성전자 이동평균 알려줘") == "price"
+    assert classify_intent("삼성전자 주가 알려줘") == ("price",)
+    assert classify_intent("삼성전자 종가랑 거래량 알려줘") == ("price",)
 
 
-def test_classify_intent_detects_both():
-    assert classify_intent("삼성전자 PER이랑 주가 같이 알려줘") == "both"
+def test_classify_intent_detects_technical_only():
+    """이동평균/RSI/MACD/볼린저 등 기술지표만 물으면 technical 단독으로 분류된다
+    (순수 시세 price 와 별개 축)."""
+    assert classify_intent("삼성전자 이동평균 알려줘") == ("technical",)
+    assert classify_intent("삼성전자 RSI 얼마야") == ("technical",)
+    assert classify_intent("삼성전자 MACD 보여줘") == ("technical",)
+    assert classify_intent("삼성전자 볼린저밴드 알려줘") == ("technical",)
+
+
+def test_classify_intent_detects_financial_and_price():
+    assert classify_intent("삼성전자 PER이랑 주가 같이 알려줘") == ("financial", "price")
+
+
+def test_classify_intent_detects_price_and_technical():
+    """순수 시세와 기술지표를 함께 물으면 price+technical 두 축이 모두 잡힌다
+    (여러 서브에이전트 동시 작동)."""
+    assert classify_intent("삼성전자 종가랑 RSI 알려줘") == ("price", "technical")
 
 
 def test_classify_intent_llm_first_used_when_available():
@@ -374,30 +392,37 @@ def test_classify_intent_llm_first_used_when_available():
     result = classify_intent("삼성전자 어때?", llm_fn=fake_llm)
     assert len(calls) == 1
     assert "삼성전자 어때?" in calls[0]  # 원 질문이 프롬프트에 포함됨
-    assert result == "price"
+    assert result == ("price",)
 
 
-def test_classify_intent_unclear_without_llm_fn_falls_back_to_both():
-    assert classify_intent("삼성전자 어때?") == "both"
+def test_classify_intent_llm_can_select_multiple_axes():
+    """LLM 이 여러 축을 쉼표로 답하면 모두 담아 여러 서브에이전트를 함께 부를 수 있다."""
+    result = classify_intent("삼성전자 분석", llm_fn=lambda p: "financial, price, technical")
+    assert result == ("financial", "price", "technical")
+
+
+def test_classify_intent_unclear_without_llm_fn_falls_back_to_financial_and_price():
+    """불명확하면 과다조회가 안전하나, 무거운 기술지표는 명시 신호가 있을 때만 켠다
+    (재무+주가로만 폴백, technical 은 제외)."""
+    assert classify_intent("삼성전자 어때?") == ("financial", "price")
 
 
 def test_classify_intent_llm_first_overrides_keyword_heuristic():
-    """LLM 우선순위 전환: 재무 키워드(PER)가 있어도 llm_fn 이 있으면 LLM 판단을 먼저 채택한다
-    (기존 '키워드 우선, LLM 최후 폴백'에서 순서가 뒤집힘)."""
+    """LLM 우선순위: 재무 키워드(PER)가 있어도 llm_fn 이 있으면 LLM 판단을 먼저 채택한다."""
     calls: list[str] = []
 
     def fake_llm(prompt: str) -> str:
         calls.append(prompt)
-        return "both"
+        return "financial, price"
 
     result = classify_intent("삼성전자 PER 알려줘", llm_fn=fake_llm)
     assert len(calls) == 1  # LLM 이 먼저 호출됨(키워드로 단락하지 않음)
-    assert result == "both"  # LLM 판단(both)이 키워드(financial)를 이김
+    assert result == ("financial", "price")  # LLM 판단이 키워드(financial 단독)를 이김
 
 
 def test_classify_intent_falls_back_to_keyword_when_llm_unparseable():
-    """llm_fn 응답에서 financial/price/both 를 못 뽑으면 키워드 휴리스틱으로 폴백한다."""
-    assert classify_intent("삼성전자 주가 알려줘", llm_fn=lambda p: "???") == "price"
+    """llm_fn 응답에서 축 토큰을 못 뽑으면 키워드 휴리스틱으로 폴백한다."""
+    assert classify_intent("삼성전자 주가 알려줘", llm_fn=lambda p: "???") == ("price",)
 
 
 def test_classify_intent_llm_exception_falls_back_to_keyword():
@@ -406,7 +431,7 @@ def test_classify_intent_llm_exception_falls_back_to_keyword():
     def boom(prompt: str) -> str:
         raise RuntimeError("LLM 다운")
 
-    assert classify_intent("삼성전자 주가 알려줘", llm_fn=boom) == "price"
+    assert classify_intent("삼성전자 주가 알려줘", llm_fn=boom) == ("price",)
 
 
 # ── answer_kr_question: 통합 위임 ────────────────────────────────────────────
@@ -433,7 +458,7 @@ def test_answer_kr_question_routes_financial_question_to_resolve_metric(tmp_path
 
     assert calls == [("005930", "per")]
     assert result["stock_code"] == "005930"
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     assert result["financial"]["value"] == 12.5
     assert result["financial"]["source"] == "DART"
     assert result["price"] is None
@@ -461,7 +486,7 @@ def test_answer_kr_question_routes_price_question_to_price_snapshot(tmp_path, mo
 
     assert calls == [("005930",)]
     assert result["stock_code"] == "005930"
-    assert result["intent"] == "price"
+    assert result["intent"] == ("price",)
     assert result["price"][0]["close"] == 71000.0
     assert result["financial"] is None
     assert result["errors"] == []
@@ -495,9 +520,98 @@ def test_answer_kr_question_both_intent_calls_both_data_agents(tmp_path, monkeyp
 
     assert fin_calls == [("005930", "per")]
     assert price_calls == [("005930",)]
-    assert result["intent"] == "both"
+    assert result["intent"] == ("financial", "price")
     assert result["financial"]["value"] == 12.5
     assert result["price"][0]["close"] == 71000.0
+
+
+def test_answer_kr_question_technical_question_calls_price_snapshot_with_indicators(
+    tmp_path, monkeypatch
+):
+    """기술지표 질문("삼성전자 RSI") → get_price_snapshot_kr 이 indicators 를 채워 호출된다
+    (순수 시세 price 와 달리 TA-Lib 지표 계산 경로 발동). intent 는 technical 단독."""
+    import src.agents.domain_kr as mod
+
+    db = _seed(tmp_path)
+    captured: list[dict] = []
+
+    def spy_snapshot(conn, stock_codes, **kwargs):
+        captured.append(kwargs)
+        return [{"stock_code": stock_codes, "date": "2026-07-11", "close": 71000.0}]
+
+    monkeypatch.setattr(mod, "get_price_snapshot_kr", spy_snapshot)
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 RSI 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["intent"] == ("technical",)
+    assert len(captured) == 1  # 기술지표 축 하나만 발동(단독 호출)
+    assert captured[0]["indicators"] == [{"name": "rsi"}]
+
+
+def test_answer_kr_question_financial_only_does_not_call_price_snapshot(tmp_path, monkeypatch):
+    """재무만 필요한 질문("삼성전자 PER") → 주가/기술지표 서브에이전트는 호출되지 않는다
+    (단독 호출: 필요한 축만 작동)."""
+    import src.agents.domain_kr as mod
+
+    db = _seed(tmp_path)
+    price_calls: list = []
+    monkeypatch.setattr(
+        mod, "get_price_snapshot_kr", lambda *a, **k: price_calls.append(1) or []
+    )
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 PER 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["intent"] == ("financial",)
+    assert price_calls == []  # 주가 스냅샷 미호출
+    assert result["financial"]["value"] == 12.5
+
+
+def test_answer_kr_question_pure_price_question_passes_no_indicators(tmp_path, monkeypatch):
+    """순수 시세 질문("삼성전자 주가")은 indicators 없이 스냅샷만 조회한다(기술지표 미계산)."""
+    import src.agents.domain_kr as mod
+
+    db = _seed(tmp_path)
+    captured: list[dict] = []
+
+    def spy_snapshot(conn, stock_codes, **kwargs):
+        captured.append(kwargs)
+        return [{"stock_code": stock_codes, "date": "2026-07-11", "close": 71000.0}]
+
+    monkeypatch.setattr(mod, "get_price_snapshot_kr", spy_snapshot)
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question("삼성전자 주가 알려줘", conn)
+    finally:
+        conn.close()
+
+    assert result["intent"] == ("price",)
+    assert len(captured) == 1
+    assert captured[0].get("indicators") is None  # 순수 시세 → 지표 미부착
+
+
+# ── _extract_indicators: 질문 → 기술지표 스펙 리스트 ──────────────────────────────
+
+def test_extract_indicators_maps_keywords_to_specs():
+    assert _extract_indicators("삼성전자 RSI 알려줘") == [{"name": "rsi"}]
+    assert _extract_indicators("삼성전자 MACD 보여줘") == [{"name": "macd"}]
+    assert _extract_indicators("삼성전자 볼린저밴드") == [{"name": "bollinger"}]
+    assert _extract_indicators("삼성전자 이동평균") == [{"name": "sma"}]
+
+
+def test_extract_indicators_multiple_and_default():
+    specs = _extract_indicators("삼성전자 RSI 랑 MACD 같이")
+    assert {s["name"] for s in specs} == {"rsi", "macd"}
+    # 기술지표 신호는 있으나 특정 지표를 못 집으면 대표 지표(sma)로 안전 폴백
+    assert _extract_indicators("삼성전자 기술지표 분석") == [{"name": "sma"}]
 
 
 def test_answer_kr_question_unknown_company_reports_error_without_calling_data_agents(
@@ -579,9 +693,9 @@ def test_answer_kr_question_retries_once_then_reports_failure_without_raising(tm
 # return_12m을 계산하지 않아 uncertain으로 끝나던 실서버 재현 버그.
 
 def test_classify_intent_detects_return_12m_keyword_as_financial():
-    assert classify_intent("삼성전자 직전 12개월 수익률") == "financial"
-    assert classify_intent("삼성전자 모멘텀") == "financial"
-    assert classify_intent("삼성전자 가격수익률 알려줘") in ("financial", "both")
+    assert classify_intent("삼성전자 직전 12개월 수익률") == ("financial",)
+    assert classify_intent("삼성전자 모멘텀") == ("financial",)
+    assert "financial" in classify_intent("삼성전자 가격수익률 알려줘")
 
 
 def test_classify_intent_return_12m_keyword_protected_by_fallback_when_llm_unclear():
@@ -592,18 +706,18 @@ def test_classify_intent_return_12m_keyword_protected_by_fallback_when_llm_uncle
         return "잘 모르겠습니다"  # financial/price/both 토큰 없음 → 파싱 실패 → 키워드 폴백
 
     result = classify_intent("삼성전자 직전 12개월 수익률", llm_fn=unclear_llm)
-    assert result == "financial"
+    assert result == ("financial",)
 
 
 def test_classify_intent_detects_other_computed_only_metric_keywords_as_financial():
     """return_12m 외에 metrics_at()이 계산하는 다른 계산전용 지표(ROA/PSR)도 일관되게 인식."""
-    assert classify_intent("삼성전자 ROA 알려줘") == "financial"
-    assert classify_intent("삼성전자 PSR 알려줘") == "financial"
+    assert classify_intent("삼성전자 ROA 알려줘") == ("financial",)
+    assert classify_intent("삼성전자 PSR 알려줘") == ("financial",)
 
 
 def test_classify_intent_still_detects_per_as_financial_unaffected_by_computed_change():
     """회귀 방지: PER처럼 이미 resolve_metric으로 동작하던 재무지표 분류는 그대로."""
-    assert classify_intent("삼성전자 PER 알려줘") == "financial"
+    assert classify_intent("삼성전자 PER 알려줘") == ("financial",)
 
 
 def test_answer_kr_question_routes_return_12m_question_to_computed_metric(tmp_path):
@@ -615,7 +729,7 @@ def test_answer_kr_question_routes_return_12m_question_to_computed_metric(tmp_pa
         conn.close()
 
     assert result["stock_code"] == "005930"
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     assert result["financial"] is not None
     assert result["financial"]["metric"] == "return_12m"
     # (72000-60000)/60000*100 = 20.0
@@ -1450,7 +1564,7 @@ def test_answer_kr_question_routes_recent_months_return_to_price_return_fn(tmp_p
         conn.close()
 
     assert calls == [("005930", "2026-07-11", 3)]
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     assert result["financial"]["return_pct"] == pytest.approx(12.34)
     assert result["financial"]["months"] == 3
     assert result["price"] is None
@@ -1472,7 +1586,7 @@ def test_answer_kr_question_recent_months_failure_reported_without_raising(tmp_p
     finally:
         conn.close()
 
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     assert result["financial"] is None
     assert any("boom" in e for e in result["errors"])
 
@@ -1500,7 +1614,7 @@ def test_answer_kr_question_multi_entity_recent_months_return_routes_to_price_re
     assert {c[0] for c in calls} == {"005930", "000660"}
     assert all(c[2] == 6 for c in calls)          # 6개월
     assert all(c[1] == "2026-07-15" for c in calls)  # asof = 최신 거래일
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     by_code = {e["stock_code"]: e for e in result["entities"]}
     assert by_code["005930"]["financial"]["return_pct"] == pytest.approx(20.0)
     assert by_code["000660"]["financial"]["months"] == 6
@@ -1570,7 +1684,7 @@ def test_answer_kr_question_explicit_period_preserves_shape_and_omits_data_asof(
         conn.close()
 
     assert result["stock_code"] == "005930"
-    assert result["intent"] == "financial"
+    assert result["intent"] == ("financial",)
     assert result["financial"]["value"] == 12.5
     assert result["financial"]["period"] == "2025Q1"
     assert "data_asof" not in result  # 기간을 명시했으므로 중복 라벨 생략
