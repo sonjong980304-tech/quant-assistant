@@ -2,8 +2,7 @@
 
 한국 상장사 재무/주가/매크로 데이터를 SQLite에 적재하고, 자연어 질문에 파이썬과 sql을 활용해 llm이 답하는
 시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.
-(미국 주식 도메인은 코드·데이터를 그대로 보존한 채 현재 비활성화되어 있습니다 — 이유는
-[왜 한국 주식인가](#왜-한국-주식인가--미국-도메인은-왜-껐나) 절 참고.)
+(이 서비스는 한국 주식에 집중합니다 — 이유는 [왜 한국 주식인가](#왜-한국-주식인가) 절 참고.)
 
 - **웹(`web/app.py`)**: 신규 **계층형 멀티에이전트** 구조. 총괄 에이전트가 한국주식/
   매크로/백테스트 도메인으로 라우팅하고, 도메인 결과를 검증·재시도한 뒤
@@ -19,14 +18,12 @@
 
 ---
 
-## 왜 한국 주식인가 — 미국 도메인은 왜 껐나
+## 왜 한국 주식인가
 
-이 서비스는 현재 **한국 주식만** 지원합니다. 미국 주식(NASDAQ/NYSE) 도메인은 코드·데이터를
-모두 그대로 보존한 채 **제품 진입만 막아 둔 상태**입니다(게이트만 풀면 다시 켤 수 있습니다).
-왜 굳이 한국에 집중하기로 했는지, 근거는 다음과 같습니다.
+이 서비스는 **한국 주식**에 집중합니다. 왜 한국에 집중하기로 했는지, 근거는 다음과 같습니다.
 
-- **미국 시장은 이미 초과수익 기회가 빠르게 사라진다.** 전 세계 수많은 퀀트펀드가 같은
-  데이터를 놓고 경쟁하기 때문에, 모멘텀(최근 오른 종목이 더 오르는 경향)·밸류(저평가 종목이
+- **효율적인 시장일수록 초과수익 기회가 빠르게 사라진다.** 전 세계 수많은 퀀트펀드가 같은
+  데이터를 놓고 경쟁하는 시장에서는, 모멘텀(최근 오른 종목이 더 오르는 경향)·밸류(저평가 종목이
   더 오르는 경향) 같은 **아노말리**(anomaly — 이론상 없어야 할 초과수익 기회)가 발견되는
   즉시 **재정거래**(arbitrage — 그 기회를 노린 매매가 몰려 가격이 제자리로 돌아가는 것)로
   빠르게 메워집니다. "남들이 다 아는 팩터"로는 초과수익을 오래 누리기 어렵습니다.
@@ -37,13 +34,7 @@
 - **실제로 확인된 근거.** 이 프로젝트와는 **별개로 운영 중인** 실거래 퀀트봇 `quant_trader`는,
   PIT(point-in-time — 그 시점에 실제로 존재·상장돼 있던 종목만 써서 생존편향을 없앤) 유니버스
   기반 한국 시장 백테스트에서 **누적수익률 +78.52%, 샤프비율 1.037**을 기록한 사례가 있습니다.
-  같은 팩터 아이디어라도 한국에서 더 잘 작동한 참고 근거입니다. (`quant_trader`는 이 저장소와
-  무관한 별도 프로젝트입니다.)
-
-> 참고: README 곳곳에 남아 있는 미국 관련 서술(`domain_us.py`, `us_company`/`us_prices`/
-> `us_financials`, `src/ingest/us_*.py`, SEC·FMP 수집 등)은 **삭제된 것이 아니라 보존된**
-> 구성요소를 가리킵니다. 다만 현재는 웹·자연어·백테스트 어느 진입점에서도 미국 도메인으로
-> 들어갈 수 없습니다(요청하면 "미국 도메인은 현재 비활성화" 안내를 반환합니다).
+  (`quant_trader`는 이 저장소와 무관한 별도 프로젝트입니다.)
 
 ---
 
@@ -60,7 +51,7 @@
 | 경로 | 파일 | 무엇을 하는 화면인가 |
 |---|---|---|
 | `/`, `/chat` | `chat.html` | **기본 화면.** 멀티턴 대화 — 질문 하나로 시작해 "그중에서 낮은 순으로" 같은 후속 질문을 이어갈 수 있음. 왼쪽 대화이력 · 가운데 답변(+CSV·차트) · 오른쪽 실시간 처리상황+근거데이터, 3열 레이아웃. |
-| `/query` | `index.html` | 예전 단발 질의 화면. 질문 하나 → 실시간 처리 트리(🌳) + 종합결론 + 도메인별 원본데이터. 백테스트 설정 패널(한국 시장, 19개 팩터 체크박스, 산업 필터, 거래비용, 이상치 처리)도 여기 있음(미국 시장 옵션은 현재 비활성화). |
+| `/query` | `index.html` | 예전 단발 질의 화면. 질문 하나 → 실시간 처리 트리(🌳) + 종합결론 + 도메인별 원본데이터. 백테스트 설정 패널(한국 시장, 19개 팩터 체크박스, 산업 필터, 거래비용, 이상치 처리)도 여기 있음. |
 | `/macro` | `macro.html` | 매크로 신호 전용 화면 — 환율·금리차·VIX·Fear&Greed 기반 레짐 판정을 그래프로. |
 | `/allweather` | `allweather.html` | 올웨더 포트폴리오 모니터링 — 매달 배치가 계산한 목표비중·CAGR·MDD·샤프·NAV곡선을 읽기 전용으로 표시. |
 
@@ -69,7 +60,7 @@
 |---|---|
 | 스크리닝 | "PER 낮은 10개" 같은 조건 검색. 조건·개수만 LLM이 뽑고 실제 정렬·계산은 코드가 결정론적으로 수행. |
 | 단일종목/비교 조회 | 특정 종목(들)의 재무·주가 지표 조회, 어느 시점·소스 값인지 항상 명시. |
-| 백테스트(한국) | 리밸런싱 전략 시뮬레이션(월/분기/반기/연간), 벤치마크는 동일가중 유니버스. 19개 팩터 사용 가능. (미국 시장 백테스트 경로는 코드·데이터가 보존돼 있으나 현재 비활성화.) |
+| 백테스트(한국) | 리밸런싱 전략 시뮬레이션(월/분기/반기/연간), 벤치마크는 동일가중 유니버스. 19개 팩터 사용 가능. |
 | QVM 멀티팩터 | 퀄리티·밸류·모멘텀 3개 카테고리를 섹터중립 z-score로 합성한 스크리너+백테스트. |
 | 멀티턴 대화 | 직전 결과를 이어서 가공하는 후속질문("그중 PBR 낮은 것만") — SQL 재조회 없이 파이썬 가공만. |
 | 히스토그램·차트 | 분포도·산점도·막대·자유형(matplotlib) 차트를 질문에 맞춰 자동 생성. |
@@ -84,11 +75,10 @@
 | `supervisor.py` | 총괄 — 라우팅(`route_question`)→도메인 실행(`dispatch_domains`)→정합성 검증(`verify_answer`)→최대 3회 재시도→종합결론(`answer_with_verification` 하나로 통합). 차트 요청 시 `_build_charts`(결정론적 3케이스) 우선 시도 후 빈 결과면 `chart_agent`로 폴백. |
 | `graph.py` | 총괄 함수를 LangGraph `StateGraph` 노드로 감싸 `.stream()`으로 실행 — 자세한 노드 구조는 아래 "노드별" 참고. |
 | `domain_kr.py` | 한국 종목 — 단일/비교/스크리닝 3갈래 분기. 단일·비교 경로에서는 다시 질문을 재무·순수 시세·기술지표로 분류(`classify_intent`)해 필요한 축만(또는 여럿) 호출. "SK하이닉스"뿐 아니라 "하이닉스" 같은 구어체 약칭도 실재 회사면 인식. |
-| `domain_us.py` | 미국 종목 — 코드·데이터는 보존되어 있으나 현재 제품에서 비활성화(게이트). (원래: 티커 인식 후 완전히 분리된 US 전용 테이블 조회.) |
 | `domain_macro.py` | 매크로 — 재계산 없이 배치가 미리 적재한 `macro_signal` 최신 1행만 읽음. |
 | `domain_backtest.py` | 전략 백테스트·팩터분석 — LLM이 파이썬을 직접 안 쓰고 `{"pipeline":[...]}` JSON 조립 지시서만 생성, 실행은 별도 검증된 엔진이 담당. 종료연도를 질문에 안 밝히면 오늘이 속한 연도를 기본값으로 쓴다. |
-| `data_financial.py` | DART/FnGuide 재무 데이터 조회(공용, KR·US 양쪽에서 재사용). 어느 소스·어느 분기 값인지 함께 반환. |
-| `data_price_kr.py` / `data_price_us.py` | 주가·기술지표 조회. |
+| `data_financial.py` | DART/FnGuide 재무 데이터 조회. 어느 소스·어느 분기 값인지 함께 반환. |
+| `data_price_kr.py` | 주가·기술지표 조회. |
 | `backtest_verification.py` | 백테스트 하드차단 3종(생존편향·미래참조·공매도, 결정론적)+소프트경고 4종(LLM 판정, 참고용 첨부만). |
 | `exec_runtime.py` | LLM이 직접 쓴 SQL·파이썬을 안전하게 실행 — SQL은 읽기전용 연결, 파이썬은 별도 자식 프로세스+타임아웃 강제종료. |
 | `exec_fallback.py` | 정형 경로 3회 실패 후 딱 한 번 시도하는 자유 코드 최후 폴백(SELECT 1개+파이썬 가공 1개). |
@@ -118,9 +108,7 @@
 에이전트 → 총괄 에이전트의 정합성 검증** 순서로 흐릅니다. 아래 다이어그램에서 색깔 있는 박스
 하나하나가 독립된 에이전트(파일)입니다 — GitHub에서 이 파일을 열면 실제 도형으로 렌더링됩니다.
 한국주식 에이전트는 질문을 **재무·순수 시세·기술지표** 세 축으로 분류(`classify_intent`)해,
-필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께 호출합니다. (미국주식 에이전트
-`domain_us.py`는 코드·데이터가 보존돼 있으나 현재 비활성화되어 이 활성 아키텍처 그림에서는
-제외했습니다 — [왜 한국 주식인가](#왜-한국-주식인가--미국-도메인은-왜-껐나) 참고.)
+필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께 호출합니다.
 
 ```mermaid
 flowchart TB
@@ -221,7 +209,7 @@ ROE/ROA/ROC/마진/성장률 등 전체 지표를 그 시점 기준으로 즉석
 
 비유하면, 계산기의 더하기 알고리즘은 항상 같지만, 다른 숫자를 입력하면 다른 결과가 나옵니다. 계산기 자체가 깨지지 않았어도, 이번 입력값에 실수가 없었는지는 따로 확인해야 합니다.
 
-**구체적 사례**: 미국 종목은 원래 상장폐지 종목 목록이 전혀 없어서, 생존편향 검사가 자동으로 "확인 불가"로만 처리되고 있었습니다. 코드(계산 로직)는 정상 동작했지만, **데이터가 없어서 검증 자체가 원천적으로 불가능했습니다** — 감사 계층이 없었다면 이 구멍을 영원히 발견하지 못했을 것입니다(2026-07 FMP API 통합으로 해결).
+**구체적 사례**: 한국 시장도 원래 관리종목·거래정지의 **과거 이력**이 없어(KRX가 '오늘 현재' 스냅샷만 제공), 백테스트 시점에 그 종목이 관리종목이었는지를 소급 검증할 방법이 없었습니다. 코드(계산 로직)는 정상 동작했지만 **데이터가 없어서 특정 시점 검증이 원천적으로 불가능했습니다** — 감사 계층이 없었다면 이 구멍을 발견하지 못했을 것입니다. 이번에 DART 공시 기반 `kr_admin_status_history`로 과거 이력을 소급 복원해 보완했습니다(아래 [데이터 정합성](#데이터-정합성--한국-시장-데이터를-어떻게-정확하게-만들었나) 절 참고).
 
 #### 7대 죄악 — 각 검사가 막는 구체적 실패 시나리오
 
@@ -254,12 +242,11 @@ ROE/ROA/ROC/마진/성장률 등 전체 지표를 그 시점 기준으로 즉석
 
 | 계층 | 파일 | 하는 일 |
 |---|---|---|
-| 총괄 | `supervisor.py` | `route_question`(질문을 보고 kr/us/macro/backtest 중 몇 개 도메인이 필요한지 결정 — LLM 우선, 실패 시 키워드 휴리스틱) → `dispatch_domains`(해당 도메인들을 호출해 원본 결과를 **가공 없이** 보존) → `verify_answer`(도메인 결과가 원래 질문에 실제로 답이 되는지 규칙+LLM으로 재확인) → 불일치면 실패 사유를 피드백해 **최대 3회**까지만 재도전 → `synthesize_conclusion`(종합 결론 문장 생성). 3회를 넘겨도 실패하면 그제서야 아래 exec_fallback을 정확히 1회 시도합니다. |
+| 총괄 | `supervisor.py` | `route_question`(질문을 보고 kr/macro/backtest 중 몇 개 도메인이 필요한지 결정 — LLM 우선, 실패 시 키워드 휴리스틱) → `dispatch_domains`(해당 도메인들을 호출해 원본 결과를 **가공 없이** 보존) → `verify_answer`(도메인 결과가 원래 질문에 실제로 답이 되는지 규칙+LLM으로 재확인) → 불일치면 실패 사유를 피드백해 **최대 3회**까지만 재도전 → `synthesize_conclusion`(종합 결론 문장 생성). 3회를 넘겨도 실패하면 그제서야 아래 exec_fallback을 정확히 1회 시도합니다. |
 | 도메인 | `domain_kr.py` | 국내 종목. 질문을 단일종목/다중종목(비교질문)/스크리닝(조건검색) 3갈래로 나눕니다. 단일·다중종목 경로에서는 다시 `classify_intent`가 질문을 **재무·순수 시세·기술지표** 세 축으로 분류해(LLM 우선, 실패 시 키워드 폴백; 여러 축이면 여러 하위 에이전트를 함께 호출) 필요한 데이터만 조회합니다 — 재무는 `data_financial.py`, 순수 시세는 `data_price_kr.py`, 기술지표(이동평균/RSI/MACD/볼린저)는 `data_price_kr.py`가 `compute_technical_indicator`(TA-Lib, `src/backtest/primitives.py`)로 계산해 시세에 부착합니다. 스크리닝은 LLM이 "PER 낮은 순 10개"처럼 **조건(criteria)·개수(top_n)만 JSON으로 뽑고**, 실제 정렬·계산은 `get_cross_section`+`combine`이 결정론적으로 수행합니다(LLM이 숫자를 직접 계산하지 않음 — 계산은 항상 코드가, 판단만 LLM이). 종목명 인식은 "SK하이닉스"처럼 공식명 전체 언급뿐 아니라 "하이닉스"같이 그룹·지주 접두어(SK/LG/삼성 등)를 생략한 구어체도, company 테이블에 실재하는 회사일 때만 후보로 인정하는 방식으로 지원합니다. |
-| 도메인 | `domain_us.py` | 미국 종목. **코드·데이터는 그대로 보존돼 있으나 현재 제품에서 비활성화(게이트)**되어 어느 진입점으로도 진입하지 않습니다(요청 시 "미국 도메인 비활성화" 안내 반환). 원래 동작: 티커 인식(`resolve_ticker_us`) 후 국내와 완전히 분리된 US 전용 테이블(`us_company`/`us_prices`/`us_financials`)을 조회. |
 | 도메인 | `domain_macro.py` | **재계산을 하지 않습니다** — launchd로 매일 미리 계산·적재된 `macro_signal` 테이블의 최신 1행을 읽어오기만 합니다(질문이 들어올 때마다 신호를 다시 판정하면 매번 값이 흔들릴 수 있어, "판단은 배치로 1회, 조회는 캐시만"이라는 이 프로젝트 공통 원칙을 여기서도 씁니다). |
 | 도메인 | `domain_backtest.py` | 전략 백테스트·팩터분석(상관관계/분위수/히스토그램/QVM 등)을 담당합니다. LLM이 파이썬을 쓰지 않고 `{"pipeline":[{"op":..., "params":..., "out":...}]}` 형태의 **JSON 조립 지시서**만 생성하면(`generate_backtest_steps`), 그 JSON을 먼저 정적 검증(`validate_pipeline_steps` — 존재하지 않는 연산·파라미터 거부)한 뒤 `pipeline_exec.run_pipeline`이 실제 계산을 수행합니다. |
-| 데이터 | `data_price_kr.py` / `data_price_us.py` / `data_financial.py` | 최하위 계층. 도메인 에이전트가 필요로 하는 주가/재무 데이터를 실제로 조회해줍니다. DB에 직접 `conn.execute()`를 쓰지 않고 **반드시 `exec_runtime.execute_sql`을 경유**합니다 — 이렇게 하나의 통로로 강제해야 아래 "SQL/Python 실행" 절의 안전장치(읽기전용 연결, 스키마 사전검증, 타임아웃)를 모든 SQL 호출이 빠짐없이 통과합니다. `data_financial.py`의 `resolve_metric`은 DART/FnGuide 두 소스 중 어느 쪽 값인지, 어느 분기 값인지까지 함께 반환합니다. |
+| 데이터 | `data_price_kr.py` / `data_financial.py` | 최하위 계층. 도메인 에이전트가 필요로 하는 주가/재무 데이터를 실제로 조회해줍니다. DB에 직접 `conn.execute()`를 쓰지 않고 **반드시 `exec_runtime.execute_sql`을 경유**합니다 — 이렇게 하나의 통로로 강제해야 아래 "SQL/Python 실행" 절의 안전장치(읽기전용 연결, 스키마 사전검증, 타임아웃)를 모든 SQL 호출이 빠짐없이 통과합니다. `data_financial.py`의 `resolve_metric`은 DART/FnGuide 두 소스 중 어느 쪽 값인지, 어느 분기 값인지까지 함께 반환합니다. |
 
 ### SQL/Python은 실제로 어떻게 실행되는가
 
@@ -306,35 +293,23 @@ LLM이 만든 신뢰할 수 없는 코드가 그 프로세스나 데이터베이
 뿐이라 무의미합니다).
 
 ### 데이터 품질 안전장치
-스크리닝과 백테스트가 공유하는 데이터접근 계층(`src/backtest/data_access.py::metrics_at`,
-`data_access_us.py::metrics_at_us`)에 세 가지 안전장치가 걸려 있습니다. 셋 다 **"판단은
-AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다"** 는 같은 원칙을 따릅니다
-(비싼 판단을 배치로 1회만 하고 런타임은 캐시만 읽음).
+스크리닝과 백테스트가 공유하는 데이터접근 계층(`src/backtest/data_access.py::metrics_at`)에
+안전장치가 걸려 있습니다. **"비싼 판단은 배치로 1회만 하고 런타임은 캐시만 읽는다"** 는
+원칙을 따릅니다(전체 스캔을 매 요청마다 재호출하지 않음).
 
-- **가격 이상치 종목 제외**(`src/data_quality.py`): 인접 거래일 종가비가 2배 이상(≥2.0)
-  이거나 1/2 이하(≤0.5)인 구간이 이력 어디든 있으면 그 종목을 **통째로** 제외합니다
-  (상승·하락 양방향 대칭). 액면분할/병합이 수정주가로 소급 반영되지 않았거나 원본
-  파싱이 틀어진 종목을 걸러 랭킹 오염을 막습니다. 전체 스캔(수백만 행)은 비싸므로 결과
-  종목코드 집합을 `ingest_meta`에 캐싱하고, 이후엔 캐시만 조회합니다(일일 가격 적재 후
-  배치가 `refresh=True`로 갱신).
-- **US 증권종류 분류**(`security_type`): 워런트/ADR/우선주/유닛/신주인수권 같은 파생·특수
-  증권은 시가총액이 비정상적으로 작아 PER이 비현실적으로 낮게 잡혀 저PER 스크리닝 상위를
-  오염시켰습니다. 회사명 전체 문자열의 의미를 **LLM이 배치로 판단**해
-  `us_company.security_type`에 캐싱하고(`scripts/backfill_us_security_type.py`), 런타임
-  필터(`domain_us.py::_filter_common_stock`)는 이 캐시를 읽어 `common`(일반 보통주)만
-  남깁니다. 아직 분류되지 않은(NULL) 종목만 회사명 키워드 안전망으로 최소한만 걸러냅니다.
-- **US 재무 보고통화 게이팅**(`financial_currency`): 외국기업 ADR은 주가는 달러로
-  거래되지만 실적을 본국통화로 보고하는 경우가 흔합니다(예: SK텔레콤 SKM = KRW). 이때
-  시가총액(달러)을 순이익(원화)으로 나누면 통화 불일치로 PER이 비현실적으로 낮게
-  계산됩니다. yfinance `financialCurrency`를 **배치로 수집**해
-  `us_company.financial_currency`에 캐싱하고(`scripts/backfill_us_financial_currency.py`),
-  `metrics_at_us`가 `USD`가 아닌 종목의 재무 파생 필드를 무효화합니다.
+- **가격 이상치 asof-국소 제외**(`src/data_quality.py`): 인접 거래일 종가비가 2배 이상(≥2.0)
+  이거나 1/2 이하(≤0.5)로 튀는 불연속(액면분할/병합이 수정주가로 소급 반영되지 않았거나
+  원본 파싱이 틀어진 경우 등)이 있는 종목을 걸러 랭킹·백테스트 오염을 막습니다. 단,
+  정리매매·감자처럼 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이
+  되레 재유입되므로, `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고
+  `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에
+  asof가 들어갈 때만 **국소적으로** 제외합니다(멀리 떨어진 과거 시점의 정상 데이터는 살려둠).
+  결과는 '종목→이상 발생일' 매핑으로 `ingest_meta`에 캐싱하고, 이후엔 캐시만 조회합니다.
 
 ### 재무 지표 스크리닝 필드 (단일 정의처)
-스크리닝 LLM 프롬프트에 노출되는 재무·파생 지표 목록은 **딕셔너리 한 곳**에서 파생됩니다
-— KR은 `src/backtest/data_access.py`의 `METRIC_FIELD_DESCRIPTIONS`, US는
-`data_access_us.py`의 `METRIC_FIELD_DESCRIPTIONS_US`(`{지표키: 한글설명}` 형태). 도메인
-에이전트의 유효 필드 목록(`_KR_SCREEN_FIELDS`/`_US_SCREEN_FIELDS`)과 스크리닝 프롬프트가
+스크리닝 LLM 프롬프트에 노출되는 재무·파생 지표 목록은 **딕셔너리 한 곳**
+(`src/backtest/data_access.py`의 `METRIC_FIELD_DESCRIPTIONS`, `{지표키: 한글설명}` 형태)에서
+파생됩니다. 도메인 에이전트의 유효 필드 목록(`_KR_SCREEN_FIELDS`)과 스크리닝 프롬프트가
 이 딕셔너리에서 자동으로 따라오므로, **새 지표를 추가할 때 이 딕셔너리 한 곳(과
 `metrics_at()`의 반환 dict)만 고치면** 됩니다 — 예전엔 지표를 추가할 때마다 별도 목록에
 손으로 다시 베껴 적는 걸 깜빡해 스크리닝이 새 지표를 못 쓰던 반복 버그가 있었는데, 그
@@ -342,7 +317,7 @@ AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다
 집합과 `metrics_at()` 실제 출력의 재무 필드가 어긋나면 실패하도록 강제합니다.
 
 최근 비율·성장률 지표에 더해 **절대금액 지표**(`operating_profit`·`revenue`·`net_income`,
-해당 분기 값이며 TTM 아님 — KR은 원화, US는 달러)를 추가해 "영업이익이 큰 순", "매출
+해당 분기 값이며 TTM 아님, 원화)를 추가해 "영업이익이 큰 순", "매출
 상위" 같은 절대값 스크리닝을 지원합니다.
 
 ### 예전 파이프라인 (`src/legacy/`)
@@ -351,6 +326,37 @@ AI/API가 하되, 결과는 캐싱해 매 요청마다 재호출하지 않는다
 **웹은 이 경로를 전혀 호출하지 않습니다**(예전엔 계층형 구조가 확신 못 할 때 자동으로
 여기로 넘어가는 안전망이 있었으나, 근본 원인을 고치는 쪽으로 방향을 바꿔 제거했습니다).
 `cli.py`의 `query` 명령은 아직 이 경로에 직접 의존합니다.
+
+---
+
+## 데이터 정합성 — 한국 시장 데이터를 어떻게 정확하게 만들었나
+
+백테스트가 믿을 만하려면 "그 시점에 실제로 존재했던 숫자"를 재현해야 합니다(미래정보 참조·생존편향 방지). 이를 위해 한국 시장 데이터에 아래 6가지 정합성 장치를 넣었습니다. 공통 원칙은 **"원본을 지우지 않고 이력으로 남긴 뒤, 조회 시점(asof) 기준으로 그때 유효했던 값만 고른다"** 입니다.
+
+### 1. 재무제표 정정공시 이력 (`financials_revision`)
+- **무엇**: 기업이 실적을 나중에 정정발표해도 원래 공시값을 덮어쓰지 않고, 정정 전/후 버전을 `financials_revision` 테이블(`src/db.py`)에 각각 이력으로 보존합니다(같은 공시 재수집은 `rcept_no` UNIQUE로 멱등, 진짜 정정만 새 행 추가).
+- **왜**: 백테스트가 "2023년 3분기에 **실제로 공시돼 있던** 숫자"로 그 시점 판단을 재현해야 하는데, 최종 정정값만 남기면 미래정보(look-ahead)로 과거를 오염시킵니다.
+- **어떻게**: 수집은 `src/ingest/dart.py`·`src/ingest/metrics.py`, 조회는 `src/backtest/data_access.py`의 `effective_quarter_at`(및 TTM/YoY 계열)이 `disclosed_date <= asof` 조건으로 "그 시점까지 공시된 것 중 가장 최근" 버전을 고릅니다. 정정이력 도입 전 데이터는 기존 `financials` 테이블로 폴백(UNION)합니다.
+
+### 2. 관리종목·거래정지 이력 (`kr_trading_status` + `kr_admin_status_history`)
+- **무엇**: 두 소스를 병행합니다 — (a) `kr_trading_status`(`src/ingest/kr_trading_status.py`)는 KRX가 주는 '오늘 현재' 스냅샷을 매일 직전 스냅샷과 diff해 지정~해제 구간을 **앞으로** 누적하고, (b) `kr_admin_status_history`(`src/ingest/kr_admin_status_history.py`)는 DART OpenDART 공시목록(과거 조회 지원)으로 **과거 구간을 소급 복원**합니다.
+- **왜**: KRX 스냅샷만으로는 관측 이후 미래 구간만 쌓여, 과거 백테스트 시점에 그 종목이 관리종목·거래정지였는지를 알 수 없습니다.
+- **어떻게**: `classify_disclosure`가 공시 제목(report_nm)을 분류하고 `build_status_intervals`가 방향이 확실한 공시만 지정~해제 구간으로 만듭니다. 코스피 "매매거래정지및정지해제"처럼 제목만으로 정지/해제 방향을 알 수 없는 결합형·기간변경·모호 공시는 구간으로 만들지 않고 `review`로 분리해 추측성 오분류를 피합니다(DART 공시만으로는 전 종목을 못 덮으므로 실측 커버리지 약 77%, 한계를 있는 그대로 남깁니다). 소스가 완전히 달라(KRX 스냅샷 vs DART 공시) 두 테이블을 별도로 두며, 데이터 품질 검증 전이라 이번 스코프에서는 백테스트 look-ahead 경로에 배선하지 않았습니다.
+
+### 3. 종목명·코드 변경이력 (`kr_stock_changes`)
+- **무엇/왜/어떻게**: 상장사가 사명·종목코드를 바꾸면 옛 이름으로는 검색이 끊깁니다. `kr_stock_changes`(`src/ingest/kr_stock_changes.py`)가 변경 전↔후를 연결해, 옛 사명으로 물어도 현재 종목으로 이어지게 합니다(pykrx 조회는 DI로 분리해 네트워크 없이 단위 테스트).
+
+### 4. 시가총액 시점별 정확화 (`_shares_outstanding_at`)
+- **무엇**: 과거 시가총액을 계산할 때 '오늘'의 상장주식수가 아니라 **그 시점의 실제 상장주식수**를 씁니다(`src/ingest/metrics.py`의 `_shares_outstanding_at`/`_effective_shares_outstanding`, `disclosed_date <= asof` 기준).
+- **왜**: 유상증자·자사주소각·액면분할로 주식수가 바뀐 종목은 오늘 주식수로 과거 시총을 계산하면 틀립니다(PER/PBR 랭킹 오염).
+- **어떻게**: 공시일 오름차순 이력에서 asof 유효값을 고르되, 종목 전체 median 대비 `_SHARES_ANOMALY_RATIO` 배 이상 벗어난 값은 단위오류(×1000 원복형 스파이크, 실측 다수 종목)로 보고 무효화하는 **이상치 가드**를 조회(read) 시점에 한 번 더 적용합니다(액면분할 같은 정상 변화는 배수가 작아 살아남습니다 — `prices.market_cap`·text-to-SQL 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
+
+### 5. 가격 이상치 가드 asof-국소화 (`src/data_quality.py`)
+- **무엇/왜/어떻게**: 정리매매·감자 등으로 인한 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이 되레 재유입됩니다. `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고 `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에 asof가 들어갈 때만 국소적으로 제외합니다(멀리 떨어진 과거 정상 시점 데이터는 보존). 위 [데이터 품질 안전장치](#데이터-품질-안전장치) 절의 그 장치입니다.
+
+### 6. 거래세율 연도별 스케줄 (`references/securities_transaction_tax_rate_history.md`)
+- **무엇/왜**: 매도 거래세율은 해가 바뀌며 인하돼 왔고 코스피/코스닥이 서로 다른데, 과거 백테스트 비용을 단일 현재세율로 계산하면 부정확합니다.
+- **어떻게**: 과거 실제 세율을 1차 출처로 검증해 `references/securities_transaction_tax_rate_history.md`에 연도별로 문서화했습니다. **아직 백테스트 비용 계산 코드에는 배선하지 않았습니다(예정)** — 현재 백테스트는 단일 `tax_rate` 파라미터를 씁니다.
 
 ---
 
@@ -531,7 +537,6 @@ quant_trader와 동일한 텔레그램 채널로 알림 발송(직전 달 대비
 | `metric_def` | 지표명, 컬럼명, 방향(높을수록/낮을수록 우수), 카테고리 — 백테스트 UI 자동 생성용 |
 | `delisting` | 종목코드, 상장폐지일 — 백테스트 생존편향 제거용(상폐 종목도 유니버스에 유지) |
 | `backtest_runs` | 전략명, 파라미터, 기간, 거래비용 설정, 결과지표, 실행시각 |
-| `us_company` / `us_prices` / `us_financials` | 미국 주식 버전(NASDAQ 스크리너 + yfinance) |
 | `raw_reports` | DART 원본 응답(재파싱용 보관) |
 | `macro_indicators` / `macro_signal` | 거시지표 원본값 / 파생 신호 |
 | `all_weather_snapshot` | 올웨더 포트폴리오 월별 스냅샷(비중/CAGR/MDD/샤프/누적수익률/백테스트곡선) — 매달 배치가 append |
@@ -547,7 +552,6 @@ quant_trader와 동일한 텔레그램 채널로 알림 발송(직전 달 대비
 | FnGuide (웹페이지) | DART에 없는 컨센서스 전망치·목표주가 등 | `fnguide_metrics` | `src/ingest/fnguide_metrics.py`가 종목별 페이지를 크롤링(값이 다르면 항상 DART 우선) |
 | KRX 정보데이터시스템 | 업종분류(29개 표준 카테고리) | `company.sector` | `scripts/backfill_sector_krx.py`(계정 필요, 없으면 pykrx 업종분류 API가 403) |
 | pykrx + 네이버 금융 | 국내 종목 종가·시가총액 | `prices` | 두 소스를 병합해 하나의 테이블로 통일(`src/ingest/naver_prices.py` 등) |
-| NASDAQ 스크리너 + [yfinance](https://pypi.org/project/yfinance/) | 미국 종목 유니버스·주가·재무제표 | `us_company`, `us_prices`, `us_financials` | 국내와 완전히 분리된 별도 파이프라인(`src/ingest/us_*.py`) |
 | [Ken French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html) | 파마프렌치 팩터(Mkt-RF/SMB/HML/RMW/CMA/RF, 모멘텀) | (저장 안 함 — CLI 온디맨드 조회 전용) | `src/factors/fama_french.py`가 `pandas_datareader`로 질문 즉시 조회 |
 | FRED(장단기 금리차 T10Y2Y) · CNN Fear & Greed · VIX | 매크로 레짐 판정용 원지표 | `macro_indicators` → 판정 결과는 `macro_signal` | `scripts/run_macro_indicators.py`가 매일 수집 후 신호 재계산 |
 
@@ -577,7 +581,6 @@ DART 일일 조회 한도 때문에 "매일 전부 다시 받기"가 아니라, 
 | 분기 공시 증분 체크 | 매일 아침 7시30분 | `scripts/update_financials.py` |
 | KRX 업종분류 재동기화 | 매월 1일 | `scripts/backfill_sector_krx.py` |
 | 국내 주가/시총 | 매일 | `scripts/update_prices.py`, `scripts/run_naver_prices.py` |
-| 미국 주가/재무/유니버스 | 매일 | `scripts/run_us_prices.py`, `scripts/run_us_financials.py`, `scripts/run_us_universe.py` |
 | FnGuide 지표 | 매일 | `scripts/run_fnguide_metrics.py` |
 | 매크로 지표 | 매일 | `scripts/run_macro_indicators.py` |
 | 올웨더 포트폴리오 리밸런싱+텔레그램 알림 | 매달 1일 08:10 | `scripts/run_all_weather.py` |
@@ -700,9 +703,9 @@ dart-text2sql-wiki/
 │   ├── agents/                    # 신규 계층형 멀티에이전트 (웹이 사용)
 │   │   ├── graph.py               # LangGraph StateGraph 감싸기 (run_hierarchical/run_streaming)
 │   │   ├── supervisor.py          # 라우팅 + 정합성검증 + 재시도(answer_with_verification)
-│   │   ├── domain_kr.py / domain_us.py / domain_macro.py / domain_backtest.py
+│   │   ├── domain_kr.py / domain_macro.py / domain_backtest.py
 │   │   ├── data_financial.py      # DART/FnGuide 재무 데이터 에이전트
-│   │   ├── data_price_kr.py / data_price_us.py  # 주가·기술지표 데이터 에이전트
+│   │   ├── data_price_kr.py       # 주가·기술지표 데이터 에이전트
 │   │   ├── backtest_verification.py  # 하드차단 3종 + 소프트경고 4종 배선
 │   │   ├── exec_runtime.py        # LLM 생성 SQL/파이썬 안전 실행기(읽기전용 conn + 별도 프로세스)
 │   │   ├── exec_fallback.py       # 정형 3회 실패 후 최후 1회 자유 코드 폴백
@@ -711,7 +714,7 @@ dart-text2sql-wiki/
 │   ├── backtest/              # engine, primitives(26개 프리미티브, QVM 포함), pipeline_exec, auditor, selection 등
 │   ├── allweather/            # 올웨더 포트폴리오: data(가격수집)/montecarlo(비중최적화)/
 │   │                          # backtest(walk-forward)/store/notify(텔레그램)/pipeline(오케스트레이션)
-│   ├── ingest/                # dart, krx, naver_prices, fnguide_metrics, us_*, macro_* 등
+│   ├── ingest/                # dart, krx, naver_prices, fnguide_metrics, kr_*, macro_* 등
 │   ├── factors/fama_french.py # 파마프렌치 팩터 온디맨드 조회
 │   ├── wiki/store.py          # 질의 기록 로그
 │   ├── eval/                  # goldset(50) · evaluator(legacy 3층) · runner · hierarchical_runner(신규)
