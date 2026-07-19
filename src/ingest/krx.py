@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from ..config import CONFIG
 from ..db import connect, init_db, set_meta
 from .companies import COMPANIES
-from .metrics import compute_metrics
+from .metrics import compute_metrics, _shares_outstanding_at
 
 
 def _latest_close(stock, ticker: str, on: date, lookback: int = 30):
@@ -64,9 +64,10 @@ def ingest_price_history(db_path: str | None = None, years: int = 3, on: date | 
     init_db(db_path)
     conn = connect(db_path)
     try:
-        shares_map = _collect_shares(on)
+        shares_map = _collect_shares(on)  # 시점별 값이 없을 때의 폴백(최신 상수)
         n = 0
         done = 0
+        fallback_rows = 0  # 시점별 주식수가 없어 최신 상수로 폴백한 행 수
         for code, *_ in COMPANIES:
             try:
                 df = stock.get_market_ohlcv_by_date(frm, to, code, freq="m")
@@ -74,12 +75,20 @@ def ingest_price_history(db_path: str | None = None, years: int = 3, on: date | 
                 continue
             if df is None or len(df) == 0 or "종가" not in df.columns:
                 continue
-            shares = shares_map.get(code)
             for dt, row in df.iterrows():
                 close = float(row["종가"])
                 if close <= 0:
                     continue
                 d = dt.strftime("%Y-%m-%d")
+                # 시가총액 = 종가 × 그 시점(disclosed_date<=d) 공시된 상장주식수. 시점별 값이
+                # 없으면(financials 미적재 종목/기간, stale, 이상치) 기존처럼 최신 상수로 폴백한다
+                # (완전 결측보다 나음). 유상증자·자사주소각·액면분할로 주식수가 바뀐 종목의
+                # 과거 시총이 "오늘 기준 최신 주식수" 상수 하나로 왜곡되던 문제를 해소한다.
+                shares = _shares_outstanding_at(conn, code, d)
+                if shares is None:
+                    shares = shares_map.get(code)
+                    if shares:
+                        fallback_rows += 1
                 cap = round(close * shares) if shares else None
                 # INSERT OR REPLACE는 행 전체를 갈아끼워 네이버 크롤러(naver_prices.py)가
                 # 채운 open/high/low/volume을 NULL로 지운다 — ON CONFLICT DO UPDATE로
@@ -96,7 +105,7 @@ def ingest_price_history(db_path: str | None = None, years: int = 3, on: date | 
             done += 1
         conn.commit()
         return {"price_rows": n, "tickers": done, "shares_collected": len(shares_map),
-                "range": f"{frm}~{to}"}
+                "shares_fallback_rows": fallback_rows, "range": f"{frm}~{to}"}
     finally:
         conn.close()
 
@@ -109,7 +118,7 @@ def ingest_prices(db_path: str | None = None, on: date | None = None, recompute:
     init_db(db_path)
     conn = connect(db_path)
     try:
-        shares_map = _collect_shares(on)
+        shares_map = _collect_shares(on)  # 시점별 값이 없을 때의 폴백(최신 상수)
 
         price_date = None
         n = 0
@@ -119,7 +128,12 @@ def ingest_prices(db_path: str | None = None, on: date | None = None, recompute:
             if close is None:
                 continue
             price_date = max(price_date or d, d)
-            shares = shares_map.get(code)
+            # 그 거래일(d)에 공시돼 있던 상장주식수로 시총 계산(ingest_price_history 와 동일).
+            # 최근 거래일이면 대개 최신 상수와 같지만, 과거 on 으로 재실행하거나 최근 증자/소각
+            # 직후엔 시점별 값이 정확하다. 없으면 최신 상수로 폴백한다.
+            shares = _shares_outstanding_at(conn, code, d)
+            if shares is None:
+                shares = shares_map.get(code)
             cap = round(close * shares) if shares else None
             if not shares:
                 no_shares.append(code)

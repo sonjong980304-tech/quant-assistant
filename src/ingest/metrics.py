@@ -78,6 +78,67 @@ def _sum_ttm(conn, code, quarter, key, asof=None):
     return sum(vals)
 
 
+# ── 시점별 상장주식수 조회 (시가총액 = 종가 × 그 시점 상장주식수) ──────────────────
+# US(SEC) 선례 src/backtest/data_access_us_sec._shares_outstanding_at 과 동일 사상의 KR 버전.
+# 기존 ingest 는 _collect_shares 로 "오늘 기준 최신 주식수" 상수 하나를 과거 전 기간에 곱해,
+# 유상증자·자사주소각·액면분할 등으로 주식수가 바뀐 종목의 과거 시총이 부정확했다.
+# financials.shares_outstanding(분기별, disclosed_date)에서 asof 시점까지 공시된 최신값을 골라
+# look-ahead 를 막는다(_fin/effective_quarter_at 과 동일 규약). shares_outstanding 은
+# _ingest_shares 가 financials 에만 UPSERT 하고 financials_revision 을 거치지 않으므로
+# (라이브 DB 실측 0행) financials 만 조회한다.
+_SHARES_STALE_DAYS = 400     # 마지막 공시가 asof 대비 이보다 오래되면 stale(US _SHARES_STALE_DAYS 와 동일)
+_SHARES_ANOMALY_RATIO = 100  # 종목 median 대비 이 배수 이상 이탈하면 단위오류로 제외(dart._SHARES_JUMP_RATIO 와 동일)
+
+
+def _effective_shares_outstanding(series, asof):
+    """series=[(disclosed_date'YYYY-MM-DD', amount), ...] 공시일 오름차순 → asof 유효 상장주식수.
+
+    · look-ahead 방지: disclosed_date<=asof 중 가장 최근 공시값(없으면 None).
+    · staleness: 그 공시가 asof 대비 _SHARES_STALE_DAYS 초과로 오래됐으면 None(상수 폴백 유도).
+    · 이상치 가드: 종목 전체 shares median 대비 _SHARES_ANOMALY_RATIO 배 이상 이탈한 값은
+      단위오류(×1000 원복형 스파이크 — 003240·226400 등 실측 54종목)로 보고 None 반환.
+      액면분할(삼성 50:1 등, 지속적 계단변화)은 median 이 분할 후 값 쪽으로 수렴해 배수가 100
+      미만이라 죽지 않는다(실측 최대 분할이 50:1). insert 시점 _shares_jump_anomalous 가드는
+      백필 중 분기 역순 삽입으로 원복형 스파이크를 놓쳤어서, read 시점에 한 번 더 방어한다
+      (prices.market_cap·text-to-SQL 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
+    """
+    if not series:
+        return None
+    chosen = chosen_disc = None
+    for disc, amt in series:
+        if disc <= asof:
+            chosen, chosen_disc = amt, disc
+        else:
+            break  # 공시일 오름차순이라 이후는 전부 미래 공시(look-ahead)
+    if chosen is None:
+        return None
+    if (date.fromisoformat(asof) - date.fromisoformat(chosen_disc)).days > _SHARES_STALE_DAYS:
+        return None
+    amounts = sorted(a for _, a in series)
+    median = amounts[len(amounts) // 2]
+    if median > 0 and (chosen > median * _SHARES_ANOMALY_RATIO or chosen < median / _SHARES_ANOMALY_RATIO):
+        return None
+    return chosen
+
+
+def _shares_outstanding_at(conn, code, asof):
+    """asof 시점(disclosed_date<=asof) 유효 상장주식수. 없거나 stale/이상치면 None.
+
+    _effective_shares_outstanding 의 DB 조회 래퍼 — financials 에서 종목의 shares_outstanding
+    시계열을 공시일 오름차순으로 읽어 넘긴다. disclosed_date 결측/빈문자 행은 시점을 알 수 없어
+    제외한다(look-ahead 방지). ingest(krx)·마이그레이션(backfill_marketcap)이 이 함수를 공유해
+    동일 규약을 쓴다.
+    """
+    rows = conn.execute(
+        "SELECT disclosed_date, amount FROM financials "
+        "WHERE stock_code=? AND account_key='shares_outstanding' "
+        "AND amount IS NOT NULL AND amount>0 AND disclosed_date IS NOT NULL AND disclosed_date!='' "
+        "ORDER BY disclosed_date",
+        (code,),
+    ).fetchall()
+    return _effective_shares_outstanding([(r["disclosed_date"], r["amount"]) for r in rows], asof)
+
+
 def controlling_equity(conn, code, quarter, asof=None):
     """지배주주지분(지배기업소유주지분). 미수집/이상값이면 자본총계로 폴백.
 

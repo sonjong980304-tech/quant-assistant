@@ -1,39 +1,49 @@
-"""과거 시가총액 백필 (prices.market_cap = 종가 × 그 시점 유효 상장주식수).
+"""과거 시가총액 재계산 (prices.market_cap = 종가 × 그 시점 유효 상장주식수).
 
 ⚠️ 반드시 "분기별 상장주식수 수집(backfill_full / update_financials)" 후에 실행할 것.
-   현재 financials의 shares_outstanding 행이 거의 없으면(초기 11행) 대부분 NULL로 남는다.
-   주식수가 충분히 쌓인 뒤 실행해야 의미 있는 결과가 나온다.
+   financials.shares_outstanding 이 충분히 쌓인 뒤 실행해야 의미 있는 결과가 나온다.
 
-이 스크립트는 DART/pykrx를 호출하지 않는다(이미 적재된 financials.shares_outstanding만 사용)
-→ DART 일일 한도와 무관하다. 다만 위 사유로 "주식수 수집 후"에 실행한다.
+이 스크립트는 DART/pykrx 를 호출하지 않는다(이미 적재된 financials.shares_outstanding 만 사용)
+→ DART 일일 한도와 무관하다.
 
 동작
 ----
-- prices의 각 (stock_code, date) 행에 대해
-  market_cap = close × (그 시점에 유효한 상장주식수)를 채운다.
-- "그 시점 유효 주식수": 해당 주가일(date)에 **실제로 공시돼 있던**(disclosed_date <= date)
-  shares_outstanding 중 가장 최근 값. 실적 분기 라벨이 아니라 **공시일 기준**이라
-  백테스트에서 미래 데이터(look-ahead)를 쓰지 않는다.
-  예: 2024-05-31 주가에는 2024Q1(5/15 공시) 또는 그 이전 주식수만 쓰고, 2024Q2(8월 공시)는 안 씀.
-- 종목별로 shares_outstanding 시계열을 한 번만 읽어 메모리에서 매칭(효율적).
-- UPDATE prices SET market_cap=... (DART 호출 없음). idempotent: 다시 돌려도 안전.
+- prices 의 각 (stock_code, date) 행에 대해 그 시점 유효 상장주식수로 market_cap 을 갱신한다.
+- "그 시점 유효 주식수": 그 주가일(date)에 **실제로 공시돼 있던**(disclosed_date <= date)
+  shares_outstanding 중 가장 최근 값(look-ahead 방지). staleness·×1000 단위오류 이상치 가드
+  포함 — 판정 로직은 src/ingest/metrics._effective_shares_outstanding 를 그대로 재사용해
+  ingest(krx)·backtest·이 마이그레이션이 완전히 동일한 규약을 쓴다.
+- 시점별 값이 없으면(financials 미적재 종목/기간, stale, 이상치) 그 행은 건드리지 않는다
+  (기존 값 보존 — "지금보다 나쁘게 만들지 않는다"). 새 값이 기존과 같으면 UPDATE 를 건너뛴다.
+- UPDATE 만 한다(새 테이블/컬럼 없음) → data/market.db 파일이 커지지 않는다.
+  종목 단위로 커밋하고 주기적으로 WAL 체크포인트(TRUNCATE)해 -wal 파일이 디스크를 잠식하지
+  않게 한다(38GB DB·여유 디스크 부족 환경 안전장치). idempotent: 다시 돌려도 안전.
 
-실행: python3 scripts/backfill_marketcap.py   ← 분기별 주식수 수집 후에만!
+실행
+----
+  python3 scripts/backfill_marketcap.py --dry-run   # 쓰기 없이 영향 규모/예상 시간만 보고
+  python3 scripts/backfill_marketcap.py             # 실제 재계산(UPDATE)
 """
 from __future__ import annotations
 
+import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.db import connect, init_db
+from src.ingest.metrics import _SHARES_ANOMALY_RATIO, _effective_shares_outstanding
+
+_CHECKPOINT_EVERY = 200  # 이 종목 수마다 WAL 체크포인트(TRUNCATE)로 -wal 파일 크기를 잡는다
 
 
 def _shares_series(conn) -> dict:
-    """종목별 상장주식수 시계열: {stock_code: [(disclosed_date'YYYYMMDD', shares), ...]} (공시일 오름차순).
+    """종목별 상장주식수 시계열: {stock_code: [(disclosed_date'YYYY-MM-DD', shares), ...]} (공시일 오름차순).
 
-    disclosed_date가 없는 행은 시점을 알 수 없어 제외(look-ahead 방지).
+    disclosed_date 결측/빈문자·비양수 행은 시점을 알 수 없어 제외(look-ahead 방지).
+    (fix_split_discontinuities.py 가 이 함수를 재사용하므로 시그니처를 유지한다 — 전체 dict 반환.)
     """
     rows = conn.execute(
         """SELECT stock_code, disclosed_date, amount
@@ -46,14 +56,15 @@ def _shares_series(conn) -> dict:
     for r in rows:
         series.setdefault(r["stock_code"], []).append((str(r["disclosed_date"]), r["amount"]))
     for code in series:
-        series[code].sort(key=lambda t: t[0])  # 'YYYYMMDD' 문자열 정렬 = 시간순
+        series[code].sort(key=lambda t: t[0])  # 'YYYY-MM-DD' 문자열 정렬 = 시간순
     return series
 
 
 def _effective_shares(series: list, on_compact: str):
-    """series(공시일 오름차순)에서 on_compact('YYYYMMDD') 시점까지 **공시된** 최신 주식수.
+    """series(공시일 오름차순)에서 on_compact 시점까지 **공시된** 최신 주식수(가드 없음, 하위호환).
 
-    공시일(disclosed_date) 기준이라 미래에 공시될 주식수는 쓰지 않는다(look-ahead 방지). 없으면 None.
+    fix_split_discontinuities.py 가 import 하는 순수 look-ahead 헬퍼(staleness/이상치 가드 없음).
+    이 마이그레이션 본체(backfill_marketcap)는 가드가 포함된 _effective_shares_outstanding 을 쓴다.
     """
     best = None
     for disc, shares in series:
@@ -64,48 +75,104 @@ def _effective_shares(series: list, on_compact: str):
     return best
 
 
-def backfill_marketcap(db_path: str | None = None) -> dict:
-    """prices.market_cap을 종가 × (그 시점 공시된 상장주식수)로 채운다(UPDATE)."""
+def backfill_marketcap(db_path: str | None = None, *, dry_run: bool = False, progress_every: int = 500) -> dict:
+    """prices.market_cap 을 종가 × (그 시점 공시된 상장주식수)로 재계산한다.
+
+    dry_run=True 면 UPDATE 하지 않고 바뀔 행/종목 수만 집계해 보고한다(사전 규모 파악용).
+    시점별 주식수 판정은 _effective_shares_outstanding(look-ahead+staleness+이상치 가드)를 재사용한다.
+    """
     init_db(db_path)
     conn = connect(db_path)
     try:
-        series = _shares_series(conn)
-        price_rows = conn.execute(
-            "SELECT stock_code, date, close FROM prices WHERE close IS NOT NULL"
-        ).fetchall()
+        series_map = _shares_series(conn)  # {code: [(disc, shares)...]} — 82k행, 메모리 무해
+        codes = [r["stock_code"] for r in conn.execute(
+            "SELECT DISTINCT stock_code FROM prices WHERE close IS NOT NULL ORDER BY stock_code"
+        ).fetchall()]
+        total_codes = len(codes)
 
-        updated = 0
-        no_shares = 0
-        for r in price_rows:
-            ser = series.get(r["stock_code"])
-            if not ser:
-                no_shares += 1
-                continue
-            # prices.date·disclosed_date 모두 'YYYY-MM-DD' → 변환 없이 직접 비교(사전식=시간순)
-            shares = _effective_shares(ser, r["date"])
-            if not shares:
-                no_shares += 1
-                continue
-            cap = round(r["close"] * shares)
-            conn.execute(
-                "UPDATE prices SET market_cap = ? WHERE stock_code = ? AND date = ?",
-                (cap, r["stock_code"], r["date"]),
-            )
-            updated += 1
-        conn.commit()
+        price_rows = changed = unchanged = no_shares = codes_changed = spike_nulled = 0
+        started = time.time()
+
+        for idx, code in enumerate(codes, 1):
+            series = series_map.get(code)
+            # 종목 median(이상치 판정 기준). _effective_shares_outstanding 과 동일 정의.
+            amounts = sorted(a for _, a in series) if series else []
+            median = amounts[len(amounts) // 2] if amounts else 0
+            rows = conn.execute(
+                "SELECT date, close, market_cap FROM prices WHERE stock_code=? AND close IS NOT NULL",
+                (code,),
+            ).fetchall()
+            code_changed = 0
+            for r in rows:
+                price_rows += 1
+                # prices.date·disclosed_date 모두 'YYYY-MM-DD' → 변환 없이 사전식=시간순 비교
+                shares = _effective_shares_outstanding(series, r["date"]) if series else None
+                if not shares:
+                    no_shares += 1
+                    # 확정 스파이크 오염 정리: 가드는 None 이지만 무가드 최신값(raw)이 이상치이고,
+                    # 저장된 cap 이 정확히 '종가×그 스파이크값'이면 구버전 무가드 backfill 이 써둔
+                    # ×1000 단위오류 오염이다(실측 1,343행/14종목). staleness(raw 정상)는 건드리지
+                    # 않고 이 경우만 NULL 로 정리한다(1000x 틀린 값보다 결측이 낫다 — 랭킹 오염 제거).
+                    if series and r["market_cap"] is not None and median > 0:
+                        raw = _effective_shares(series, r["date"])
+                        if (raw and (raw > median * _SHARES_ANOMALY_RATIO or raw < median / _SHARES_ANOMALY_RATIO)
+                                and abs(r["market_cap"] - round(r["close"] * raw)) < 1):
+                            spike_nulled += 1
+                            code_changed += 1
+                            if not dry_run:
+                                conn.execute(
+                                    "UPDATE prices SET market_cap=NULL WHERE stock_code=? AND date=?",
+                                    (code, r["date"]),
+                                )
+                    continue  # 시점별 값 없음 → (오염 아니면) 기존 market_cap 보존
+                new_cap = round(r["close"] * shares)
+                if new_cap == r["market_cap"]:
+                    unchanged += 1
+                    continue
+                changed += 1
+                code_changed += 1
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE prices SET market_cap=? WHERE stock_code=? AND date=?",
+                        (new_cap, code, r["date"]),
+                    )
+            if code_changed:
+                codes_changed += 1
+
+            if not dry_run and (idx % _CHECKPOINT_EVERY == 0):
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # -wal 파일 축소(디스크 보호)
+            if idx % progress_every == 0 or idx == total_codes:
+                elapsed = time.time() - started
+                rate = idx / elapsed if elapsed else 0
+                eta = (total_codes - idx) / rate if rate else 0
+                print(f"[{idx}/{total_codes}] changed={changed:,} rows={price_rows:,} "
+                      f"경과={elapsed:.0f}s ETA={eta:.0f}s", flush=True)
+
+        if not dry_run:
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         report = {
-            "price_rows": len(price_rows),
-            "market_cap_updated": updated,
-            "no_shares": no_shares,
-            "codes_with_shares": len(series),
+            "mode": "dry-run" if dry_run else "applied",
+            "codes_total": total_codes,
+            "codes_changed": codes_changed,
+            "price_rows_scanned": price_rows,
+            "market_cap_changed": changed,
+            "market_cap_unchanged": unchanged,
+            "no_time_varying_shares": no_shares,
+            "spike_pollution_nulled": spike_nulled,
+            "elapsed_sec": round(time.time() - started, 1),
         }
-        print(f"시가총액 백필 완료: {report}")
+        print(f"시가총액 재계산 {report['mode']} 완료: {report}", flush=True)
         return report
     finally:
         conn.close()
 
 
 if __name__ == "__main__":
-    # ⚠️ 분기별 상장주식수 수집 완료 후에만 실행할 것.
-    print(backfill_marketcap())
+    ap = argparse.ArgumentParser(description="prices.market_cap 시점별 상장주식수로 재계산")
+    ap.add_argument("--dry-run", action="store_true", help="쓰기 없이 영향 규모/예상 시간만 보고")
+    ap.add_argument("--db", default=None, help="DB 경로(기본: CONFIG.db_path)")
+    args = ap.parse_args()
+    print(backfill_marketcap(db_path=args.db, dry_run=args.dry_run))
