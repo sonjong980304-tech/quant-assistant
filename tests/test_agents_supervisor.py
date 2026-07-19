@@ -487,6 +487,67 @@ def test_synthesize_prompt_keeps_full_list_up_to_requested_top_n():
     assert "...(총" not in prompt
 
 
+# ── top_n 특혜에는 상한(cap)이 있어야 한다. "코스피 전체"처럼 kr 에이전트가 top_n을
+#    4000(사실상 무제한 매직넘버)으로 해석하면, 위 top_n 특혜가 KOSPI 전종목을 통째로
+#    프롬프트에 넣어버려 verify/synthesize 프롬프트가 각각 약 77만자(31.7만 토큰)까지
+#    불어나고 실제 gpt-5.5 API 호출로 약 $4.8가 소진되는 것까지 실측 확인됐다. 상한을
+#    넘는 top_n은 상한개수까지만 보여주되, 상한 이내(예: 상위 10개/50개)는 기존처럼
+#    하나도 안 잘리는 동작을 그대로 유지해야 한다(그게 이 top_n 특혜가 막던 원래 버그) ──
+def test_truncate_for_prompt_caps_result_when_top_n_exceeds_cap():
+    domain_results = {"top_n": 4000, "result": _big_screening_rows(900)}
+    truncated = supervisor_mod._truncate_for_prompt(domain_results)
+
+    cap = supervisor_mod._PROMPT_TOP_N_CAP
+    result = truncated["result"]
+    assert len(result) == cap + 1  # 상한개 행 + 요약 문자열 1개
+    assert result[-1] == f"...(총 900개 중 {cap}개만 표시, 나머지 생략)"
+    assert result[cap - 1]["name"] == f"종목{cap - 1}"  # 마지막으로 보존된 행은 상한 바로 앞
+
+
+def test_truncate_for_prompt_keeps_full_list_when_top_n_within_cap():
+    """top_n이 상한 이내면(예: 상위 10개) 지금처럼 하나도 안 잘리고 그대로 다 보여야
+    한다 — 이게 원래 top_n 특혜 로직이 막던 버그(5개만 보여서 검증 LLM이 오판)이므로
+    상한을 추가해도 절대 재발시키면 안 된다(회귀 방지)."""
+    domain_results = {"top_n": 10, "result": _big_screening_rows(10)}
+    truncated = supervisor_mod._truncate_for_prompt(domain_results)
+
+    assert len(truncated["result"]) == 10
+    assert truncated["result"][-1]["name"] == "종목9"
+
+
+_SCREENING_ROW_EXTRA_FIELDS = {
+    "sector": "전기전자", "market": "KOSPI", "pbr": 1.2, "roe": 5.3, "eps": 512.0,
+    "bps": 8123.0, "dividend_yield": 2.1, "market_cap": 1_234_567_890, "price": 71000,
+    "volume": 1234567, "operating_margin": 10.5, "net_margin": 8.2, "debt_ratio": 45.3,
+    "current_ratio": 152.1, "revenue": 1_000_000_000, "operating_income": 100_000_000,
+    "net_income": 80_000_000, "total_assets": 5_000_000_000, "total_equity": 2_000_000_000,
+    "shares_outstanding": 10_000_000, "foreign_ratio": 30.2, "beta": 1.05,
+    "week52_high": 15000, "week52_low": 8000, "avg_volume_20d": 900000,
+    "listing_date": "2000-01-01", "industry_code": "26", "quarter": "2025Q1",
+}
+
+
+def _huge_screening_rows(n: int) -> list[dict]:
+    """실측 버그(약 900개 x 약 30필드)를 흉내내는 필드 많은 스크리닝 행 fixture."""
+    return [
+        {"stock_code": f"{i:06d}", "name": f"종목{i}", **_SCREENING_ROW_EXTRA_FIELDS}
+        for i in range(n)
+    ]
+
+
+def test_verify_and_synthesize_prompt_length_drastically_reduced_for_full_market_screening():
+    """'코스피 전체 종목을 pbr 오름차순으로' 같은 질문에서 kr 에이전트가 '전체'를
+    top_n=4000으로 해석해도, verify/synthesize 프롬프트는 상한 덕분에 대폭 줄어야 한다
+    (수정 전 실측: 약 77만자/31.7만 토큰 -> 수정 후: 10만자 이하)."""
+    domain_results = {"kr": {"intent": "screening", "top_n": 4000, "result": _huge_screening_rows(900)}}
+
+    verify_prompt = supervisor_mod._verify_prompt("코스피 전체 종목 pbr 오름차순", domain_results)
+    synth_prompt = supervisor_mod._synthesize_prompt("코스피 전체 종목 pbr 오름차순", domain_results)
+
+    assert len(verify_prompt) < 100_000
+    assert len(synth_prompt) < 100_000
+
+
 # ── 백테스트 리밸런싱 구간별 보유종목·구간수익률은 LLM 재량과 무관하게 최종 결론에
 #    '항상' 포함돼야 한다(요구: "반기마다 어떤 종목이 있었는지·반기별 수익률도 같이 항상").
 #    domain_backtest가 만든 결정론적 rebalance_summary 텍스트를 supervisor가 결론에 직접

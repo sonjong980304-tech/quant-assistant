@@ -423,6 +423,13 @@ def verify_answer(
 # 백테스트 시계열(dates/navs 등)도 길 수 있어 통째로 넣으면 프롬프트가 폭발한다.
 _PROMPT_LIST_HEAD = 5
 
+# top_n 특혜(아래 docstring)의 상한. top_n이 이 값보다 크면(예: "코스피 전체"를 kr
+# 에이전트가 top_n=4000으로 해석한 경우) 그 값을 그대로 쓰지 않고 상한까지만 연다 —
+# 그렇지 않으면 KOSPI 전종목(약 900개 x 약 30개 필드) 같은 결과가 통째로 프롬프트에
+# 들어가 verify/synthesize 프롬프트가 각각 약 77만자(31.7만 토큰)까지 불어나고, 실제
+# API 호출로 약 $4.8가 소진되는 것까지 실측 확인됐다.
+_PROMPT_TOP_N_CAP = 100
+
 
 def _truncate_for_prompt(value, head: int = _PROMPT_LIST_HEAD):
     """LLM 프롬프트에 넣기 전 긴 리스트를 앞부분 몇 개 + 총 개수 요약으로 축약한다.
@@ -436,14 +443,15 @@ def _truncate_for_prompt(value, head: int = _PROMPT_LIST_HEAD):
     고정 축약 상수(_PROMPT_LIST_HEAD=5)보다 크면, 그 형제 리스트(result 등)는 top_n개까지
     축약하지 않는다. 그렇지 않으면 "상위 10개"를 요청해도 검증/종합결론 LLM은 5개만 보고
     "10개 중 5개만 표시"라며 요청을 못 채운 것처럼 부정확하게 답한다(실사용 확인된 버그) —
-    top_n이 얼마든(향후 상한이 바뀌어도) 그 숫자에 맞춰 자동으로 열리므로 별도 상수 조정이
-    필요 없다. top_n 자체가 없는 리스트(백테스트 시계열 등)는 기존과 동일하게 head로 축약된다.
+    다만 top_n 자체에 상한이 없으면 "전체"처럼 사실상 무제한인 값도 그대로 다 열어버리므로,
+    _PROMPT_TOP_N_CAP으로 상한을 둔다(상한 이내의 top_n은 지금처럼 전부 보존된다). top_n
+    자체가 없는 리스트(백테스트 시계열 등)는 기존과 동일하게 head로 축약된다.
     """
     if isinstance(value, dict):
         local_head = head
         top_n = value.get("top_n")
         if isinstance(top_n, int) and top_n > local_head:
-            local_head = top_n
+            local_head = min(top_n, _PROMPT_TOP_N_CAP)
         return {k: _truncate_for_prompt(v, local_head) for k, v in value.items()}
     if isinstance(value, list):
         if len(value) <= head:
