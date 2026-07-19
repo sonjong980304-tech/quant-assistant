@@ -55,6 +55,53 @@ def test_openai_retry_preserves_temperature_after_max_tokens_fallback(monkeypatc
     assert "max_tokens" not in retry_kwargs
 
 
+class _FakeCompletionsRejectsTemperature:
+    """gpt-5.5류 추론모델 실측 재현: temperature=0도, max_tokens 파라미터명도 둘 다
+    거부한다 — temperature를 빼야 비로소 max_tokens 쪽 에러가 드러나고,
+    max_completion_tokens로 바꿔야 최종 성공한다(1개 실패 사유만 가정하면 재시도가
+    한 번에 끝나버려 이 케이스를 놓친다)."""
+
+    def __init__(self, calls: list[dict]):
+        self.calls = calls
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if "temperature" in kwargs:
+            raise Exception(
+                "Unsupported value: 'temperature' does not support 0 with this "
+                "model. Only the default (1) value is supported."
+            )
+        if "max_tokens" in kwargs:
+            raise Exception(
+                "Unsupported parameter: 'max_tokens' is not supported with this "
+                "model. Use 'max_completion_tokens' instead."
+            )
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="2"))])
+
+
+def test_openai_retry_drops_temperature_when_model_rejects_it(monkeypatch):
+    """temperature 자체를 거부하는 모델(gpt-5.5)은 기존 max_tokens↔max_completion_tokens
+    전환 재시도만으로는 계속 실패한다(둘 다 temperature=0.0을 그대로 유지하기 때문) —
+    temperature를 빼는 추가 재시도가 있어야 최종 성공한다."""
+    monkeypatch.delenv("LANGCHAIN_TRACING_V2", raising=False)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "openai.OpenAI", lambda **kw: SimpleNamespace(
+            chat=SimpleNamespace(completions=_FakeCompletionsRejectsTemperature(calls))
+        )
+    )
+
+    client = LLMClient(cfg=_fake_cfg(), model="gpt-5.5")
+    result = client.complete("1+1은?", role="sql", temperature=0.0, max_tokens=50)
+
+    assert result.ok
+    assert result.text == "2"
+    final_kwargs = calls[-1]
+    assert "temperature" not in final_kwargs
+    assert final_kwargs.get("max_completion_tokens") == 50
+    assert "max_tokens" not in final_kwargs
+
+
 # ── LangSmith 연동(_maybe_trace) — 켜고 끄는 스위치와 실패 시 안전 폴백 ──────────
 
 def test_maybe_trace_returns_original_client_when_tracing_disabled(monkeypatch):

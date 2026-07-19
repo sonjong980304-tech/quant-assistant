@@ -124,18 +124,26 @@ class LLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         model = self.model_for(role)
-        kwargs: dict[str, Any] = {"model": model, "messages": messages}
-        # 일부 신규 모델은 max_tokens 대신 max_completion_tokens를 요구한다(실측 확인:
-        # temperature는 그대로 지원됨 — 재시도에서 temperature까지 빼면 결정론이 깨진다).
-        try:
-            resp = client.chat.completions.create(
-                temperature=temperature, max_tokens=max_tokens, **kwargs
-            )
-        except Exception:
-            resp = client.chat.completions.create(
-                temperature=temperature, max_completion_tokens=max_tokens, **kwargs
-            )
-        return LLMResult(resp.choices[0].message.content or "")
+        base_kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        # 일부 신규(추론형) 모델은 max_tokens 대신 max_completion_tokens를 요구하고,
+        # 별개로 temperature 커스텀 값(0.0 등)을 아예 거부하고 기본값(1)만 허용하기도
+        # 한다(gpt-5.5 실측 확인 — 두 실패가 동시에 나기도 해서 하나만 가정하면 계속
+        # 실패한다). temperature를 지원하는 모델의 결정론(0.0)은 최대한 유지하고, 정말
+        # 필요할 때만 순서대로 빼가며 재시도한다.
+        attempts = [
+            {**base_kwargs, "temperature": temperature, "max_tokens": max_tokens},
+            {**base_kwargs, "temperature": temperature, "max_completion_tokens": max_tokens},
+            {**base_kwargs, "max_tokens": max_tokens},
+            {**base_kwargs, "max_completion_tokens": max_tokens},
+        ]
+        last_exc: Exception | None = None
+        for kwargs in attempts:
+            try:
+                resp = client.chat.completions.create(**kwargs)
+                return LLMResult(resp.choices[0].message.content or "")
+            except Exception as exc:  # noqa: BLE001 — 마지막 시도까지 소진 후 그대로 던짐
+                last_exc = exc
+        raise last_exc  # type: ignore[misc]
 
     def _ollama(self, prompt, system, role, temperature) -> LLMResult:
         import requests
