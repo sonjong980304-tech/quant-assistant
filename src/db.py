@@ -331,6 +331,36 @@ CREATE TABLE IF NOT EXISTS kr_stock_changes (
     UNIQUE(stock_code, changed_at)
 );
 
+-- KR 관리종목/매매거래정지 '진짜 과거 이력' (구간 기반). kr_trading_status 는 KRX 가 '오늘 스냅샷'
+-- 만 줘서 미래 구간만 쌓이지만, 이 테이블은 DART OpenDART list.json(회사별 공시목록)이 실제로
+-- 과거 조회(bgn_de=20150101)를 지원하는 점을 이용해 과거까지 소급 복원한 이력이다. 소스가 완전히
+-- 다르므로(KRX 스냅샷 vs DART 공시) kr_trading_status 와 별개 테이블로 둔다 — 그 테이블엔 '미래
+-- 전용, 백테스트 연결 금지' 주석이 박혀 있어 혼동을 피하려 분리했다.
+-- 복원 방식: DART 공시 제목(report_nm)을 순수 분류(kr_admin_status_history.classify_disclosure)해
+-- 관리종목 지정/해제·매매거래정지 시작/해제 이벤트만 확정하고, 이를 시간순으로 짝지어 구간을
+-- 만든다(build_status_intervals). report_nm 이 방향을 문자로 담지 않는 애매한 공시(KOSPI
+-- '매매거래정지및정지해제' 결합형, '주권매매거래정지기간변경')는 구간으로 만들지 않고 review 로
+-- 보류·보고한다(추측성 오분류 방지). start_date/end_date 는 DART 접수일(rcept_dt)이라 kr_trading_
+-- status 의 '관측일'과 달리 실제 사건일에 가깝다. start_report_nm/end_report_nm 에 트리거 공시
+-- 제목을 남겨 사람이 각 경계를 감사·검증할 수 있게 한다.
+-- us_delisting/kr_trading_status 와 동일한 구간+멱등 upsert 사상 — 한 종목이 지정→해제→재지정을
+-- 반복하면 여러 행(각 구간 1행). UNIQUE(stock_code, status_type, start_date) 로 재수집 멱등이고,
+-- 열린 구간(end_date NULL)이 나중에 해제 공시로 닫히면 그 행의 end_date 만 갱신한다.
+-- ⚠️ 이번 스코프에선 backtest(data_access asof)에 연결하지 않는다 — 데이터 품질을 사용자가 검증한
+-- 뒤 별도로 연결 여부를 결정한다. 자연어 SQL 질의 대상 아님(QUERYABLE_TABLES 미포함).
+CREATE TABLE IF NOT EXISTS kr_admin_status_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code      TEXT NOT NULL,   -- 종목코드 (6자리 단축코드)
+    status_type     TEXT NOT NULL,   -- 'admin'(관리종목) | 'halt'(매매거래정지)
+    start_date      TEXT NOT NULL,   -- 지정/정지 시작일 (DART rcept_dt, YYYY-MM-DD)
+    end_date        TEXT,            -- 해제일 (YYYY-MM-DD; NULL=미해제/진행 중)
+    start_report_nm TEXT,            -- 시작 트리거 공시 제목 (감사·검증용)
+    end_report_nm   TEXT,            -- 해제 트리거 공시 제목 (감사·검증용; 미해제면 NULL)
+    source          TEXT,            -- 출처 태그 ('dart_list')
+    updated_at      TEXT,            -- 마지막 수집 시각 (ISO)
+    UNIQUE(stock_code, status_type, start_date)
+);
+
 -- 지표 정의 (백테스트 UI 자동생성용)
 CREATE TABLE IF NOT EXISTS metric_def (
     key         TEXT PRIMARY KEY,      -- metrics 컬럼명
@@ -386,6 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_price_date   ON prices(date);
 CREATE INDEX IF NOT EXISTS idx_metrics_code ON metrics(stock_code, quarter);
 CREATE INDEX IF NOT EXISTS idx_metrics_full ON metrics(stock_code, quarter, price_date);
 CREATE INDEX IF NOT EXISTS idx_kr_stock_changes_code ON kr_stock_changes(stock_code);
+CREATE INDEX IF NOT EXISTS idx_kr_admin_status_hist_code ON kr_admin_status_history(stock_code, status_type);
 
 -- 원본 재무제표 응답 보관 (재수집 없이 재파싱용). payload = zlib.compress(json.dumps(list)).
 -- 새 계정이 필요해지면 재수집 대신 이 원본을 재파싱해 financials를 다시 만든다.
