@@ -13,12 +13,9 @@ pykrx는 이 환경에 설치돼 있지 않으므로(셸 기본 python3), sys.mo
 """
 from __future__ import annotations
 
-import sqlite3
 import sys
 import types
 from datetime import date
-
-import pytest
 
 from src.db import connect, init_db
 from src.ingest import universe

@@ -10,9 +10,7 @@
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import sqlite3
 
 from ..version import now_iso
@@ -36,15 +34,6 @@ def auto_tags(question: str, sql: str) -> str:
     text = f"{question} {sql}".lower()
     tags = [tag for tag, kws in _TAG_RULES if any(k in text for k in kws)]
     return ",".join(dict.fromkeys(tags))  # 순서 보존 dedup
-
-
-def normalize_sql(sql: str) -> str:
-    s = (sql or "").strip().rstrip(";").lower()
-    return re.sub(r"\s+", " ", s)
-
-
-def sql_hash(sql: str) -> str:
-    return hashlib.sha256(normalize_sql(sql).encode("utf-8")).hexdigest()[:16]
 
 
 class WikiStore:

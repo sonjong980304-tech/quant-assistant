@@ -111,7 +111,6 @@ def test_fetch_factor_data_range_returns_all_fetched_rows():
 
 
 def test_fetch_factor_data_no_cache_calls_fetch_fn_every_time():
-    fetch_fn = lambda n, s, e: _sample_df()
     calls = {"n": 0}
 
     def counting_fetch(n, s, e):

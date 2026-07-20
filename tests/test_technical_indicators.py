@@ -52,7 +52,7 @@ def price_db(tmp_path):
 def test_price_history_batch_uses_single_query_for_multiple_codes(price_db):
     conn, codes, dates = price_db
     counting = _CountingConn(conn)
-    result = price_history_batch(counting, codes, asof="2026-01-08", lookback_days=30)
+    price_history_batch(counting, codes, asof="2026-01-08", lookback_days=30)
     assert counting.execute_calls == 1
 
 
@@ -334,7 +334,7 @@ def test_compute_technical_indicator_default_compute_fn_uses_real_talib():
     TA-Lib 자체의 수치 정확성은 검증 대상이 아니므로(스펙 결정), 필드가 존재하고
     합리적 범위(RSI 0~100)인지만 확인한다.
     """
-    talib = pytest.importorskip("talib")
+    pytest.importorskip("talib")
     rows = [{"stock_code": "000001"}]
     closes = [100.0 + i * 0.5 for i in range(40)]
     history_fn = _fake_history_fn_factory({

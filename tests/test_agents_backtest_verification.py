@@ -94,8 +94,8 @@ def test_soft_inspectors_called_when_hard_checks_pass(tmp_path, monkeypatch):
 
     steps = [{"op": "run_backtest", "params": {}, "out": "bt"}]
     run_pipeline_fn = lambda s, conn=None: dict(_BT_RESULT)
-    out = run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
-                                  llm_fn=_json_llm(True, "경고"), market="KR")
+    run_backtest_with_audit(steps, conn, "질문", run_pipeline_fn,
+                            llm_fn=_json_llm(True, "경고"), market="KR")
 
     assert calls["n"] == 1
 

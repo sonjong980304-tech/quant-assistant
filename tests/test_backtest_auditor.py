@@ -12,8 +12,6 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
-
 from src.backtest import auditor
 
 
