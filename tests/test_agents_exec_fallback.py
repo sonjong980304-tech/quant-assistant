@@ -76,6 +76,26 @@ def test_sql_prompt_discourages_correlated_subqueries():
     assert "상관" in prompt or "서브쿼리" in prompt or "subquery" in prompt.lower()
 
 
+# 실사용 재현: "코스피 PBR/GPA 5분위 분석" 후속 "막대그래프로 그려줘"에서 자유코드 폴백이
+# financials/prices에서 PBR을 취약하게 재계산하다 전부 NaN → pd.qcut 크래시. 이미 metrics
+# 테이블에 PBR/GPA가 계산돼 있으므로, SQL 프롬프트가 metrics DDL을 노출하고 "지금 기준"
+# 질문엔 metrics를 우선 쓰라고 안내해야 한다. 단, metrics는 오늘 기준 1개 분기 스냅샷뿐이라
+# 여러 과거 시점 백테스트/시뮬레이션엔 쓰면 안 된다는 경고도 명시해야 한다.
+def test_sql_prompt_exposes_metrics_table_ddl():
+    prompt = _sql_prompt("코스피 PBR 5분위", None)
+    assert "CREATE TABLE metrics" in prompt
+
+
+def test_sql_prompt_warns_metrics_is_current_snapshot_not_for_backtest():
+    prompt = _sql_prompt("코스피 PBR 5분위", None)
+    # metrics가 오늘 기준 최신 1개 분기 스냅샷이라는 안내
+    assert "metrics" in prompt
+    assert "스냅샷" in prompt or "최신" in prompt or "1개" in prompt
+    # 여러 과거 시점 백테스트/시뮬레이션엔 쓰면 안 된다는 경고
+    assert "백테스트" in prompt or "시뮬레이션" in prompt
+    assert "과거" in prompt
+
+
 # 실사용 재현(2회 연속): "이익수익률"/"투하자본수익률" 같은 파생(계산) 지표 이름을 AI가
 # account_name 안의 리터럴 문자열로 찾으려다 KeyError. Python 프롬프트가 "질문에 나온
 # 지표 이름이 실제 컬럼 목록에 없으면 파생값이니 원본 항목으로 직접 계산하라"고 명시해야

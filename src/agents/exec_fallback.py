@@ -71,7 +71,16 @@ def _sql_prompt(question: str, last_reason: str | None) -> str:
         "형태)는 prices처럼 큰 테이블에서 타임아웃을 유발하니 쓰지 마세요. 종목별 '최신 시점' "
         "같은 매칭이 필요하면 그 매칭 자체를 SQL로 정교하게 계산하려 하지 말고, 관련 원본 행을 "
         "그대로 가져와 다음 단계 Python(pandas)이 groupby/최댓값 등으로 처리하게 하세요.\n"
-        f"\n{schema_catalog()}"
+        "\n[metrics 테이블 활용 안내] 스키마에 포함된 metrics 테이블에는 PBR·GPA·ROE 등 "
+        "파생지표가 이미 계산돼 있습니다. 단, 이 테이블은 '오늘 기준 최신 분기 1개'만 담은 "
+        "스냅샷 캐시이며 과거 여러 시점의 이력이 아닙니다. 그래서 사용 규칙이 나뉩니다:\n"
+        "  - '지금 기준' 스크리닝/비교/차트/분석(예: PBR·GPA 등 파생지표 조회, 분위수 계산)에는 "
+        "financials/prices에서 직접 재계산하지 말고 metrics를 우선 사용하세요 — 더 정확하고 "
+        "빠르며, 조인 실패로 NaN이 생겨 분위수 계산이 깨지는 문제를 피할 수 있습니다.\n"
+        "  - 반대로 '여러 과거 시점에 걸친 백테스트/시뮬레이션'류 질문에는 metrics를 절대 쓰지 "
+        "마세요 — 모든 시점에 오늘 값이 잘못 적용됩니다. 그런 경우엔 financials/prices에서 "
+        "시점별로 직접 계산해야 합니다.\n"
+        f"\n{schema_catalog(include_metrics=True)}"
         f"{reason_note}\n\n질문: {question}\nSQL:"
     )
 

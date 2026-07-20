@@ -469,13 +469,20 @@ def init_db(db_path: str | None = None) -> None:
         conn.close()
 
 
-def schema_catalog(db_path: str | None = None) -> str:
-    """LLM 프롬프트에 넣을 스키마 설명 (쿼리 대상 테이블 DDL + 계정키 안내)."""
+def schema_catalog(db_path: str | None = None, include_metrics: bool = False) -> str:
+    """LLM 프롬프트에 넣을 스키마 설명 (쿼리 대상 테이블 DDL + 계정키 안내).
+
+    include_metrics=False(기본): 기존 동작 그대로 QUERYABLE_TABLES만 노출한다.
+    include_metrics=True: 사전계산 스냅샷 테이블 metrics DDL을 추가로 포함한다 —
+        자유코드 폴백(exec_fallback)처럼 "지금 기준" 파생지표를 재계산하지 않고
+        이미 계산된 값을 바로 쓰는 게 더 정확·안전한 opt-in 경로에서만 켠다.
+    """
+    tables = QUERYABLE_TABLES + ["metrics"] if include_metrics else QUERYABLE_TABLES
     lines: list[str] = []
     blocks = SCHEMA_DDL.split("CREATE TABLE IF NOT EXISTS ")
     for block in blocks[1:]:
         name = block.split("(", 1)[0].strip()
-        if name in QUERYABLE_TABLES:
+        if name in tables:
             lines.append("CREATE TABLE " + block.split(";", 1)[0].strip() + ";")
     catalog = "\n\n".join(lines)
     account_help = "\n".join(f"  - {k}: {v}" for k, v in ACCOUNT_KEYS.items())
