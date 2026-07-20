@@ -18,6 +18,24 @@
 
 ---
 
+## 스크린샷으로 보기
+
+| | |
+|---|---|
+| ![질문을 처리하는 동안 오른쪽 패널에 실시간 진행상황이 단계별로 표시된다](docs/screenshots/01-query-progress.png) | **실시간 처리 상황** — 질문 하나가 라우팅 → 도메인 조회 → 정합성 검증 → (백테스트라면) 하드차단 7종 검사까지, 각 단계가 끝나는 즉시 오른쪽 패널에 표시됩니다. 무엇을 어떤 순서로 확인했는지 그대로 볼 수 있습니다. |
+| ![PBR과 GPA의 상관관계, PBR 5분위별 평균 GPA 계산 결과와 근거 데이터가 함께 표시된 화면](docs/screenshots/02-query-result.png) | **복합 통계 질문 응답** — "PBR·GPA를 z-score로 표준화하고 상관관계를 구한 뒤, PBR 5분위별 평균 GPA까지 계산해줘" 같은 다단계 통계 질문에도 답합니다. 오른쪽 패널에는 하드차단 검사 통과 여부까지 원본 그대로 함께 표시됩니다. |
+| ![장단기금리차 레짐, CNN 공포탐욕지수, VIX를 보여주는 매크로 신호 대시보드, 최근 추이 그래프 포함](docs/screenshots/03-macro-signal.png) | **매크로 신호** — 장단기금리차(10Y-2Y) 레짐을 종합신호로, CNN 공포탐욕지수·VIX는 참고 표시로 매일 자동 계산해둔 값을 보여줍니다. 무엇이 신호 계산에 실제로 반영되고 무엇이 참고용인지 화면에 명시됩니다. |
+| ![기간·리밸런싱 주기·종목수·조합방식과 19개 팩터 체크박스, 국가·산업 필터, 거래비용까지 설정하는 백테스트 설정 화면](docs/screenshots/04-backtest-settings.png) | **백테스트 설정** — 밸류·수익성·안정성·성장·기타 5개 카테고리 19개 팩터를 체크박스로 골라 방향·가중치까지 지정하고, 국가·시장·산업·거래비용(수수료/거래세/슬리피지)까지 세밀하게 설정해 전략을 조립합니다. |
+| ![CAGR·MDD·샤프비율 등 11개 성과지표, 전략과 시장을 비교하는 수익곡선, 분기별 보유종목 교체내역이 표시된 백테스트 결과 화면](docs/screenshots/05-backtest-result.png) | **백테스트 결과** — CAGR·MDD·샤프·소르티노·승률·베타 등 11개 성과지표와 전략 대 시장(동일가중) 수익곡선, 그리고 리밸런싱마다 어떤 종목이 편입·편출됐는지 분기별 이력까지 함께 보여줍니다. |
+| ![몬테카를로로 최적화한 4자산 목표비중과 21년치 walk-forward 백테스트 자산곡선이 표시된 올웨더 포트폴리오 화면](docs/screenshots/06-allweather.png) | **올웨더 포트폴리오** — QQQ·삼성전자·TLT·ACE KRX금현물 4자산의 목표비중을 매달 몬테카를로로 재계산하고, 2004년부터 약 21.6년치 walk-forward 백테스트 곡선으로 신뢰도를 함께 보여주는 모니터링 전용 화면입니다. |
+
+> 위 6개 파일은 `docs/screenshots/`에 그 파일명 그대로 저장하면 표에 바로 나타납니다(현재는
+> 폴더만 만들어둔 상태입니다 — 스크린샷 원본을 이 이름으로 저장해주세요:
+> `01-query-progress.png`, `02-query-result.png`, `03-macro-signal.png`,
+> `04-backtest-settings.png`, `05-backtest-result.png`, `06-allweather.png`).
+
+---
+
 ## 왜 한국 주식인가
 
 이 서비스는 **한국 주식**에 집중합니다. 왜 한국에 집중하기로 했는지, 근거는 다음과 같습니다.
@@ -105,10 +123,11 @@
 ## 웹: 계층형 멀티에이전트 아키텍처
 
 질문 하나가 **총괄 에이전트 → (병렬) 활성 도메인 에이전트 3종(한국·매크로·백테스트) → 데이터
-에이전트 → 총괄 에이전트의 정합성 검증** 순서로 흐릅니다. 아래 다이어그램에서 색깔 있는 박스
-하나하나가 독립된 에이전트(파일)입니다 — GitHub에서 이 파일을 열면 실제 도형으로 렌더링됩니다.
-한국주식 에이전트는 질문을 **재무·순수 시세·기술지표** 세 축으로 분류(`classify_intent`)해,
-필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께 호출합니다.
+에이전트 → 총괄 에이전트의 정합성 검증 → (차트 요청 시) 차트 에이전트** 순서로 흐릅니다. 아래
+다이어그램에서 색깔 있는 박스 하나하나가 독립된 에이전트(파일)입니다 — GitHub에서 이 파일을
+열면 실제 도형으로 렌더링됩니다. 한국주식 에이전트는 질문을 **재무·순수 시세·기술지표** 세
+축으로 분류(`classify_intent`)해, 필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께
+호출합니다.
 
 ```mermaid
 flowchart TB
@@ -117,7 +136,7 @@ flowchart TB
 
     Q --> SUP
 
-    subgraph KR_BOX["🇰🇷 한국주식 에이전트 — domain_kr.py<br/>질문을 재무·주가·기술지표로 분류(classify_intent) → 필요한 축만, 또는 여럿 동시 호출"]
+    subgraph KR_BOX["🇰🇷 한국주식 에이전트 — domain_kr.py"]
         direction TB
         KR_FIN["📑 재무 · data_financial.py<br/>DART · FnGuide (resolve_metric)"]
         KR_PRICE["📈 주가 · data_price_kr.py<br/>순수 시세 (종가/시가/거래량)"]
@@ -146,9 +165,14 @@ flowchart TB
     BT_BOX --> VERIFY
 
     VERIFY{{"🔁 총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증<br/>불일치 시 도메인 재-dispatch (최대 3회 재시도)"}}
-    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기<br/>(3회 초과해도 uncertain=True로 그 상태 그대로 확정)"])
 
+    CHART["🖼️ 차트 에이전트 — chart_agent.py<br/>build_chart_freeform (matplotlib 자유선택)<br/>실패해도 본문 응답은 그대로 유지"]
+
+    VERIFY -->|"차트 요청 시(wants_chart)"| CHART
+    CHART --> RESULT
     VERIFY --> RESULT
+
+    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기<br/>(3회 초과해도 uncertain=True로 그 상태 그대로 확정)"])
 
     classDef q fill:#f1f3f5,stroke:#868e96,color:#212529,font-weight:bold
     classDef sup fill:#1f2a44,stroke:#0d1424,color:#ffffff,font-weight:bold
@@ -156,6 +180,7 @@ flowchart TB
     classDef kr fill:#fff0f0,stroke:#e03131,color:#7d1a1a
     classDef macro fill:#eefbf0,stroke:#2f9e44,color:#164a24
     classDef bt fill:#f6eeff,stroke:#9c36b5,color:#4a1766
+    classDef chart fill:#e7f5ff,stroke:#1c7ed6,color:#0b3d66
 
     class Q q
     class SUP,VERIFY sup
@@ -163,10 +188,13 @@ flowchart TB
     class KR_BOX,KR_FIN,KR_PRICE,KR_TECH kr
     class MACRO_BOX,MACRO_DATA macro
     class BT_BOX,BT_PIPE,BT_HARD,BT_SOFT bt
+    class CHART chart
 ```
 
 > 🛑 하드차단은 규칙 기반이라 항상 같은 결과가 나오고(결정론적), ⚠️ 소프트경고는 LLM이 그때그때
-> 판단해 참고용으로만 결과에 첨부됩니다 — 백테스트를 막지는 않습니다.
+> 판단해 참고용으로만 결과에 첨부됩니다 — 백테스트를 막지는 않습니다. 🖼️ 차트 에이전트는 차트가
+> 필요한 질문에서만 실행되고, 실패해도(코드 생성/실행/빈 이미지) 본문 답변에는 영향을 주지
+> 않습니다.
 
 전체 그래프는 `src/agents/graph.py`(`run_hierarchical`/`run_streaming`)가 LangGraph
 `StateGraph`로 감싸고, `.stream()`으로 실행해 단계 완료마다 진행 이벤트를 방출합니다
