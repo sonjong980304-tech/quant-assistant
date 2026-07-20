@@ -366,7 +366,19 @@ def verify_answer(
     if len(domain_results) > 1:
         try:
             joint_raw = llm_fn(_verify_prompt(question, domain_results)) or ""
-            joint_verdict = _parse_verdict(joint_raw)
+            if not joint_raw.strip():
+                # web의 _build_llm_fn은 LLM 호출 실패(quota 소진 등)를 예외가 아니라
+                # 빈 문자열로 전파한다(LLMClient.complete가 예외를 삼키고 text="" 반환).
+                # 빈 응답은 "잘못된 판정"이 아니라 "판정 불가" 신호 — 아래 except와 동일하게
+                # 검증 불가로 처리한다. 안 그러면 LLM 장애 시 멀쩡한 데이터를 두고 3회
+                # 재시도를 전부 소모한 뒤 불확실 응답으로 끝난다(실사용 재현).
+                joint_verdict = {
+                    "valid": True,
+                    "reason": "검증 불가(LLM 응답 없음) — 데이터 존재 확인만으로 통과시킴.",
+                    "verification_unavailable": True,
+                }
+            else:
+                joint_verdict = _parse_verdict(joint_raw)
         except Exception as exc:  # noqa: BLE001 — 검증 불가로 구분(위 단일도메인 분기와 동일 원칙)
             joint_verdict = {
                 "valid": True,
@@ -400,6 +412,15 @@ def verify_answer(
             per_domain[domain] = {
                 "valid": True,
                 "reason": f"검증 불가(LLM 장애: {type(exc).__name__}) — 데이터 존재 확인만으로 통과시킴.",
+                "verification_unavailable": True,
+            }
+            continue
+        if not raw.strip():
+            # 위 합산 검증 분기와 동일 — 빈 응답(LLM 장애가 빈 문자열로 전파된 것)은
+            # '검증 실패(재시도)'가 아니라 '검증 불가(통과)'다.
+            per_domain[domain] = {
+                "valid": True,
+                "reason": "검증 불가(LLM 응답 없음) — 데이터 존재 확인만으로 통과시킴.",
                 "verification_unavailable": True,
             }
             continue

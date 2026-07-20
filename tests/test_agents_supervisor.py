@@ -310,6 +310,39 @@ def test_verify_answer_llm_failure_is_treated_as_unavailable_not_invalid():
     assert "장애" in verdict["reason"] or "불가" in verdict["reason"]
 
 
+def test_verify_answer_empty_llm_response_is_treated_as_unavailable_not_invalid():
+    """web의 _build_llm_fn은 LLM 호출 실패(quota 소진 등)를 예외가 아니라 **빈 문자열**로
+    전파한다(LLMClient.complete가 예외를 삼키고 text=""를 반환). 빈 응답을 '검증 실패'로
+    보면 멀쩡한 데이터를 두고 3회 재시도를 전부 소모한 뒤 불확실 응답으로 끝난다
+    (실사용 재현: OpenAI insufficient_quota 상태에서 "sk하이닉스 26년 1분기 영업이익"이
+    'kr: 검증 응답을 해석하지 못함: ' 사유로 매 시도 실패). 예외와 동일하게 '검증 불가'로
+    구분해 데이터 존재 확인만으로 통과시켜야 한다."""
+    def empty_llm(prompt: str) -> str:
+        return ""
+
+    domain_results = {"kr": {"stock_code": "000660", "financial": {"value": 123.0}}}
+    verdict = verify_answer("sk하이닉스 26년 1분기 영업이익", domain_results, empty_llm)
+
+    assert verdict["valid"] is True
+    assert verdict.get("verification_unavailable") is True
+    assert "불가" in verdict["reason"]
+
+
+def test_verify_answer_empty_llm_response_composite_domains_also_unavailable():
+    """복합 도메인(2개 이상)의 합산 검증 경로에서도 빈 응답은 '검증 불가'로 통과해야 한다."""
+    def empty_llm(prompt: str) -> str:
+        return ""
+
+    domain_results = {
+        "kr": {"stock_code": "005930", "price": [{"close": 71000}]},
+        "backtest": {"result": {"performance": {"total_return": 10.0}}},
+    }
+    verdict = verify_answer("삼성전자 골든크로스 백테스트", domain_results, empty_llm)
+
+    assert verdict["valid"] is True
+    assert verdict.get("verification_unavailable") is True
+
+
 # ── search_signal_strategy(탐색형) 결과는 제약 미충족이어도 '정직한 답'이므로 유효 ──────
 #    (실사용 회귀: "MDD·수익률 조건을 만족하는 전략 찾아줘"에 대해 후보를 다 시도해 가장
 #    근접한 결과를 constraints_met=False로 돌려줬는데, 검증 LLM이 '숫자가 목표에 못 미침'을
