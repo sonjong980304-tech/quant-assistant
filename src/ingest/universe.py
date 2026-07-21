@@ -1,9 +1,10 @@
 """유니버스 조회 + 상장폐지 추정 적재 (생존편향 제거).
 
-- get_universe(scope): "dev"면 하드코딩 COMPANIES, "full"이면 pykrx로 코스피+코스닥 전체.
+- get_universe(scope): "full"이면 DART corpCode(폴백: pykrx)로 코스피+코스닥 전체.
+  scope="dev" 또는 조회 실패 시엔 COMPANIES(하드코딩 소수 종목)로 폴백한다.
 - ingest_delisting(): 과거 시점 상장종목과 현재 상장종목의 차집합을 상폐로 추정해 적재.
 
-pykrx는 네트워크 의존이라 지연 import하고, 실패 시 dev로 폴백한다.
+pykrx는 네트워크 의존이라 지연 import하고, 실패 시 COMPANIES 폴백으로 내려간다.
 """
 from __future__ import annotations
 
@@ -36,11 +37,10 @@ def _fetch_market_tickers(stock, market: str, on_date: Optional[str] = None) -> 
 def get_universe(scope: Optional[str] = None) -> List[Company]:
     """수집 대상 유니버스를 (code, name, market, sector) 리스트로 반환.
 
-    scope: None이면 CONFIG.target_scope 사용. "dev"면 하드코딩 50개사,
-    "full"이면 pykrx로 코스피+코스닥 전체 종목. 업종은 모르면 "".
-    네트워크 실패 시 dev로 폴백 + 경고.
+    scope: 미지정이면 "full"(코스피+코스닥 전체). "dev"면 하드코딩 COMPANIES.
+    업종은 모르면 "". 네트워크/조회 실패 시 COMPANIES로 폴백 + 경고.
     """
-    scope = (scope or CONFIG.target_scope or "dev").lower()
+    scope = (scope or "full").lower()
     if scope != "full":
         return list(COMPANIES)
 

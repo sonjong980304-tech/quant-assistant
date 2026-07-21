@@ -21,7 +21,7 @@ _UNMEASURABLE_NOTE = "측정불가"
 def _fetch_dart_original(dart_api_key: str, stock_code: str, metric: str) -> float | None:
     """DART API를 그 자리에서 재조회해 stock_code의 최신 공시분기 metric 원문값을 반환한다.
 
-    ingest_dart의 연결(CFS) 우선 → 별도(OFS) 폴백 패턴을 그대로 따른다.
+    dart.py 라이브 수집(_write_reports_year)의 연결(CFS) 우선 → 별도(OFS) 폴백 패턴을 그대로 따른다.
     corp_code 미상, 원문에 metric 없음, 네트워크/한도초과 등 어떤 이유로든 값을
     확정할 수 없으면 None을 반환한다(예외는 호출부인 run_financials_check가 처리).
     """

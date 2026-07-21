@@ -22,7 +22,6 @@ import requests
 from ..config import CONFIG
 from ..db import connect, get_meta, init_db, set_meta
 from ..version import estimate_disclosed_date, recent_quarters
-from .companies import COMPANIES
 from .ksic import market_from_corp_cls
 from .normalize import normalize_account
 from .notify import send_slack_alert
@@ -210,96 +209,6 @@ def _upsert_company(conn, code: str, name: str, market: str, sector: str) -> Non
     )
 
 
-def ingest_dart(
-    db_path: str | None = None,
-    years: int = 3,
-    today: date | None = None,
-    sleep: float = 0.4,
-) -> dict:
-    """COMPANIES 유니버스에 대해 최근 `years`년 분기 재무를 적재."""
-    if not CONFIG.has_dart_key:
-        raise RuntimeError("DART_API_KEY 없음 — generate_dummy()를 사용하세요.")
-
-    today = today or date.today()
-    api_key = CONFIG.dart_api_key
-    init_db(db_path)
-    conn = connect(db_path)
-    try:
-        corp_map = get_corp_codes(api_key)
-
-        # company 적재
-        for code, name, market, sector in COMPANIES:
-            _upsert_company(conn, code, name, market, sector)
-        conn.commit()
-
-        from ..version import estimate_available_quarter
-
-        latest_q = estimate_available_quarter(today)
-        wanted = set(recent_quarters(latest_q, years * 4))
-        years_set = sorted({int(q[:4]) for q in wanted})
-        actual_latest = None
-        n_rows = 0
-
-        for code, name, *_ in COMPANIES:
-            corp = corp_map.get(code)
-            if not corp:
-                continue
-            for year in years_set:
-                # 한 연도의 4개 보고서(1Q/반기/3Q/사업)를 전체재무제표로 받아둔다 (연결 우선, 없으면 별도)
-                reports = {}  # qn -> (data, rcept)
-                for qn in (1, 2, 3, 4):
-                    rows = fetch_all_accounts(api_key, corp, year, REPRT_CODE[qn], "CFS")
-                    time.sleep(sleep)
-                    data, rcept = _parse_all(rows)
-                    if not data:
-                        rows = fetch_all_accounts(api_key, corp, year, REPRT_CODE[qn], "OFS")
-                        time.sleep(sleep)
-                        data, rcept = _parse_all(rows)
-                    reports[qn] = (data, rcept)
-
-                for qn in (1, 2, 3, 4):
-                    quarter = f"{year}Q{qn}"
-                    if quarter not in wanted:
-                        continue
-                    data, rcept = reports[qn]
-                    if not data:
-                        continue
-                    disclosed = (
-                        f"{rcept[:4]}-{rcept[4:6]}-{rcept[6:8]}"
-                        if rcept and len(rcept) >= 8
-                        else estimate_disclosed_date(quarter)
-                    )
-                    rcept_no = rcept or disclosed  # 접수번호 미상이면 공시일을 멱등 센티널로
-                    for key, (amt, nm) in data.items():
-                        # FLOW(손익·현금흐름)는 분기 단독으로 공시되나, 사업보고서(Q4)는 연간 누적이므로
-                        # Q4 단독 = 연간 - (Q1+Q2+Q3). STOCK(재무상태)은 시점 잔액 그대로.
-                        if key in FLOW_KEYS and qn == 4:
-                            prior = sum(
-                                reports[i][0][key][0]
-                                for i in (1, 2, 3)
-                                if key in reports[i][0]
-                            )
-                            value = amt - prior
-                        else:
-                            value = amt
-                        conn.execute(
-                            """INSERT OR REPLACE INTO financials
-                                 (stock_code, quarter, disclosed_date, account_key, account_name, amount)
-                               VALUES (?,?,?,?,?,?)""",
-                            (code, quarter, disclosed, key, nm, round(value)),
-                        )
-                        _insert_revision(conn, code, quarter, disclosed, key, nm, round(value), rcept_no)
-                        n_rows += 1
-                    actual_latest = max(actual_latest or quarter, quarter, key=_q_sort_key)
-                conn.commit()
-
-        if actual_latest:
-            set_meta(conn, "latest_disclosed_quarter", actual_latest)
-        return {"financials_rows": n_rows, "latest_disclosed_quarter": actual_latest}
-    finally:
-        conn.close()
-
-
 def _q_sort_key(q: str) -> tuple[int, int]:
     return int(q[:4]), int(q[5])
 
@@ -354,7 +263,7 @@ def _write_reports_year(conn, code, year, reports, wanted, *, ingest_shares_fn=N
 def _ingest_one_company(conn, api_key, code, corp, years_set, wanted, sleep) -> tuple[int, str | None]:
     """한 종목의 재무를 적재. 반환: (적재 행수, 이 종목의 최신 분기).
 
-    ingest_dart의 종목별 로직과 동일(연결 우선/별도 폴백, Q4 FLOW 차분).
+    _write_reports_year와 동일 규칙(연결 우선/별도 폴백, Q4 FLOW 차분)을 종목 단위로 적용.
 
     헛호출 절감: 최근 3년의 1분기·사업보고서를 먼저 프로브해 데이터가 없으면(상폐/껍데기)
     종목당 ~80회 호출 대신 소수 호출로 즉시 스킵한다.
@@ -691,7 +600,3 @@ def fetch_shares(api_key: str, corp_code: str, year: int, reprt: str = "11011") 
             return None
         return listed
     return None
-
-
-if __name__ == "__main__":
-    print(ingest_dart())

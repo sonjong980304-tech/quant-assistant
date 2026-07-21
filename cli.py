@@ -8,13 +8,10 @@
   python cli.py wiki-eff                     # 위키 효율 리포트
   python cli.py wiki list                    # 위키 목록
   python cli.py wiki verify 3                # 위키 항목 검증
-  python cli.py ingest-dart                  # (키 필요) DART 재무 적재
-  python cli.py ingest-price                 # (네트워크) pykrx 주가 적재
 """
 from __future__ import annotations
 
 import argparse
-import sys
 
 from src.config import CONFIG
 
@@ -148,23 +145,6 @@ def cmd_setup_dummy(args):
     print("완료. 이제 `python cli.py query \"...\"` 로 질의하세요.")
 
 
-def cmd_ingest_dart(args):
-    from src.ingest.dart import ingest_dart
-
-    if not CONFIG.has_dart_key:
-        print("DART_API_KEY가 없습니다. .env에 키를 넣거나 `setup-dummy`를 사용하세요.")
-        sys.exit(1)
-    print("OpenDART 재무 적재 중... (시간이 걸립니다)")
-    print(ingest_dart(years=args.years))
-
-
-def cmd_ingest_price(args):
-    from src.ingest.krx import ingest_prices
-
-    print("pykrx 주가 스냅샷 적재 중...")
-    print(ingest_prices())
-
-
 def cmd_query(args):
     from src.factors.fama_french import handle_query
     from src.legacy.pipeline import Pipeline
@@ -281,11 +261,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("setup-dummy", help="더미 데이터 생성")
 
-    p_dart = sub.add_parser("ingest-dart", help="OpenDART 재무 적재 (키 필요)")
-    p_dart.add_argument("--years", type=int, default=3)
-
-    sub.add_parser("ingest-price", help="pykrx 주가 스냅샷 적재 (네트워크)")
-
     p_q = sub.add_parser("query", help="자연어 질의")
     p_q.add_argument("question")
     p_q.add_argument("--eval", action="store_true", help="3층 평가도 수행")
@@ -315,8 +290,6 @@ def main():
     args = parser.parse_args()
     dispatch = {
         "setup-dummy": cmd_setup_dummy,
-        "ingest-dart": cmd_ingest_dart,
-        "ingest-price": cmd_ingest_price,
         "query": cmd_query,
         "eval": cmd_eval,
         "wiki": cmd_wiki,

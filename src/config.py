@@ -55,8 +55,6 @@ class Config:
     db_path: str = field(default_factory=lambda: _abs(os.getenv("DB_PATH", "data/market.db")))
 
     # --- 데이터 범위/수집 (Phase1) ---
-    # "dev": 시총 상위 50개(기본) | "full": 코스피+코스닥 전체
-    target_scope: str = field(default_factory=lambda: os.getenv("TARGET_SCOPE", "dev").lower())
     data_years: int = field(default_factory=lambda: int(os.getenv("DATA_YEARS", "10")))
     api_call_delay: float = field(default_factory=lambda: float(os.getenv("API_CALL_DELAY", "0.4")))
     max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "3")))

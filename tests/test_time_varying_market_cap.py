@@ -1,20 +1,13 @@
 """시점별 상장주식수 기반 시가총액 계산 (look-ahead 방지 + staleness + 이상치 가드).
 
-배경: 기존 ingest_price_history/ingest_prices 는 _collect_shares 로 "오늘 기준 최신
-상장주식수" 상수 하나를 구해 과거 전 기간 종가에 곱했다. 유상증자·자사주소각 등으로
-상장주식수가 바뀐 종목은 과거 시점 시가총액이 부정확했다. financials 에 이미 분기별
-shares_outstanding 이 disclosed_date 와 함께 적재돼 있으므로, 그 시점 값을 조회해
-market_cap = 종가 × 그 시점 상장주식수 로 계산한다.
+financials 에 분기별 shares_outstanding 이 disclosed_date 와 함께 적재돼 있으므로,
+그 시점 값을 조회해 market_cap = 종가 × 그 시점 상장주식수 로 계산한다
+(_shares_outstanding_at, src/ingest/metrics.py). scripts/backfill_marketcap.py가
+이 함수로 prices.market_cap을 일괄 재계산하는 운영 경로다.
 
 US(SEC) 선례 data_access_us_sec._shares_outstanding_at 과 동일 사상의 KR 버전이다.
 """
 from __future__ import annotations
-
-import sys
-import types
-from datetime import date
-
-import pandas as pd
 
 from src.db import connect, init_db
 from src.ingest.metrics import _shares_outstanding_at
@@ -35,14 +28,6 @@ def _seed_shares(conn, code, rows):
             (code, q, disc, amt),
         )
     conn.commit()
-
-
-def _fake_pykrx_module(df: pd.DataFrame):
-    class _FakeStock:
-        def get_market_ohlcv_by_date(self, frm, to, code, freq=None):
-            return df
-
-    return types.SimpleNamespace(stock=_FakeStock())
 
 
 # ── _shares_outstanding_at: look-ahead 방지 ──────────────────────────────────
@@ -98,88 +83,6 @@ def test_shares_at_rejects_transient_1000x_spike(tmp_path):
     assert _shares_outstanding_at(conn, "003240", "2021-09-01") is None
     # 정상 분기 → 정상값(가드가 정상값까지 죽이지 않음)
     assert _shares_outstanding_at(conn, "003240", "2021-12-01") == 1_113_400
-
-
-# ── ingest_price_history: 시점별 주식수 배선 ─────────────────────────────────
-
-def test_ingest_price_history_uses_time_varying_shares(tmp_path, monkeypatch):
-    """상장주식수가 중간에 2배로 바뀐 종목: 같은 종가라도 시점별 시총이 달라야 한다."""
-    from src.ingest import krx
-
-    db_path = str(tmp_path / "t.db")
-    init_db(db_path)
-    conn = connect(db_path)
-    _seed_shares(conn, "005930", [
-        ("2023Q4", "2024-04-01", 1_000_000),
-        ("2024Q2", "2024-08-14", 2_000_000),  # 유상증자 시뮬레이션(2배)
-    ])
-    conn.close()
-
-    df = pd.DataFrame({"종가": [100.0, 100.0]},
-                      index=pd.to_datetime(["2024-06-28", "2024-09-30"]))
-    monkeypatch.setitem(sys.modules, "pykrx", _fake_pykrx_module(df))
-    monkeypatch.setattr(krx, "COMPANIES", [("005930", "삼성전자", "KOSPI")])
-    monkeypatch.setattr(krx, "_collect_shares", lambda on: {"005930": 9_999_999})  # 폴백(안 쓰여야)
-
-    krx.ingest_price_history(db_path=db_path, years=1, on=date(2024, 10, 1))
-
-    conn = connect(db_path)
-    early = conn.execute(
-        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-06-28'"
-    ).fetchone()
-    late = conn.execute(
-        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-09-30'"
-    ).fetchone()
-    assert early["market_cap"] == round(100.0 * 1_000_000)   # 그 시점(1M주) 시총
-    assert late["market_cap"] == round(100.0 * 2_000_000)    # 증자 후(2M주) 시총
-
-
-def test_ingest_price_history_falls_back_to_constant_when_no_series(tmp_path, monkeypatch):
-    """financials 에 shares 시계열이 없으면 기존 _collect_shares 상수로 폴백(결측보다 나음)."""
-    from src.ingest import krx
-
-    db_path = str(tmp_path / "t.db")
-    init_db(db_path)
-
-    df = pd.DataFrame({"종가": [100.0]}, index=pd.to_datetime(["2024-06-28"]))
-    monkeypatch.setitem(sys.modules, "pykrx", _fake_pykrx_module(df))
-    monkeypatch.setattr(krx, "COMPANIES", [("005930", "삼성전자", "KOSPI")])
-    monkeypatch.setattr(krx, "_collect_shares", lambda on: {"005930": 5_000_000})
-
-    krx.ingest_price_history(db_path=db_path, years=1, on=date(2024, 10, 1))
-
-    conn = connect(db_path)
-    row = conn.execute(
-        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-06-28'"
-    ).fetchone()
-    assert row["market_cap"] == round(100.0 * 5_000_000)  # 폴백 상수 사용
-
-
-def test_ingest_prices_uses_time_varying_shares(tmp_path, monkeypatch):
-    """일일 스냅샷 경로(ingest_prices)도 그 시점 공시된 주식수를 써야 한다."""
-    from src.ingest import krx
-
-    db_path = str(tmp_path / "t.db")
-    init_db(db_path)
-    conn = connect(db_path)
-    _seed_shares(conn, "005930", [
-        ("2024Q1", "2024-05-15", 1_000_000),
-        ("2024Q2", "2024-08-14", 2_000_000),
-    ])
-    conn.close()
-
-    monkeypatch.setattr(krx, "COMPANIES", [("005930", "삼성전자", "KOSPI")])
-    monkeypatch.setattr(krx, "_collect_shares", lambda on: {"005930": 9_999_999})
-    monkeypatch.setattr(krx, "_latest_close", lambda stock, code, on: (100.0, "2024-09-30"))
-    monkeypatch.setitem(sys.modules, "pykrx", types.SimpleNamespace(stock=object()))
-
-    krx.ingest_prices(db_path=db_path, on=date(2024, 10, 1), recompute=False)
-
-    conn = connect(db_path)
-    row = conn.execute(
-        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-09-30'"
-    ).fetchone()
-    assert row["market_cap"] == round(100.0 * 2_000_000)  # 2024-08-14 공시 주식수(2M)
 
 
 # ── 마이그레이션(backfill_marketcap): 재계산 + 확정 스파이크 오염 정리 ──────────
