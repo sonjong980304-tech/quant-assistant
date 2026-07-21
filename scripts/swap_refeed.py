@@ -34,12 +34,19 @@ try:
     # financials(지배주주지분·지배주주순이익 포함) 교체
     conn.execute("DELETE FROM main.financials")
     conn.execute("INSERT INTO main.financials SELECT * FROM refeed.financials")
+    # financials_revision(백테스트 asof 조회가 실제로 읽는 시점별 스냅샷)도 함께 교체.
+    # 예전엔 financials만 바꾸고 이걸 빠뜨려서, 일반 조회(compute_metrics)는 고쳐졌는데
+    # 스크리닝/백테스트 경로(metrics_at → _fin asof 지정 → financials_revision 우선 조회)는
+    # 옛날 버그값을 계속 썼다(효성화학 2025Q4 controlling_net_income이 차분 안 된 연간
+    # 누적치로 남아 PER 0.47배 오류로 재현됨).
+    conn.execute("DELETE FROM main.financials_revision")
+    conn.execute("INSERT INTO main.financials_revision SELECT * FROM refeed.financials_revision")
     # DART 원본 응답(raw_reports)도 원본 DB에 반영 → 향후 재수집 없이 재파싱 가능
     conn.execute("DELETE FROM main.raw_reports")
     conn.execute("INSERT INTO main.raw_reports SELECT * FROM refeed.raw_reports")
     conn.commit()
     conn.execute("DETACH DATABASE refeed")
-    print("financials + raw_reports 교체 완료")
+    print("financials + financials_revision + raw_reports 교체 완료")
 
     n = compute_metrics(conn)
     print(f"metrics {n}종목 재계산 완료. 교체 끝.")
