@@ -39,7 +39,8 @@ BS_KEYS = {"total_assets", "total_liabilities", "total_equity"}
 # 광범위 수집: FLOW(손익+현금흐름 = 분기단독/Q4차분) vs STOCK(재무상태 = 시점값, 차분 안 함)
 FLOW_KEYS = {
     "revenue", "cost_of_sales", "gross_profit", "sga", "operating_profit",
-    "net_income", "interest_expense", "operating_cashflow", "depreciation", "dividend",
+    "net_income", "controlling_net_income", "interest_expense", "tax_expense",
+    "operating_cashflow", "depreciation", "dividend",
 }
 
 

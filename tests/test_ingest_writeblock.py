@@ -42,6 +42,54 @@ def test_q4_flow_differencing_and_stock_passthrough(tmp_path):
     assert n_rows == 5                                      # Q1~Q4 revenue 4행 + Q4 자산 1행
 
 
+# 실사용 재현: 효성화학(298000) 2025Q4 PER이 1분기 적자인데도 낮은 양수(0.47배)로 계산됐다.
+# 원인 추적 결과 controlling_net_income(지배주주순이익, 손익계산서 FLOW 항목)이 FLOW_KEYS에
+# 빠져 있어 Q4에 "연간−(Q1+Q2+Q3) 차분"이 아니라 연간 누적치가 그대로 저장됐다 — net_income
+# (총순이익)은 정확히 차분됐는데 controlling_net_income만 차분 안 된 비대칭이 발생했다.
+def test_q4_flow_differencing_applies_to_controlling_net_income(tmp_path):
+    db = tmp_path / "t2.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    reports = {
+        1: ({"controlling_net_income": (100.0, "지배기업의 소유주지분")}, "20240515"),
+        2: ({"controlling_net_income": (50.0, "지배기업의 소유주지분")}, "20240814"),
+        3: ({"controlling_net_income": (-20.0, "지배기업의 소유주지분")}, "20241114"),
+        4: ({"controlling_net_income": (300.0, "지배기업의 소유주지분")}, "20250320"),
+    }
+    wanted = {"2024Q1", "2024Q2", "2024Q3", "2024Q4"}
+
+    _write_reports_year(conn, "000001", 2024, reports, wanted)
+    conn.commit()
+
+    assert _amt(conn, "2024Q1", "controlling_net_income") == 100  # 그대로
+    # FLOW 차분: 연간누적(300) - (Q1+Q2+Q3 = 100+50-20 = 130) = 170
+    assert _amt(conn, "2024Q4", "controlling_net_income") == 170
+
+
+# 실사용 재현(2건째): FLOW_KEYS 전수 점검 중 tax_expense(법인세비용, 마법공식 EBIT용)도
+# controlling_net_income과 동일한 패턴으로 FLOW_KEYS에서 빠져 있었다 — 손익계산서 항목(매
+# 분기 새로 발생)인데 Q4에 차분 없이 연간 누적치가 그대로 저장되고 있었다(2,786종목,
+# 21,407건 영향 확인됨).
+def test_q4_flow_differencing_applies_to_tax_expense(tmp_path):
+    db = tmp_path / "t3.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    reports = {
+        1: ({"tax_expense": (10.0, "법인세비용")}, "20240515"),
+        2: ({"tax_expense": (5.0, "법인세비용")}, "20240814"),
+        3: ({"tax_expense": (-2.0, "법인세비용")}, "20241114"),
+        4: ({"tax_expense": (30.0, "법인세비용")}, "20250320"),
+    }
+    wanted = {"2024Q1", "2024Q2", "2024Q3", "2024Q4"}
+
+    _write_reports_year(conn, "000001", 2024, reports, wanted)
+    conn.commit()
+
+    assert _amt(conn, "2024Q1", "tax_expense") == 10  # 그대로
+    # FLOW 차분: 연간누적(30) - (Q1+Q2+Q3 = 10+5-2 = 13) = 17
+    assert _amt(conn, "2024Q4", "tax_expense") == 17
+
+
 def test_disclosed_date_from_rcept(tmp_path):
     """공시일은 rcept 앞 8자리(YYYYMMDD)를 YYYY-MM-DD로 기록한다."""
     db = tmp_path / "t.db"
