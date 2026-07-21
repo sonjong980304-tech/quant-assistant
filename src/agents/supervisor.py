@@ -22,7 +22,7 @@ LangGraph 노드 함수(`def supervisor_node(state: GraphState) -> dict` 형태)
 - verify_answer(question, domain_results, llm_fn) -> {"valid": bool, "reason": str}
       도메인 결과가 원 질문과 부합하는지 판정(결정론적 규칙 우선 + LLM 판정).
 - answer_with_verification(...) -> dict
-      route→dispatch→verify 순서로 실행, 검증 실패 시 **정확히 max_retries(기본 3)회까지만**
+      route→dispatch→verify 순서로 실행, 검증 실패 시 **정확히 max_retries(기본 2)회까지만**
       재시도(무한루프 없음). 실패 시 "불확실성 명시" 응답(uncertain=True), 통과 시 종합결론
       (synthesize_conclusion)과 원본 domain_results 를 함께 반환.
 
@@ -64,6 +64,11 @@ _ROUTE_KEYWORDS: dict[str, tuple[str, ...]] = {
         # 히스토그램(분포도)도 histogram_buckets 프리미티브(get_cross_section 기반)로만
         # 계산 가능하다 — "백테스트"라는 단어가 없어도 이 도메인으로 가야 한다.
         "히스토그램", "histogram", "분포도",
+        # 지표를 N구간으로 나눠 각 구간의 평균/집계를 구하는 질문도 quantile_bucket_means
+        # 프리미티브 전용이다("분위수"/"5분위"의 동의어인데 예전엔 이 표현만 빠져 있어서
+        # kr로 잘못 라우팅되고 kr은 구간 집계를 표현할 방법이 없어 재시도만 헛돌았다 —
+        # 실사용 재현: "PER을 10구간으로 나눠서 각 구간 평균 구해줘").
+        "구간별", "구간으로", "등분",
         # QVM(퀄리티·밸류·모멘텀) 등 여러 팩터를 합성한 복합점수 스크리닝/백테스트도
         # compute_qvm_scores/run_qvm_backtest 프리미티브(backtest 전용)로만 계산 가능하다.
         # "모멘텀"/"밸류" 단어 하나만으로는 kr 도메인의 단일지표 스크리닝(예: "모멘텀 상위
@@ -139,7 +144,9 @@ def _route_prompt(question: str) -> str:
         "가능한 도메인: kr(국내주식 재무/주가), "
         "macro(매크로 신호/금리차), backtest(전략 백테스트, 그리고 전종목 횡단면 지표 분석 — "
         "팩터/지표 간 상관관계·산점도, 분위수, 히스토그램/분포도. 특정 지표(PBR 등)를 구간으로 "
-        "나눠 히스토그램/분포를 그리는 질문은 개별 종목 조회가 아니라 반드시 backtest입니다. "
+        "나눠 히스토그램/분포를 그리거나, 각 구간의 평균·집계를 구하는 질문(예: '10구간으로 "
+        "나눠서 각 구간 평균 구해줘')은 개별 종목 조회가 아니라 반드시 backtest입니다 — "
+        "구간별 평균 계산은 '분위수'와 동일한 quantile_bucket_means 전용 계산입니다. "
         "퀄리티·밸류·모멘텀(QVM)처럼 여러 팩터를 윈저라이즈·섹터중립 z-score·가중합성해 "
         "하나의 복합/종합 점수로 스크리닝하거나 그 전략으로 리밸런싱 백테스트하는 질문도 "
         "backtest입니다 — 이건 kr의 단일 지표 기준 스크리닝(예: 'PER 낮은 순 10개')과는 "
@@ -148,7 +155,10 @@ def _route_prompt(question: str) -> str:
         "질문(예: 'PBR 오름차순으로 나열해서 그래프 그려줘', 'PER 낮은 순 10개')은 분포/"
         "히스토그램/상관관계 분석이 아니라 단일 지표 기준 단순 스크리닝이므로 kr입니다 — "
         "'PBR'·'그래프' 같은 단어가 섞였다고 backtest로 보내지 마세요(분포·히스토그램·상관관계·"
-        "분위수·QVM 같은 '지표를 구간/집계/합성해 분석'하는 신호가 있을 때만 backtest입니다).\n"
+        "분위수·QVM 같은 '지표를 구간/집계/합성해 분석'하는 신호가 있을 때만 backtest입니다). "
+        "특히 '오름차순으로 나열해서'처럼 정렬 요청으로 문장이 시작해도, 그 뒤에 '구간으로 "
+        "나눠 평균/집계'가 이어지면 정렬은 전처리일 뿐이므로 backtest입니다 — 문장 앞부분의 "
+        "정렬 표현만 보고 kr로 판단하지 마세요.\n"
         "여러 도메인이 필요하면 모두 나열하세요(예: 국내 종목 스크리닝 + 백테스트 → kr, backtest).\n"
         "도메인 키워드만 콤마로 구분해 답하세요.\n\n"
         f"질문: {question}\n답:"
@@ -442,7 +452,13 @@ def verify_answer(
 
 # 프롬프트에 넣을 리스트 하나당 앞부분으로 남길 개수. 스크리닝 rows는 최대 1000행,
 # 백테스트 시계열(dates/navs 등)도 길 수 있어 통째로 넣으면 프롬프트가 폭발한다.
-_PROMPT_LIST_HEAD = 5
+# top_n 필드가 없는 리스트(free_exec 폴백의 구간별 집계 결과 등)는 전부 이 기본값을
+# 그대로 쓴다. 실측 회귀: "코스피 전종목 PER 10구간 평균" 요청이 kr 도메인 실패 후
+# free_exec 폴백으로 정확히 10구간 평균을 계산했는데도, top_n이 없어 기존 기본값(5)에
+# 잘려 최종 답변 LLM이 "10개 중 5개만 있어 불완전하다"고 잘못 보고했다. 10~20분위 정도의
+# 구간분석은 안전하게 다 보존하면서도, 원래 이 축약 로직이 막던 900종목급 원본 리스트
+# 폭발과는 규모가 비교가 안 되므로 30으로 올려도 안전하다.
+_PROMPT_LIST_HEAD = 30
 
 # top_n 특혜(아래 docstring)의 상한. top_n이 이 값보다 크면(예: "코스피 전체"를 kr
 # 에이전트가 top_n=4000으로 해석한 경우) 그 값을 그대로 쓰지 않고 상한까지만 연다 —
@@ -480,6 +496,35 @@ def _truncate_for_prompt(value, head: int = _PROMPT_LIST_HEAD):
         head_items = [_truncate_for_prompt(v, head) for v in value[:head]]
         return head_items + [f"...(총 {len(value)}개 중 {head}개만 표시, 나머지 생략)"]
     return value
+
+
+def _finalize_success(
+    question: str, domain_results: dict, routes: list[str], attempts: int,
+    synthesize_fn: Callable, llm_fn, chart_fallback_fn: Callable, chart_llm_fn,
+) -> dict:
+    """검증 통과 시 종합결론+원본 domain_results+(요청 시)차트를 묶어 반환한다.
+
+    정형 재시도 루프의 성공 분기와 backtest 추가시도(escalation)의 성공 분기가 완전히
+    동일한 마무리 로직(synthesize+차트)을 공유하므로 헬퍼로 뽑았다 — 새 로직 추가가 아니라
+    기존 인라인 블록을 그대로 옮긴 것뿐이다(동작 변화 없음).
+    """
+    conclusion = synthesize_fn(question, domain_results, llm_fn)
+    result = {
+        "uncertain": False,
+        "conclusion": conclusion,
+        "domain_results": domain_results,
+        "attempts": attempts,
+        "routes": routes,
+    }
+    if wants_chart(question):
+        chart = chart_fallback_fn(
+            question, _chartable_payload(domain_results), chart_llm_fn or llm_fn
+        )
+        if chart:
+            b64, title = chart["chart_base64"], chart.get("chart_title")
+            result["chart_base64"], result["chart_title"] = b64, title
+            result["charts"] = [{"chart_base64": b64, "chart_title": title}]
+    return result
 
 
 def _domain_results_json_for_prompt(domain_results: dict) -> str:
@@ -653,7 +698,7 @@ def answer_with_verification(
     question: str,
     conn,
     llm_fn: Callable[[str], str] | None,
-    max_retries: int = 3,
+    max_retries: int = 2,
     route_fn: Callable | None = None,
     dispatch_fn: Callable | None = None,
     verify_fn: Callable | None = None,
@@ -668,7 +713,7 @@ def answer_with_verification(
 
     흐름:
       1) route_fn(question, llm_fn) 으로 도메인 라우팅(한 번만).
-      2) 최대 max_retries(기본 3)회 반복: dispatch_fn → verify_fn.
+      2) 최대 max_retries(기본 2)회 반복: dispatch_fn → verify_fn.
          - 검증 통과 시: synthesize_fn 으로 종합결론을 만들고, **원본 domain_results 를
            가공 없이 그대로 병기**해 반환한다.
          - 검증 실패 시: 재시도. **정확히 max_retries회에서 멈춘다(무한루프 없음)** — 즉
@@ -755,14 +800,6 @@ def answer_with_verification(
         if verdict.get("valid"):
             if on_progress:
                 on_progress("verify", f"{attempt}차 검증 통과")
-            conclusion = synthesize_fn(question, domain_results, llm_fn)
-            result = {
-                "uncertain": False,
-                "conclusion": conclusion,
-                "domain_results": domain_results,
-                "attempts": attempt,
-                "routes": routes,
-            }
             # 명시적 차트 요청("그래프/차트/그려줘" 등)이 원본 question에 있을 때만 이미지 차트를
             # 붙인다(모든 질문에 자동으로 붙이지 않음). 차트 종류 판정은 결정론적 패턴매칭 없이
             # 전적으로 LLM(chart_fallback_fn=build_chart_freeform)에 위임한다 — matplotlib 전체에서
@@ -771,15 +808,10 @@ def answer_with_verification(
             # 이 구조 변경으로 근본 소거된다.) 차트 판단용 LLM은 chart_llm_fn(기본=llm_fn; web가
             # 저가 role="chart"로 별도 주입 가능)이 맡는다. llm_fn 미가용/코드생성·실행 실패 시
             # None → 차트 없이 텍스트 응답만(부가 기능이라 본문 응답을 절대 무너뜨리지 않는다).
-            if wants_chart(question):
-                chart = chart_fallback_fn(
-                    question, _chartable_payload(domain_results), chart_llm_fn or llm_fn
-                )
-                if chart:
-                    b64, title = chart["chart_base64"], chart.get("chart_title")
-                    result["chart_base64"], result["chart_title"] = b64, title
-                    result["charts"] = [{"chart_base64": b64, "chart_title": title}]
-            return result
+            return _finalize_success(
+                question, domain_results, routes, attempt,
+                synthesize_fn, llm_fn, chart_fallback_fn, chart_llm_fn,
+            )
         last_reason = verdict.get("reason")
         per_domain = verdict.get("per_domain") or {}
         if per_domain:
@@ -789,6 +821,34 @@ def answer_with_verification(
         if on_progress:
             suffix = " → 재시도" if attempt < max_retries else ""
             on_progress("verify", f"{attempt}차 검증 실패: {last_reason}{suffix}")
+
+    # 정형 검증 루프가 모두 실패했고, 원래 라우팅에 backtest가 없었다면 — kr처럼 "구간별
+    # 집계" 같은 표현력이 없는 도메인은 피드백을 아무리 줘도 같은 종류의 답만 반복하므로,
+    # free_exec(자유 코드 생성)으로 넘어가기 전에 backtest를 한 번 더 시도한다(정확히 1회,
+    # 무한루프 없음 — 라우팅이 이미 backtest를 포함했다면 중복 시도하지 않는다. 실사용
+    # 재현: "PER 10구간 평균"이 라우팅 실수로 kr에만 갔던 문제의 안전망).
+    if "backtest" not in routes:
+        if on_progress:
+            on_progress(
+                "supervisor", f"{max_retries}회 정형 검증 실패 → backtest 도메인 추가시도",
+            )
+        escalation_results = dispatch_fn(
+            ["backtest"], question, conn, llm_fn, steps=steps, **progress_kwargs
+        )
+        domain_results.update(escalation_results)
+        verdict = verify_fn(question, domain_results, llm_fn)
+        if verdict.get("valid"):
+            if on_progress:
+                on_progress("verify", "backtest 추가시도 검증 통과")
+            result = _finalize_success(
+                question, domain_results, routes + ["backtest"], attempts,
+                synthesize_fn, llm_fn, chart_fallback_fn, chart_llm_fn,
+            )
+            result["used_backtest_escalation"] = True
+            return result
+        last_reason = verdict.get("reason")
+        if on_progress:
+            on_progress("verify", f"backtest 추가시도도 검증 실패: {last_reason}")
 
     # 정형 검증 루프가 모두 실패 — 정형 어휘의 표현력 한계일 수 있으므로 마지막으로 딱 1회,
     # LLM이 SQL+Python을 직접 작성하는 자유 실행 폴백을 시도한다(재시도 루프와 무관, 검증도

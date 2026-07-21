@@ -135,6 +135,24 @@ def test_route_prompt_mentions_single_indicator_screening_is_kr():
     assert "오름차순" in prompt
 
 
+def test_route_question_fallback_without_llm_detects_bucket_grouping_as_backtest():
+    """실사용 재현: "PER을 10구간으로 나눠서 각 구간의 평균을 구해줘"가 '분위수'/'5분위'
+    같은 기존 키워드에 안 걸려 kr로 잘못 라우팅됐다(kr은 구간별 집계를 표현할 방법이
+    없어 3회 재시도가 전부 헛돌았음). "구간"으로 나누는 집계 요청도 '분위수'와 동일하게
+    backtest 전용(quantile_bucket_means)이므로 키워드로 잡아야 한다."""
+    routes = route_question("코스피 전종목 PER을 오름차순으로 나열해서 10구간으로 나눈다음 각 구간의 평균을 구해줘", None)
+    assert "backtest" in routes
+
+
+def test_route_prompt_mentions_bucket_average_for_llm_routing():
+    """LLM 우선 라우팅 경로도 인식하도록 _route_prompt의 backtest 설명에 '구간으로 나눠
+    평균/집계'가 히스토그램·분포와 별개로 명시돼야 한다 — 기존 문구는 "구간으로 나눠
+    히스토그램/분포를 그리는" 경우만 backtest로 못박아, 그림이 아니라 평균 계산을
+    요청하면 LLM이 놓칠 위험이 있었다."""
+    prompt = supervisor_mod._route_prompt("아무 질문")
+    assert "구간별 평균" in prompt or "구간 평균" in prompt
+
+
 def test_route_question_fallback_without_llm_detects_common_kr_company_nicknames():
     """실사용 재현: LLM 라우팅이 일시 실패해 휴리스틱으로 폴백했을 때, '코스피'/'삼성' 같은
     시장 키워드 없이 개별 종목 약칭만 있는 질문("하이닉스 12개월 누적수익률")이 빈 라우팅으로
@@ -548,6 +566,34 @@ def test_truncate_for_prompt_keeps_full_list_when_top_n_within_cap():
     assert truncated["result"][-1]["name"] == "종목9"
 
 
+# ── free_exec 폴백(top_n 없는 결과)의 리스트도 흔한 구간분석 규모(10분위 등)는 안 잘려야
+#    한다. 실측 회귀: "코스피 전종목 PER 10구간 평균" 요청이 kr 도메인 3회 실패 후
+#    free_exec 폴백으로 정확히 10구간 평균을 계산했는데도, top_n 필드가 없어 기본
+#    head(5)로 잘려 최종 답변 LLM이 "10개 중 5개만 있어 불완전하다"고 잘못 보고했다 ──
+def test_truncate_for_prompt_keeps_free_exec_bucket_result_without_top_n():
+    domain_results = {
+        "free_exec": {"fallback_used": True, "sql": "...", "code": "...",
+                       "result": _big_screening_rows(10)},
+    }
+    truncated = supervisor_mod._truncate_for_prompt(domain_results)
+
+    assert len(truncated["free_exec"]["result"]) == 10
+    assert truncated["free_exec"]["result"][-1]["name"] == "종목9"
+
+
+def test_truncate_for_prompt_still_caps_list_without_top_n_beyond_new_head():
+    """head를 30으로 올렸어도 무제한이 된 게 아니다 — top_n 없는 리스트가 새 상한(30)도
+    넘으면 여전히 잘리고 요약문구가 붙어야 한다(원래 이 축약 로직이 막던 원본 리스트
+    폭발 문제가 재발하지 않았음을 증명하는 회귀 방지)."""
+    domain_results = {"free_exec": {"result": _big_screening_rows(31)}}
+    truncated = supervisor_mod._truncate_for_prompt(domain_results)
+
+    head = supervisor_mod._PROMPT_LIST_HEAD
+    result = truncated["free_exec"]["result"]
+    assert len(result) == head + 1  # head개 행 + 요약 문자열 1개
+    assert result[-1] == f"...(총 31개 중 {head}개만 표시, 나머지 생략)"
+
+
 _SCREENING_ROW_EXTRA_FIELDS = {
     "sector": "전기전자", "market": "KOSPI", "pbr": 1.2, "roe": 5.3, "eps": 512.0,
     "bps": 8123.0, "dividend_yield": 2.1, "market_cap": 1_234_567_890, "price": 71000,
@@ -656,10 +702,13 @@ def test_verify_prompt_uses_json_serialization_not_python_repr():
     assert '"stock_code": "005930"' in seen_prompts[0]
 
 
-# ── AC3: answer_with_verification — 정확히 3회 재시도 후 uncertain(무한루프 없음) ──
+# ── AC3: answer_with_verification — 정확히 max_retries회 재시도 후 uncertain(무한루프 없음) ──
 
 def test_answer_with_verification_retries_exactly_three_times_then_uncertain():
-    """verify_fn이 항상 실패 → 정확히 3회만 시도(4번째 없음) → uncertain True, attempts 3."""
+    """max_retries=3을 명시하면 정확히 3회만 시도(4번째 없음) → uncertain True, attempts 3.
+
+    기본값 자체는 2로 바뀌었으므로(아래 default 전용 테스트가 검증), 이 테스트는 "정확히
+    N회, N+1은 없다"는 상한 메커니즘 자체를 기본값과 무관하게 계속 검증한다."""
     verify_calls: list[int] = []
     dispatch_calls: list[int] = []
     synth_calls: list[int] = []
@@ -680,17 +729,46 @@ def test_answer_with_verification_retries_exactly_three_times_then_uncertain():
         return "종합결론"
 
     res = answer_with_verification(
-        "삼성전자 PER", conn=None, llm_fn=None,
+        "삼성전자 PER", conn=None, llm_fn=None, max_retries=3,
         route_fn=stub_route, dispatch_fn=stub_dispatch,
         verify_fn=always_invalid_verify, synthesize_fn=stub_synth,
     )
 
-    assert len(verify_calls) == 3   # 정확히 3회
-    assert len(dispatch_calls) == 3  # 4번째 시도 없음(무한루프 없음)
+    # 정형 3회 재시도 + backtest 추가시도 1회(routes에 backtest가 없었으므로) = 4회.
+    # backtest 추가시도도 always_invalid_verify라 실패하므로 그다음 free_exec 폴백으로
+    # 넘어간다(fallback_fn 미주입 시 기본 run_free_exec_fallback, llm_fn=None이라 즉시 실패).
+    assert len(verify_calls) == 4
+    assert len(dispatch_calls) == 4  # 5번째 시도 없음(무한루프 없음)
     assert synth_calls == []          # 실패 경로에서는 종합결론을 만들지 않음
     assert res["uncertain"] is True
-    assert res["attempts"] == 3
+    assert res["attempts"] == 3       # attempts는 정형 재시도 루프만 센다(추가시도는 별도)
     assert res["reason"]
+
+
+def test_answer_with_verification_default_max_retries_is_two():
+    """max_retries를 안 넘기면 기본값은 3이 아니라 2다 — kr 같은 도메인은 표현력 자체가
+    없어 같은 질문을 3번 반복해도 결과가 안 바뀌는 경우가 많아, 정형 재시도는 2회로
+    줄이고 그 대신 backtest 추가시도/free_exec 폴백으로 더 빨리 넘어가는 게 낫다는
+    사용자 판단(실사용: 3회 재시도가 매번 같은 틀린 답만 반복하는 걸 확인)."""
+    verify_calls: list[int] = []
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {}}
+
+    def always_invalid_verify(question, domain_results, llm_fn):
+        verify_calls.append(1)
+        return {"valid": False, "reason": "실패"}
+
+    res = answer_with_verification(
+        "q", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=always_invalid_verify,
+    )
+    # 정형 2회 + backtest 추가시도 1회 = 3회.
+    assert len(verify_calls) == 3
+    assert res["attempts"] == 2
 
 
 def test_answer_with_verification_respects_custom_max_retries():
@@ -710,8 +788,9 @@ def test_answer_with_verification_respects_custom_max_retries():
         "q", conn=None, llm_fn=None, max_retries=2,
         route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=always_invalid_verify,
     )
-    assert len(verify_calls) == 2
-    assert res["attempts"] == 2
+    # 정형 2회 + backtest 추가시도 1회(routes=["kr"]이라 backtest가 없었음) = 3회.
+    assert len(verify_calls) == 3
+    assert res["attempts"] == 2  # attempts는 정형 재시도 루프만 센다
     assert res["uncertain"] is True
 
 
@@ -774,9 +853,86 @@ def test_answer_with_verification_stays_uncertain_when_fallback_also_fails():
     )
 
     assert res["uncertain"] is True
-    assert res["attempts"] == 3
+    assert res["attempts"] == 2  # 기본 max_retries=2
     assert "free_exec" not in res["domain_results"]
     assert "SQL도 못 만듦" in res["reason"]
+
+
+# ── backtest 추가시도(escalation): 정형 재시도(기본 2회) 실패 + 원래 라우팅에 backtest가
+#    없었으면, free_exec으로 넘어가기 전에 backtest를 1회 더 시도한다. kr처럼 "구간별
+#    집계" 같은 표현력이 없는 도메인은 피드백을 아무리 줘도 같은 종류의 답만 반복하므로,
+#    라우팅이 놓친 경우를 위한 안전망이다(실사용 재현: "PER 10구간 평균"이 kr로 잘못
+#    라우팅됨 — 정형 3회가 매번 같은 틀린 답만 반복해 재시도 자체가 무의미하다고 판단,
+#    max_retries 기본값도 3→2로 줄였다). ──
+def test_answer_with_verification_escalates_to_backtest_when_retries_exhausted():
+    dispatch_calls: list[list[str]] = []
+    fallback_calls: list[int] = []
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        dispatch_calls.append(list(routes))
+        if "backtest" in routes:
+            return {"backtest": {"result": [{"bucket": 1, "mean_per": 5.0}]}}
+        return {"kr": {"result": [{"stock_code": "005930"}]}}
+
+    def verify_fn(question, domain_results, llm_fn):
+        if "backtest" in domain_results:
+            return {"valid": True}
+        return {"valid": False, "reason": "kr 결과가 질문과 안 맞음(구간 집계 미지원)"}
+
+    def stub_synth(question, domain_results, llm_fn):
+        return "종합결론"
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        fallback_calls.append(1)
+        return {"ok": True, "result": "이건 쓰이면 안 됨"}
+
+    res = answer_with_verification(
+        "PER 10구간 평균", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=verify_fn, synthesize_fn=stub_synth,
+        fallback_fn=fake_fallback,
+    )
+
+    # 정형 2회(전부 kr) + backtest 추가시도 1회 = 3회. free_exec 폴백은 호출조차 안 된다
+    # (backtest 추가시도가 성공했으므로 최후 수단까지 갈 필요가 없다).
+    assert dispatch_calls == [["kr"], ["kr"], ["backtest"]]
+    assert fallback_calls == []
+    assert res["uncertain"] is False
+    assert "backtest" in res["routes"]
+    assert res["domain_results"]["backtest"]["result"] == [{"bucket": 1, "mean_per": 5.0}]
+    assert res["used_backtest_escalation"] is True
+    assert res["conclusion"] == "종합결론"
+
+
+def test_answer_with_verification_skips_backtest_escalation_when_already_routed():
+    """원래 라우팅에 이미 backtest가 포함돼 있었다면(예: kr+backtest 복합 질문), 추가시도로
+    중복 호출하지 않고 곧장 기존 free_exec 폴백으로 넘어가야 한다(낭비 방지)."""
+    dispatch_calls: list[list[str]] = []
+
+    def stub_route(question, llm_fn):
+        return ["kr", "backtest"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        dispatch_calls.append(list(routes))
+        return {"kr": {}, "backtest": {}}
+
+    def always_invalid_verify(question, domain_results, llm_fn):
+        return {"valid": False, "reason": "실패"}
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        return {"ok": False, "result": None, "sql": None, "code": None, "error": "실패"}
+
+    res = answer_with_verification(
+        "kr+backtest 복합 질문", conn=None, llm_fn=None,
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=always_invalid_verify, fallback_fn=fake_fallback,
+    )
+
+    assert len(dispatch_calls) == 2  # 정형 2회뿐, backtest 추가시도 없음(이미 routes에 있었음)
+    assert res["uncertain"] is True
 
 
 def test_answer_with_verification_does_not_attempt_fallback_when_verification_passes():
@@ -1020,8 +1176,10 @@ def test_answer_with_verification_emits_retry_progress_on_failure():
         on_progress=lambda step, summary: events.append((step, summary)),
     )
 
+    # 정형 3회 + backtest 추가시도 1회(routes=["kr"]이라 backtest가 없었음)의 검증 실패
+    # 이벤트가 모두 나와야 한다.
     verify_events = [s for step, s in events if step == "verify"]
-    assert len(verify_events) == 3
+    assert len(verify_events) == 4
     assert all("항상 불일치" in s for s in verify_events)
 
 
@@ -1049,7 +1207,7 @@ def test_answer_with_verification_feeds_failure_reason_into_retry():
         return next(verdicts)
 
     answer_with_verification(
-        "저PER 10개", conn=None, llm_fn=None,
+        "저PER 10개", conn=None, llm_fn=None, max_retries=3,
         route_fn=stub_route, dispatch_fn=stub_dispatch, verify_fn=flaky_verify,
     )
 
