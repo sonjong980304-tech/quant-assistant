@@ -32,6 +32,10 @@ CONTROLLING_EQUITY_MAX_RATIO = 1.05  # 지배주주지분이 자본총계의 이
 CONTROLLING_EQUITY_MIN_RATIO = 0.20  # 지배주주지분이 자본총계의 이 비율 미만이면 수집 오류로 간주
 NI_TO_EQUITY_MAX_RATIO = 20          # 순이익이 자기자본의 이 배수를 넘으면(Q4 차분 폭발 등) 무효화
 CAP_TO_EQUITY_MAX_RATIO = 100        # 시총이 자기자본의 이 배수를 넘으면(PBR 극단) 시총 기반 지표 무효화
+PER_MAX_REASONABLE = 10000  # PER이 이 배수를 넘으면 분모(지배주주순이익)가 사실상 0에 가까운
+                             # 이상치로 간주해 무효화(실측: 유수홀딩스가 DART 비표준계정 오류로
+                             # 지배주주순이익이 100~600원대로 잘못 잡혀 PER이 1억9600만배까지
+                             # 치솟아 코스피 전체 PER 히스토그램을 오염시킨 사례)
 
 
 def _fin(conn, code, quarter, key, asof=None):

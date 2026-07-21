@@ -13,7 +13,7 @@ from ..data_quality import get_price_quality_excluded_codes, is_equity_ratio_ano
 from ..ingest.metrics import (
     _div, _fin, _sum_ttm, _yoy,
     controlling_equity, avg_controlling_equity,
-    NI_TO_EQUITY_MAX_RATIO, CAP_TO_EQUITY_MAX_RATIO,
+    NI_TO_EQUITY_MAX_RATIO, CAP_TO_EQUITY_MAX_RATIO, PER_MAX_REASONABLE,
 )
 
 
@@ -483,6 +483,8 @@ def metrics_at(conn, asof: str) -> list[dict]:
         # 재사용한다(값 정의는 아래 dict와 100% 동일). PEG는 성장 대비 밸류라 성장률>0일 때만
         # 의미가 있다(성장률<=0이면 None — src/ingest/metrics.py의 peg와 동일 관례).
         per = _div(cap, ctrl_ni_ttm) if (cap and ctrl_ni_ttm and ctrl_ni_ttm > 0) else None
+        if per is not None and per > PER_MAX_REASONABLE:
+            per = None
         ni_growth = _yoy(conn, code, q, "net_income", asof=asof)
         peg = (per / ni_growth) if (per is not None and ni_growth and ni_growth > 0) else None
 

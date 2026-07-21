@@ -134,6 +134,54 @@ def test_metrics_at_exposes_peg_normal_case(tmp_path):
     conn.close()
 
 
+# ── PER 이상치 가드 — 지배주주순이익이 사실상 0에 가까워 PER이 천문학적으로 폭발하는 경우 ──
+def test_per_nulled_when_it_far_exceeds_reasonable_ceiling(tmp_path):
+    """실측 회귀(유수홀딩스 000700): DART 비표준계정 오류로 지배주주순이익이 100~600원대로
+    잡혀 PER이 1억9600만배까지 치솟아 코스피 전체 PER 크로스섹션을 오염시켰다. 시총은
+    정상 규모인데 지배주주순이익(TTM)만 극도로 작은 양수라 PER이 천문학적으로 계산되는
+    경우, per는 None이어야 한다(이상치를 유효 지표로 흘려보내지 않는다)."""
+    conn = _base_conn(tmp_path, "per_outlier", market_cap=1e14)
+    _ttm(conn, "controlling_net_income", 100.0)  # ctrl_ni_ttm = 400 → per = 1e14/400 = 2.5e11
+    conn.commit()
+    assert metrics_at(conn, _ASOF)[0]["per"] is None
+    conn.close()
+
+
+def test_per_exactly_at_ceiling_still_valid(tmp_path):
+    """경계값: PER이 상한(10000)과 정확히 같으면 아직 이상치가 아니므로 걸러지지 않는다."""
+    conn = _base_conn(tmp_path, "per_boundary_ok", market_cap=40_000.0)
+    _ttm(conn, "controlling_net_income", 1.0)  # ctrl_ni_ttm = 4 → per = 40000/4 = 10000
+    conn.commit()
+    assert metrics_at(conn, _ASOF)[0]["per"] == pytest.approx(10_000.0)
+    conn.close()
+
+
+def test_per_just_above_ceiling_is_nulled(tmp_path):
+    """경계값: PER이 상한을 단 1이라도 넘으면 이상치로 걸러진다."""
+    conn = _base_conn(tmp_path, "per_boundary_over", market_cap=40_004.0)
+    _ttm(conn, "controlling_net_income", 1.0)  # ctrl_ni_ttm = 4 → per = 40004/4 = 10001
+    conn.commit()
+    assert metrics_at(conn, _ASOF)[0]["per"] is None
+    conn.close()
+
+
+def test_peg_also_nulled_when_per_exceeds_ceiling(tmp_path):
+    """PER이 이상치로 걸러지면, PER을 분자로 쓰는 PEG도 별도 로직 없이 자동으로 None이
+    돼야 한다(peg = per / ni_growth 연쇄효과)."""
+    conn = _base_conn(tmp_path, "peg_ripple", market_cap=1e14)
+    _ttm(conn, "controlling_net_income", 100.0)  # per = 2.5e11 → 이상치로 None
+    # ni_growth 자체는 정상적으로 계산되도록(양수) net_income 이력을 함께 채운다 —
+    # peg가 None인 이유가 ni_growth 결측이 아니라 per 가드 때문임을 명확히 한다.
+    _ttm(conn, "net_income", 100.0)
+    _fin(conn, _shift_quarter(_Q, -4), "net_income", 50.0)  # 전년동기 대비 성장 → ni_growth > 0
+    conn.commit()
+    r = metrics_at(conn, _ASOF)[0]
+    assert r["per"] is None
+    assert r["ni_growth"] is not None and r["ni_growth"] > 0
+    assert r["peg"] is None
+    conn.close()
+
+
 def test_peg_none_when_growth_not_positive(tmp_path):
     """순이익성장률<=0이면 PEG 무의미 → None(성장 대비 밸류 팩터의 정의상)."""
     conn = _base_conn(tmp_path, "peg_neg", market_cap=10_000.0)
