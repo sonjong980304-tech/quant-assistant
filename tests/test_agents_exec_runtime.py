@@ -138,6 +138,27 @@ def test_execute_python_exception_is_captured_not_raised():
     assert res["result"] is None
 
 
+def test_execute_python_large_result_does_not_deadlock():
+    """결과가 OS 파이프 버퍼(보통 64KB 안팎)보다 크면 conn.send()가 블로킹되는데,
+    execute_python이 process.join()을 먼저 하면 부모는 "자식 종료"를, 자식은 "부모가
+    읽어주기"를 서로 기다리는 데드락이 생긴다(실측: 차트 base64 PNG로 100% 재현).
+    큰 결과를 짧은 타임아웃 안에 정상적으로 돌려받아야 이 회귀가 없다는 뜻이다.
+    """
+    code = "result = 'x' * (500 * 1024)"
+    res = execute_python(code, timeout=5)
+    assert res["ok"] is True
+    assert res["result"] == "x" * (500 * 1024)
+    assert res["error"] is None
+
+
+def test_execute_python_large_extra_var_does_not_deadlock():
+    """extra_vars로 회수하는 값(예: chart_base64)이 커도 데드락 없이 돌아와야 한다."""
+    code = "result = 'ok'\nchart_base64 = 'y' * (500 * 1024)"
+    res = execute_python(code, timeout=5, extra_vars=["chart_base64"])
+    assert res["ok"] is True
+    assert res["extra"]["chart_base64"] == "y" * (500 * 1024)
+
+
 def test_execute_python_timeout_via_slow_code():
     """느린 코드(문자열 자체에 sleep) → 타임아웃 초과 시 실패 처리.
 

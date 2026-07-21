@@ -49,6 +49,13 @@ DEFAULT_CPU_SECONDS: int = 30
 # macOS에서는 설정 자체가 실패할 수 있다(위 모듈 docstring 참고) — 그 경우 조용히 무시.
 DEFAULT_MEMORY_BYTES: int = 1024 * 1024 * 1024  # 1GB
 
+# execute_python이 parent_conn.recv() 이후(정상 수신 또는 EOFError) 자식 프로세스를
+# 회수(reap)하기 위해 기다리는 짧은 상한(초). 이 시점엔 자식이 이미 결과를 보냈거나
+# 메시지 없이 죽은 뒤라 사실상 즉시 종료돼야 한다 — 여기서 원래의 timeout을 그대로
+# 다시 쓰면 poll(timeout)+join(timeout)으로 "최대 timeout초" 계약이 병리적인 경우
+# (예: 논데몬 스레드가 남아 프로세스 종료가 지연되는 경우) 최대 2배까지 늘어날 수 있다.
+_REAP_TIMEOUT: float = 5.0
+
 
 def _run_with_timeout(fn: Callable[[], Any], timeout: float) -> Any:
     """fn()을 워커 스레드에서 실행하고 timeout(초) 내 완료를 요구한다.
@@ -148,6 +155,13 @@ def execute_sql(
         }
     finally:
         timer.cancel()
+
+
+def _kill_if_alive(process: multiprocessing.process.BaseProcess) -> None:
+    """자식이 아직 살아있으면 강제 종료하고 회수(reap)한다(execute_python의 3개 종료 경로 공유)."""
+    if process.is_alive():
+        process.kill()  # 스레드와 달리 진짜로 강제 종료된다(방치되지 않음)
+        process.join()
 
 
 def _execute_python_child(
@@ -256,26 +270,42 @@ def execute_python(
     finally:
         child_conn.close()  # 부모 쪽 자식-끝 핸들은 즉시 닫는다(자식이 자기 것을 따로 들고 있음)
 
-    process.join(timeout)
-    if process.is_alive():
-        process.kill()  # 스레드와 달리 진짜로 강제 종료된다(방치되지 않음)
-        process.join()
+    # join()을 먼저 하지 않는다: OS 파이프 버퍼(보통 64KB 안팎)보다 큰 결과(예: 차트
+    # base64 PNG)를 자식이 conn.send()로 보내면, 버퍼가 가득 찬 순간부터 부모가 읽어
+    # 비워주기 전까지 send()가 블로킹된다. 그런데 join()이 먼저면 부모는 "자식이 끝나기"만
+    # 기다리고, 자식은 "부모가 읽어주기"만 기다려 서로 영원히 대기하는 데드락이 된다
+    # (실측: dpi=150·10개 막대·값 라벨 있는 실제 차트에서 100% 재현, base64 111KB).
+    # 그래서 poll(timeout)으로 먼저 응답을 기다렸다가 recv()로 파이프를 비운 뒤에
+    # join()한다 — 이러면 자식의 send()가 즉시 풀려 정상 종료하고 join은 사실상 즉시 끝난다.
+    if not parent_conn.poll(timeout):
         parent_conn.close()
+        _kill_if_alive(process)
         return {"ok": False, "result": None, "error": "timeout", "extra": {}}
 
     try:
-        # 이 시점에서 자식은 이미 종료됐다(process.join 완료) — recv()는 남은 버퍼를
-        # 읽거나 즉시 EOFError를 내며, 블로킹으로 멈추지 않는다. CPU/메모리 상한 초과로
-        # 시그널에 의해 즉사하면(SIGXCPU 등) 메시지를 보낼 기회 없이 파이프만 닫히므로
-        # EOFError를 "메시지 없이 종료"로 처리한다.
+        # CPU/메모리 상한 초과로 시그널에 의해 즉사하면(SIGXCPU 등) 메시지를 보낼 기회 없이
+        # 파이프만 닫히므로 EOFError를 "메시지 없이 종료"로 처리한다.
         status, value, extra = parent_conn.recv()
     except EOFError:
+        # 여기서도 timeout을 그대로 다시 쓰면(join(timeout)) "최대 timeout초" 계약이
+        # 최악의 경우(예: 논데몬 스레드가 남아 프로세스 종료가 지연되는 경우) 최대 2배까지
+        # 늘어난다(poll(timeout) + join(timeout)) — architect 리뷰로 실측 확인된 지점.
+        # recv 이후엔 자식이 이미 죽었거나 죽는 중이므로 짧은 상한이면 충분하다.
+        process.join(_REAP_TIMEOUT)
+        _kill_if_alive(process)
         return {
             "ok": False, "result": None,
             "error": f"실행 프로세스가 비정상 종료됨(exitcode={process.exitcode})", "extra": {},
         }
     finally:
         parent_conn.close()
+
+    # 자식은 send() 직후 conn.close()만 하고 반환하므로 이 시점엔 사실상 이미 끝났거나
+    # 곧 끝난다 — join은 그 정리를 기다리는 짧은 대기일 뿐이다(같은 이유로 timeout이 아닌
+    # _REAP_TIMEOUT을 쓴다 — 위 EOFError 분기 주석 참고).
+    process.join(_REAP_TIMEOUT)
+    _kill_if_alive(process)
+
     if status == "ok":
         return {"ok": True, "result": value, "error": None, "extra": extra}
     return {"ok": False, "result": None, "error": value, "extra": {}}

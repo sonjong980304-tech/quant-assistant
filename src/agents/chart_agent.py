@@ -55,6 +55,12 @@ def _chart_prompt(question: str, data_summary: str, code_error: str | None = Non
         "(render_histogram_chart_base64/render_bar_chart_base64/render_scatter_chart_base64/"
         "render_line_chart_base64)를 참고용으로 import해서 써도 되고, matplotlib을 직접 "
         "호출하는 코드를 새로 써도 됩니다.\n"
+        "막대그래프에 값 라벨을 붙일 때는 1위가 나머지를 압도하는 등 값 차이가 큰 경우 라벨"
+        "끼리 겹쳐 읽기 어려워질 수 있으니, 폰트 크기를 줄이거나 라벨을 세로로 회전하는 등"
+        " 겹치지 않게 배치하세요.\n"
+        "operating_margin/roe/roa/per/pbr/revenue_growth 등 비율·퍼센트 성격의 필드는 "
+        "data에 이미 그 단위 그대로(예: 42.75가 42.75%를 의미) 들어 있습니다. '%' 라벨을 붙일 "
+        "때 값을 다시 100배 하지 말고 그대로 쓰세요(0~1 사이 소수가 아닙니다).\n"
         "완성된 그래프 이미지는 base64로 인코딩한 PNG 문자열로 `chart_base64` 변수에, 제목은 "
         f"`chart_title` 변수에 각각 담으세요.{retry_note}\n\n질문: {question}\nPython 코드:"
     )

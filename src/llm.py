@@ -145,6 +145,72 @@ class LLMClient:
                 last_exc = exc
         raise last_exc  # type: ignore[misc]
 
+    # ---- 생성(vision) ----
+    def complete_vision(
+        self,
+        prompt: str,
+        image_base64: str,
+        role: str = "sql",
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> LLMResult:
+        """이미지+텍스트를 함께 보내는 vision 호출 (factcheck AC3 차트 검증 전용).
+
+        .omc/specs/brainstorming-factcheck-eval.md Round 9/10: role="sql"로 호출하면
+        기존 SQL 생성과 동일한 모델(gpt-5.4-mini)을 재사용한다(judge용 gpt-5.5는 비용
+        때문에 쓰지 않기로 확정). 기존 complete()의 텍스트 전용 경로는 건드리지 않고
+        완전히 별도 메서드로 추가한다. ollama는 이 프로젝트에서 vision 입력을 다루지
+        않으므로 openai 프로바이더에서만 지원한다.
+        """
+        if not self.available:
+            return LLMResult("", ok=False, error="LLM unavailable (키/데몬 없음)")
+        if self.provider != "openai":
+            return LLMResult("", ok=False, error=f"vision unsupported for provider {self.provider}")
+        try:
+            return self._openai_vision(prompt, image_base64, role, system, temperature, max_tokens)
+        except Exception as e:  # 호출 실패도 폴백 가능하게
+            return LLMResult("", ok=False, error=f"{type(e).__name__}: {e}")
+
+    def _openai_vision(self, prompt, image_base64, role, system, temperature, max_tokens) -> LLMResult:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=self.cfg.openai_api_key, base_url=self.cfg.openai_base_url)
+        client = _maybe_trace(client, role)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                    },
+                ],
+            }
+        )
+        model = self.model_for(role)
+        base_kwargs: dict[str, Any] = {"model": model, "messages": messages}
+        # _openai()와 동일한 재시도 사유(max_tokens/temperature 미지원 모델 대응) — 로직을
+        # 그대로 복제한다(기존 텍스트 경로 함수를 건드리지 않기 위해 공유하지 않고 분리).
+        attempts = [
+            {**base_kwargs, "temperature": temperature, "max_tokens": max_tokens},
+            {**base_kwargs, "temperature": temperature, "max_completion_tokens": max_tokens},
+            {**base_kwargs, "max_tokens": max_tokens},
+            {**base_kwargs, "max_completion_tokens": max_tokens},
+        ]
+        last_exc: Exception | None = None
+        for kwargs in attempts:
+            try:
+                resp = client.chat.completions.create(**kwargs)
+                return LLMResult(resp.choices[0].message.content or "")
+            except Exception as exc:  # noqa: BLE001 — 마지막 시도까지 소진 후 그대로 던짐
+                last_exc = exc
+        raise last_exc  # type: ignore[misc]
+
     def _ollama(self, prompt, system, role, temperature) -> LLMResult:
         import requests
 

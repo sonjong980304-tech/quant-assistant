@@ -92,6 +92,24 @@ def test_build_chart_freeform_prompt_allows_any_matplotlib_chart_not_just_four_h
     assert "chart_base64" in captured["prompt"]
 
 
+def test_build_chart_freeform_prompt_warns_against_overlapping_labels_and_double_percent():
+    """실측으로 발견한 두 시각 품질 버그(값 라벨 겹침, 이미 퍼센트인 값을 재차 100배)에 대한
+    프롬프트 가이드가 유지되는지 확인한다 — 지워지면 눈치채지 못하고 회귀할 수 있다."""
+    captured = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return "```python\nchart_base64='PNG'\n```"
+
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": None, "error": None,
+                "extra": {"chart_base64": "PNG", "chart_title": None}}
+
+    build_chart_freeform("시가총액 top10 막대그래프", [{"a": 1}], fake_llm, execute_python_fn=fake_exec)
+    assert "겹치지 않게" in captured["prompt"]
+    assert "100배" in captured["prompt"]
+
+
 def test_build_chart_freeform_retries_once_after_execution_failure_then_succeeds():
     attempts = []
 
