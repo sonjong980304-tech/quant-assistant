@@ -17,10 +17,13 @@ from src.db import connect, init_db
 from src.ingest.macro_indicators import (
     SANITY,
     _extract_cnn_value,
+    _extract_vkospi_from_grid,
     _parse_cnn_value,
+    _parse_vkospi_row,
     fetch_cnn_fng,
     fetch_t10y2y,
     fetch_vixcls,
+    fetch_vkospi_krx,
     ingest_macro_indicators,
     passes_sanity,
     upsert_indicator,
@@ -81,7 +84,7 @@ def test_fetch_vixcls_requests_correct_series_id():
 # AC20 — 날짜범위 파라미터 없음, 내부적으로 today만 사용
 # --------------------------------------------------------------------------
 def test_fred_fetchers_have_no_date_range_params():
-    for fn in (fetch_t10y2y, fetch_vixcls, fetch_cnn_fng):
+    for fn in (fetch_t10y2y, fetch_vixcls, fetch_cnn_fng, fetch_vkospi_krx):
         params = set(inspect.signature(fn).parameters)
         assert "start" not in params
         assert "end" not in params
@@ -138,6 +141,62 @@ def test_fetch_cnn_fng_returns_today_and_value_via_injected_fn():
 
 
 # --------------------------------------------------------------------------
+# VKOSPI(코스피 200 변동성지수) 조회 — KRX Data Marketplace(로그인 필요), Selenium.
+# pykrx 인덱스 목록엔 VKOSPI가 없어(주식/섹터 지수만 커버) KRX 사이트를 직접 크롤링한다.
+# 로그인+검색+클릭 전체 흐름(_selenium_fetch_vkospi)은 CNN의 실제 브라우저 구동과 동일하게
+# 검증 범위 밖 — 여기서는 fake driver로 "그리드에서 값 추출" 로직만 검증한다.
+# --------------------------------------------------------------------------
+def test_parse_vkospi_row_converts_date_and_value():
+    d, v = _parse_vkospi_row("2026/07/21", "84.89")
+    assert d == "2026-07-21"
+    assert v == 84.89
+
+
+def test_parse_vkospi_row_strips_thousand_separator():
+    _, v = _parse_vkospi_row("2026/07/21", "1,234.56")
+    assert v == 1234.56
+
+
+class _FakeVkospiCell:
+    def __init__(self, text):
+        self._text = text
+
+    def get_attribute(self, name):
+        return self._text if name == "textContent" else None
+
+
+class _FakeVkospiRow:
+    def __init__(self, date_text, close_text):
+        self._cells = [_FakeVkospiCell(date_text), _FakeVkospiCell(close_text)]
+
+    def find_elements(self, by, value):
+        return self._cells
+
+
+class _FakeVkospiDriver:
+    """#jsGrid_MDCSTAT014 tbody tr(첫 행=최신 거래일) 하나만 흉내내는 fake driver."""
+
+    def __init__(self, date_text, close_text):
+        self._row = _FakeVkospiRow(date_text, close_text)
+
+    def find_element(self, by, value):
+        return self._row
+
+
+def test_extract_vkospi_from_grid_reads_latest_row():
+    driver = _FakeVkospiDriver("2026/07/21", "84.89")
+    d, v = _extract_vkospi_from_grid(driver)
+    assert d == "2026-07-21"
+    assert v == 84.89
+
+
+def test_fetch_vkospi_krx_returns_value_via_injected_fn():
+    d, v = fetch_vkospi_krx(fetch_fn=lambda: ("2026-07-21", 84.89))
+    assert d == "2026-07-21"
+    assert v == 84.89
+
+
+# --------------------------------------------------------------------------
 # sanity-check (AC5) — CNN 0~100 범위, diagnose.py SANITY 딕셔너리 관례
 # --------------------------------------------------------------------------
 def test_sanity_dict_defines_cnn_domain():
@@ -172,7 +231,7 @@ def test_upsert_indicator_replaces_same_indicator_date(tmp_path):
 # --------------------------------------------------------------------------
 # 오케스트레이션 (AC4/AC5/AC6/AC20/AC22)
 # --------------------------------------------------------------------------
-def test_ingest_stores_all_three_indicators(tmp_path, monkeypatch):
+def test_ingest_stores_all_four_indicators(tmp_path, monkeypatch):
     db = str(tmp_path / "ing1.db")
     init_db(db)
     monkeypatch.setattr(macro_indicators, "send_slack_alert", lambda *a, **k: None)
@@ -181,15 +240,16 @@ def test_ingest_stores_all_three_indicators(tmp_path, monkeypatch):
         fetch_spread=lambda today=None: ("2026-07-14", 0.45),
         fetch_vix=lambda today=None: ("2026-07-14", 14.2),
         fetch_cnn=lambda today=None: ("2026-07-14", 55),
+        fetch_vkospi=lambda today=None: ("2026-07-14", 84.89),
         today=date(2026, 7, 14),
     )
-    assert set(result["succeeded"]) == {"T10Y2Y", "VIXCLS", "CNN_FNG"}
+    assert set(result["succeeded"]) == {"T10Y2Y", "VIXCLS", "CNN_FNG", "VKOSPI"}
     assert result["failed"] == []
 
     conn = connect(db)
     rows = {r["indicator"]: r["value"] for r in conn.execute("SELECT indicator, value FROM macro_indicators")}
     conn.close()
-    assert rows == {"T10Y2Y": 0.45, "VIXCLS": 14.2, "CNN_FNG": 55.0}
+    assert rows == {"T10Y2Y": 0.45, "VIXCLS": 14.2, "CNN_FNG": 55.0, "VKOSPI": 84.89}
 
 
 def test_ingest_out_of_range_cnn_not_stored_others_continue(tmp_path, monkeypatch):
@@ -202,16 +262,17 @@ def test_ingest_out_of_range_cnn_not_stored_others_continue(tmp_path, monkeypatc
         fetch_spread=lambda today=None: ("2026-07-14", 0.45),
         fetch_vix=lambda today=None: ("2026-07-14", 14.2),
         fetch_cnn=lambda today=None: ("2026-07-14", 150),
+        fetch_vkospi=lambda today=None: ("2026-07-14", 84.89),
         today=date(2026, 7, 14),
     )
     assert "CNN_FNG" in result["failed"]
-    assert set(result["succeeded"]) == {"T10Y2Y", "VIXCLS"}
+    assert set(result["succeeded"]) == {"T10Y2Y", "VIXCLS", "VKOSPI"}
 
     conn = connect(db)
     stored = {r["indicator"] for r in conn.execute("SELECT indicator FROM macro_indicators")}
     conn.close()
     assert "CNN_FNG" not in stored
-    assert {"T10Y2Y", "VIXCLS"} == stored
+    assert {"T10Y2Y", "VIXCLS", "VKOSPI"} == stored
 
 
 def test_ingest_retries_once_then_succeeds(tmp_path, monkeypatch):
@@ -232,6 +293,7 @@ def test_ingest_retries_once_then_succeeds(tmp_path, monkeypatch):
         fetch_spread=flaky_spread,
         fetch_vix=lambda today=None: ("2026-07-14", 14.2),
         fetch_cnn=lambda today=None: ("2026-07-14", 55),
+        fetch_vkospi=lambda today=None: ("2026-07-14", 84.89),
         today=date(2026, 7, 14),
     )
     assert calls["n"] == 2  # 1차 실패 + 2차 성공
@@ -245,7 +307,7 @@ def test_ingest_isolates_persistent_failure_and_continues(tmp_path, monkeypatch)
     init_db(db)
     alerts = []
     monkeypatch.setattr(macro_indicators, "send_slack_alert", lambda msg, **k: alerts.append(msg))
-    called = {"vix": 0, "cnn": 0}
+    called = {"vix": 0, "cnn": 0, "vkospi": 0}
 
     def always_fail(today=None):
         raise ConnectionError("FRED 지속 실패(mock)")
@@ -258,12 +320,17 @@ def test_ingest_isolates_persistent_failure_and_continues(tmp_path, monkeypatch)
         called["cnn"] += 1
         return ("2026-07-14", 55)
 
+    def vkospi(today=None):
+        called["vkospi"] += 1
+        return ("2026-07-14", 84.89)
+
     result = ingest_macro_indicators(
-        db_path=db, fetch_spread=always_fail, fetch_vix=vix, fetch_cnn=cnn, today=date(2026, 7, 14),
+        db_path=db, fetch_spread=always_fail, fetch_vix=vix, fetch_cnn=cnn, fetch_vkospi=vkospi,
+        today=date(2026, 7, 14),
     )
     assert result["failed"] == ["T10Y2Y"]
-    assert set(result["succeeded"]) == {"VIXCLS", "CNN_FNG"}
-    assert called["vix"] == 1 and called["cnn"] == 1  # 한 지표 실패해도 나머지는 정상 호출
+    assert set(result["succeeded"]) == {"VIXCLS", "CNN_FNG", "VKOSPI"}
+    assert called["vix"] == 1 and called["cnn"] == 1 and called["vkospi"] == 1  # 한 지표 실패해도 나머지는 정상 호출
     assert len(alerts) == 1  # 실패 지표에 대해서만 알림
 
 
@@ -283,6 +350,7 @@ def test_ingest_passes_today_into_fetchers(tmp_path, monkeypatch):
         fetch_spread=spread,
         fetch_vix=lambda today=None: ("2026-07-14", 14.2),
         fetch_cnn=lambda today=None: ("2026-07-14", 55),
+        fetch_vkospi=lambda today=None: ("2026-07-14", 84.89),
         today=date(2026, 7, 14),
     )
     assert seen["today"] == date(2026, 7, 14)

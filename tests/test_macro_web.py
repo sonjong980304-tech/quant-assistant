@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import web.app as webapp  # noqa: E402
 from src.config import CONFIG  # noqa: E402
 from src.db import connect, init_db  # noqa: E402
+from src.ingest.macro_indicators import upsert_indicator  # noqa: E402
 from src.ingest.macro_signal import run_signal  # noqa: E402
 
 
@@ -64,6 +65,40 @@ def test_api_macro_signal_empty_db_is_graceful(tmp_path, monkeypatch):
     data = r.json()
     assert data["available"] is False
     assert data["overall"] is None
+
+
+# --------------------------------------------------------------------------
+# GET /api/macro/vkospi — 참고 표시 전용(macro_signal 미반영), macro_indicators 직접 조회.
+# --------------------------------------------------------------------------
+def test_api_macro_vkospi_returns_latest_value(tmp_path, monkeypatch):
+    db = str(tmp_path / "vkospi.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        upsert_indicator(conn, "VKOSPI", "2026-07-20", 86.87, "KRX")
+        upsert_indicator(conn, "VKOSPI", "2026-07-21", 84.89, "KRX")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(CONFIG, "db_path", db)
+    r = TestClient(webapp.app).get("/api/macro/vkospi")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["available"] is True
+    assert data["date"] == "2026-07-21"   # 최신 날짜(2026-07-20이 아님)
+    assert data["value"] == 84.89
+
+
+def test_api_macro_vkospi_empty_db_is_graceful(tmp_path, monkeypatch):
+    # 이력이 없어도 500이 아니라 available=False로 200 응답(다른 macro API와 동일 관례).
+    db = str(tmp_path / "vkospi_empty.db")
+    init_db(db)
+    monkeypatch.setattr(CONFIG, "db_path", db)
+    r = TestClient(webapp.app).get("/api/macro/vkospi")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["available"] is False
+    assert data["value"] is None
 
 
 # --------------------------------------------------------------------------
@@ -201,4 +236,5 @@ def test_macro_routes_are_distinct_and_not_shadowed():
     assert "/api/macro" in paths
     assert "/api/macro/signal" in paths
     assert "/api/macro/history" in paths
+    assert "/api/macro/vkospi" in paths
     assert paths["/api/macro"].__name__ == "api_macro"   # 기존 함수가 그대로 바인딩됨

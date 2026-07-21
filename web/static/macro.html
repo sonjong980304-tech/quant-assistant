@@ -101,6 +101,11 @@
         <span class="badge" id="vixB">–</span>
         <div class="note-ref">참고 표시 전용 · 신호 계산에 미반영</div>
       </div>
+      <div class="metric">
+        <div class="l">VKOSPI (코스피 200 변동성지수)</div>
+        <div class="v" id="vkospiV">–</div>
+        <div class="note-ref" id="vkospiDate">참고 표시 전용 · 신호 계산에 미반영</div>
+      </div>
     </div>
   </div>
 
@@ -152,6 +157,18 @@ async function loadSignal(){
   }catch(e){
     document.getElementById('overall').textContent = '조회 실패';
     document.getElementById('overallSub').textContent = String(e);
+  }
+}
+
+async function loadVkospi(){
+  try{
+    const v = await (await fetch('/api/macro/vkospi')).json();
+    document.getElementById('vkospiV').textContent = fmtNum(v.value, 2);
+    document.getElementById('vkospiDate').textContent =
+      v.available ? ('기준일 ' + esc(v.date) + ' · 참고 표시 전용 · 신호 계산에 미반영')
+                   : '아직 수집된 값이 없습니다.';
+  }catch(e){
+    document.getElementById('vkospiDate').textContent = '조회 실패';
   }
 }
 
@@ -226,6 +243,7 @@ async function loadHistory(){
 }
 
 loadSignal();
+loadVkospi();
 loadHistory();
 </script>
 </body>

@@ -629,6 +629,27 @@ def api_macro_signal():
     return _signal_payload(row)
 
 
+@app.get("/api/macro/vkospi")
+def api_macro_vkospi():
+    """VKOSPI(코스피 200 변동성지수) 최신값 — 참고 표시 전용, macro_signal(종합신호)엔 미반영.
+
+    macro_indicators(원시 지표 저장소)에서 직접 읽는다(macro_signal 경유 안 함) — VKOSPI는
+    _INDICATORS(macro_pipeline.py)에 없어 신호 판정에 들어가지 않기 때문. 이력이 없으면
+    available=False로 200(다른 macro API와 동일한 "미수집 시 조용히 빈 값" 관례).
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT date, value FROM macro_indicators WHERE indicator='VKOSPI' "
+            "ORDER BY date DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"available": False, "date": None, "value": None}
+    return {"available": True, "date": row["date"], "value": row["value"]}
+
+
 @app.get("/api/macro/history")
 def api_macro_history(days: int = 30):
     """최근 N일 신호 이력(스파크라인용). 조회 후 과거→최신 순으로 정렬해 반환한다."""

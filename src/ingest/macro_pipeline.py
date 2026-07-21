@@ -52,11 +52,14 @@ def run_macro_pipeline(
     fetch_spread: Callable | None = None,
     fetch_vix: Callable | None = None,
     fetch_cnn: Callable | None = None,
+    fetch_vkospi: Callable | None = None,
     today: date | None = None,
     alert_fn: Callable | None = None,
 ) -> dict:
     """수집 → 판정 → (변경 시)알림을 순서대로 실행하고 요약 dict를 반환한다.
 
+    VKOSPI는 참고 표시 전용이라 이 판정(_INDICATORS)에는 들어가지 않는다 — 수집만 되고
+    macro_indicators에 저장돼 /api/macro/vkospi가 그대로 노출한다(신호 계산 미반영).
     반환: {"ingest": {succeeded/failed}, "signal": 판정 dict, "alerted": bool}.
     alert_fn을 주입하지 않으면 send_slack_alert(웹훅 미설정 시 조용히 스킵)를 쓴다.
     """
@@ -69,6 +72,7 @@ def run_macro_pipeline(
         fetch_spread=fetch_spread,
         fetch_vix=fetch_vix,
         fetch_cnn=fetch_cnn,
+        fetch_vkospi=fetch_vkospi,
         today=today,
     )
     succeeded = set(ingest_result["succeeded"])
