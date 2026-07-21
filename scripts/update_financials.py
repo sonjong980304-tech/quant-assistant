@@ -26,6 +26,7 @@ from src.ingest.dart import (
     FLOW_KEYS,
     REPRT_CODE,
     _ingest_shares,
+    _insert_revision,
     _parse_all,
     fetch_all_accounts,
     get_corp_codes,
@@ -121,6 +122,7 @@ def update_financials(db_path: str | None = None, today: date | None = None, sle
                         if rcept and len(rcept) == 8
                         else estimate_disclosed_date(quarter)
                     )
+                    rcept_no = rcept or disclosed  # 접수번호 미상이면 공시일을 멱등 센티널로
                     for key, (amt, nm) in data.items():
                         if key in FLOW_KEYS and qn == 4:
                             prior = sum(
@@ -137,6 +139,7 @@ def update_financials(db_path: str | None = None, today: date | None = None, sle
                                VALUES (?,?,?,?,?,?)""",
                             (code, quarter, disclosed, key, nm, round(value)),
                         )
+                        _insert_revision(conn, code, quarter, disclosed, key, nm, round(value), rcept_no)
                         n_rows += 1
                     # 새 분기 재무와 함께 그 분기 상장주식수도 적재(동일 quarter, dart.py와 동일 패턴).
                     # ⚠️ 분기당 stockTotqySttus 호출 1회 추가 → 일일 한도 소모 증가.
