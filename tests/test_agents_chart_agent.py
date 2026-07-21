@@ -2,7 +2,7 @@
 그리도록 코드를 짜게 하고, exec_runtime 샌드박스에서 실행해 chart_base64/chart_title을
 꺼내는 순수 로직. 스크리닝(단발성)·멀티턴(후속질문) 두 경로가 이 하나를 공유한다.
 """
-from src.agents.chart_agent import build_chart_freeform
+from src.agents.chart_agent import _chart_prompt, _data_item_count, build_chart_freeform
 
 
 def test_build_chart_freeform_returns_none_when_llm_fn_is_none():
@@ -167,6 +167,73 @@ def test_build_chart_freeform_injects_flat_stock_list_as_data_and_summarizes_it_
     # 프롬프트 요약이 '리스트[dict]'로 나와 LLM이 종목 리스트임을 인지할 수 있어야 한다.
     assert "리스트[dict] 10개" in captured["prompt"]
     assert "return_12m" in captured["prompt"]
+
+
+def test_chart_prompt_includes_histogram_guidance_when_item_count_exceeds_cap():
+    """항목이 900개처럼 상한을 넘으면, 종목별 막대 하나씩 그리지 말고 히스토그램/분포도로
+    그리라는 안내와 실제 개수가 프롬프트에 포함돼야 한다(실측 회귀: 코스피 전종목 900개를
+    막대 하나씩 그리려다 막대가 안 보이고 라벨만 겹쳐 깨진 버그)."""
+    prompt = _chart_prompt("코스피 전종목 PER 오름차순", "리스트[dict] 900개, 키: ['per']",
+                            item_count=900)
+    assert "[대량 데이터 안내]" in prompt
+    assert "900" in prompt
+
+
+def test_chart_prompt_omits_histogram_guidance_when_item_count_within_cap():
+    """항목이 10개처럼 상한(30) 이내면 히스토그램/분포도 안내문이 전혀 없어야 한다(회귀
+    방지: 기존 '상위 10개' 같은 소량 데이터의 자유선택 동작이 그대로 유지돼야 함)."""
+    prompt = _chart_prompt("상위 10개 종목 수익률", "리스트[dict] 10개, 키: ['return_12m']",
+                            item_count=10)
+    assert "[대량 데이터 안내]" not in prompt
+
+
+def test_build_chart_freeform_passes_large_list_item_count_into_prompt():
+    """60개짜리 리스트를 data로 넘기면, build_chart_freeform이 실제 개수(60)를 계산해
+    _chart_prompt에 전달하고 히스토그램/분포도 안내가 프롬프트에 실제로 들어가야 한다."""
+    big_data = [{"stock_code": f"{i:06d}", "per": i * 0.1} for i in range(60)]
+    captured = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return "```python\nchart_base64='PNG'\n```"
+
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": None, "error": None,
+                "extra": {"chart_base64": "PNG", "chart_title": None}}
+
+    build_chart_freeform("코스피 전종목 PER", big_data, fake_llm, execute_python_fn=fake_exec)
+    assert "[대량 데이터 안내]" in captured["prompt"]
+    assert "60" in captured["prompt"]
+
+
+def test_build_chart_freeform_omits_guidance_for_small_list():
+    """10개짜리 리스트는 상한 이내라 안내문이 없어야 한다(회귀 방지)."""
+    small_data = [{"stock_code": f"{i:06d}", "per": i * 0.1} for i in range(10)]
+    captured = {}
+
+    def fake_llm(prompt):
+        captured["prompt"] = prompt
+        return "```python\nchart_base64='PNG'\n```"
+
+    def fake_exec(code, context, result_var=None, extra_vars=None):
+        return {"ok": True, "result": None, "error": None,
+                "extra": {"chart_base64": "PNG", "chart_title": None}}
+
+    build_chart_freeform("상위 10개 종목 PER", small_data, fake_llm, execute_python_fn=fake_exec)
+    assert "[대량 데이터 안내]" not in captured["prompt"]
+
+
+def test_data_item_count_picks_max_list_length_across_multi_domain_dict():
+    """멀티도메인 폴백({"kr": [...30개...], "us": [...5개...]})이면 가장 항목이 많은
+    도메인 기준(30)으로 대량 데이터 경고를 판단해야 한다."""
+    data = {"kr": [{"a": i} for i in range(30)], "us": [{"a": i} for i in range(5)]}
+    assert _data_item_count(data) == 30
+
+
+def test_data_item_count_returns_none_for_scalar():
+    """list도 dict도 아닌 값(예: 단일 숫자 결과)은 개수 개념이 없으므로 None을 반환해
+    _chart_prompt가 대량 데이터 안내를 붙이지 않게 해야 한다."""
+    assert _data_item_count(42) is None
 
 
 def test_build_chart_freeform_gives_up_after_max_attempts():

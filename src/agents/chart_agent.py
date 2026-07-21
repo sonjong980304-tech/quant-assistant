@@ -23,6 +23,9 @@ from src.agents.exec_fallback import _extract_python_code
 from src.agents.exec_runtime import execute_python
 
 _MAX_CHART_ATTEMPTS = 2
+# 막대그래프에 항목을 하나씩 다 그리면 이 개수를 넘는 순간부터 막대가 안 보일 만큼 얇아지고
+# 라벨이 겹쳐 읽을 수 없어진다(실측: 코스피 전종목 900개 PER 그래프가 이렇게 깨졌다).
+_CHART_ITEM_CAP = 30
 
 
 def _summarize_data_shape(data) -> str:
@@ -41,7 +44,32 @@ def _summarize_data_shape(data) -> str:
     return f"{type(data).__name__} 값"
 
 
-def _chart_prompt(question: str, data_summary: str, code_error: str | None = None) -> str:
+def _data_item_count(data) -> int | None:
+    """차트에 실제로 그릴 항목 개수를 data 모양에서 뽑아낸다(대량 데이터 경고 판단용).
+
+    단일 도메인(list)이면 그 길이, 멀티도메인 폴백(dict, {"kr": [...], "us": [...]})이면
+    값들 중 list인 것들의 최댓값(가장 항목이 많은 도메인 기준으로 경고), 둘 다 아니면
+    (스칼라 등) 판단할 개수 개념이 없으므로 None.
+    """
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        counts = [len(v) for v in data.values() if isinstance(v, list)]
+        return max(counts) if counts else None
+    return None
+
+
+def _chart_prompt(
+    question: str, data_summary: str, item_count: int | None = None,
+    code_error: str | None = None,
+) -> str:
+    large_data_note = (
+        f"\n\n[대량 데이터 안내] 데이터가 {item_count}개로 많습니다. 종목별로 막대 하나씩 "
+        "그리면 막대가 안 보일 만큼 얇아지고 라벨이 겹쳐 읽을 수 없게 됩니다. 이런 경우 "
+        "종목별 막대그래프 대신 값의 분포를 보여주는 히스토그램(hist)이나 박스플롯 등 "
+        f"분포도로 그리세요. 제목에 전체 {item_count}개의 분포임을 명시하세요."
+        if item_count is not None and item_count > _CHART_ITEM_CAP else ""
+    )
     retry_note = (
         f"\n\n[직전 코드 실행 실패] 방금 작성한 코드가 다음 이유로 실패했습니다: {code_error}\n"
         "같은 실수를 반복하지 말고 원인을 고쳐 다시 작성하세요."
@@ -62,7 +90,7 @@ def _chart_prompt(question: str, data_summary: str, code_error: str | None = Non
         "data에 이미 그 단위 그대로(예: 42.75가 42.75%를 의미) 들어 있습니다. '%' 라벨을 붙일 "
         "때 값을 다시 100배 하지 말고 그대로 쓰세요(0~1 사이 소수가 아닙니다).\n"
         "완성된 그래프 이미지는 base64로 인코딩한 PNG 문자열로 `chart_base64` 변수에, 제목은 "
-        f"`chart_title` 변수에 각각 담으세요.{retry_note}\n\n질문: {question}\nPython 코드:"
+        f"`chart_title` 변수에 각각 담으세요.{large_data_note}{retry_note}\n\n질문: {question}\nPython 코드:"
     )
 
 
@@ -83,10 +111,13 @@ def build_chart_freeform(
 
     execute_python_fn = execute_python_fn or execute_python
     summary = _summarize_data_shape(data)
+    item_count = _data_item_count(data)
     code_error: str | None = None
 
     for _ in range(_MAX_CHART_ATTEMPTS):
-        code_raw = llm_fn(_chart_prompt(question, summary, code_error)) or ""
+        code_raw = llm_fn(
+            _chart_prompt(question, summary, item_count=item_count, code_error=code_error)
+        ) or ""
         code = _extract_python_code(code_raw)
         if not code:
             code_error = "LLM이 Python 코드를 생성하지 못했습니다."
