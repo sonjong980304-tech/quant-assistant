@@ -69,7 +69,7 @@ def zscore(rows: list[dict], field: str, direction: str = "high", n: int | None 
 # --------------------------------------------------------------------------
 # 3. neutralize — 그룹(섹터) 내 평균 제거 (섹터중립화)
 # --------------------------------------------------------------------------
-def neutralize(rows: list[dict], field: str, by: str = "sector", method: str = "demean") -> list[dict]:
+def neutralize(rows: list[dict], field: str, by: str | None = "sector", method: str = "demean") -> list[dict]:
     """섹터(기본) 중립화: 같은 그룹(by) 안에서 field의 그룹간 수준차를 제거한다.
 
     method='demean'(기본, 회귀 유지): 그룹 평균만 뺀다.
@@ -78,6 +78,12 @@ def neutralize(rows: list[dict], field: str, by: str = "sector", method: str = "
     과대 반영), 실제 섹터중립 포트폴리오 구성에는 이 표준화가 필요하다. 그룹 표본이 1개뿐이면
     표준편차가 0이라 정규화가 수학적으로 정의되지 않으므로 해당 행은 None을 반환한다
     (correlation()의 분산=0 처리와 동일 원칙 — 억지로 0을 주지 않음).
+
+    by=None: 그룹을 나누지 않고 전체 rows를 하나의 그룹으로 취급한다("전체 시장 기준
+    z-score"용 — 예: method='zscore'와 함께 쓰면 섹터와 무관한 전 종목 표준화 값을 낸다).
+    r.get(by)가 모든 행에서 동일하게 None을 반환하는 성질을 그대로 이용한 것으로, 별도
+    분기 없이도 이미 동작한다(test_primitives.py::test_neutralize_by_none_computes_whole_market_zscore_ignoring_sector
+    가 이 동작을 회귀 방지로 고정한다).
 
     각 행에 '{field}_neutral'을 부여해 반환(원 순서/원 필드 유지). select_stocks에는
     중립화 기능이 없어 여기서만 최소한의 그룹 통계 로직을 더한다.

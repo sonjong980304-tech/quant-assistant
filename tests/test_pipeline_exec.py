@@ -259,6 +259,27 @@ def test_run_pipeline_single_leaf_survives_trailing_unnamed_step():
     assert res == {"holdings": [{"date": "d1", "codes": ["005930"]}]}
 
 
+def test_run_pipeline_neutralize_by_null_then_histogram_buckets_end_to_end():
+    """domain_backtest.py 프롬프트에 추가한 "전체 시장 z-score 히스토그램" 예시 파이프라인이
+    실제 실행기(PRIMITIVE_OPS, mock 없음)를 통해 끝까지 동작하는지 확인한다. JSON의 null이
+    파이썬 None으로 그대로 전달돼 neutralize(by=None)이 섹터 구분 없이 전체를 한 그룹으로
+    z-score화하고, 그 결과(per_neutral)를 histogram_buckets가 그대로 받아 구간을 나눈다."""
+    rows = [
+        {"stock_code": "1", "sector": "화학", "per": 8.0},
+        {"stock_code": "2", "sector": "금융", "per": 12.0},
+        {"stock_code": "3", "sector": "화학", "per": 10.0},
+        {"stock_code": "4", "sector": "금융", "per": 14.0},
+    ]
+    steps = [
+        {"op": "neutralize", "params": {"rows": rows, "field": "per", "by": None, "method": "zscore"}, "out": "xs_z"},
+        {"op": "histogram_buckets", "params": {"rows": {"$ref": "xs_z"}, "field": "per_neutral", "num_buckets": 4}, "out": "hist"},
+    ]
+    res = run_pipeline(steps)
+    assert res["field"] == "per_neutral"
+    assert res["n"] == 4
+    assert sum(res["counts"]) == 4
+
+
 def test_run_pipeline_correlation_and_quantile_bucket_means_both_survive():
     """실서버 재현 버그의 실제 패턴: 같은 rows에서 correlation과 quantile_bucket_means를
     각각 별도 out으로 뽑는 파이프라인 — 예전엔 quantile_bucket_means(마지막 단계)만 남고

@@ -626,7 +626,12 @@ def _synthesize_prompt(question: str, domain_results: dict) -> str:
         "종합결론에 반드시 함께 밝히세요.\n"
         "스크리닝 결과 행에 '_same_company': true가 있으면, 그 행은 바로 앞의 '_same_company':"
         " false인 행과 동일 회사의 다른 상장 주식 종류(예: Class A/C)입니다 — 서로 다른"
-        " 회사가 아니라 같은 회사임을 종합결론에서 반드시 밝히세요.\n\n"
+        " 회사가 아니라 같은 회사임을 종합결론에서 반드시 밝히세요.\n"
+        "도메인 결과에 'free_exec'.'verification_warning'이 있으면, 이 결과는 정형 검증 경로가"
+        " 모두 실패해 LLM이 직접 작성한 코드로 얻은 값이며 재검증에서도 그 사유로 걸렸다는"
+        " 뜻입니다 — 답변 서두에 자동검증을 통과하지 못했다는 점과 그 사유를 명시하고,"
+        " 참고용으로만 제시된 값임을 사용자에게 알리세요(값 자체를 숨기거나 임의로 고치지"
+        " 마세요).\n\n"
         f"질문: {question}\n"
         f"도메인 결과: {_domain_results_json_for_prompt(domain_results)}\n종합결론:"
     )
@@ -722,10 +727,15 @@ def answer_with_verification(
          fallback_fn(question, conn, llm_fn, last_reason)을 **정확히 1회만** 시도한다
          (exec_fallback.run_free_exec_fallback — LLM이 SQL+Python을 직접 작성해
          exec_runtime.py의 안전장치 위에서 실행). 정형 어휘(스크리닝 criteria/top_n,
-         파이프라인 연산)의 표현력 한계로 반복 실패하는 질문을 위한 최후 수단이지,
-         검증 루프를 다시 도는 게 아니므로 정형 검증(verify_fn)은 다시 거치지 않는다.
-         성공하면 domain_results에 "free_exec" 키로 결과를 추가하고 uncertain=False로
-         반환한다. 실패하면 기존과 동일하게 "불확실성 명시" 응답을 반환한다(uncertain=True).
+         파이프라인 연산)의 표현력 한계로 반복 실패하는 질문을 위한 최후 수단이라, 실패해도
+         fallback_fn을 다시 시도하지는 않는다(무한루프 방지 원칙 유지). 성공하면 domain_results에
+         "free_exec" 키로 결과를 추가하고, verify_fn을 **정확히 1회** 더 통과시켜 재검증한다
+         (재시도는 없음 — 검증 실패해도 결과를 버리지 않고 "free_exec"."verification_warning"에
+         사유만 남긴다. 최후 수단이라 대안이 없으므로 답 자체는 유지하되, synthesize_fn이 최종
+         답변에 신뢰도 유보 문구를 붙일 근거를 제공한다 — 실사용 재현: "PER z-score 히스토그램"
+         요청이 z-score 없이 원본 PER로만 나온 결과가 무검증으로 그대로 나갔던 문제).
+         uncertain은 재검증 통과 여부와 무관하게 항상 False로 반환한다. fallback_fn 자체가
+         실패하면(ok=False) 기존과 동일하게 "불확실성 명시" 응답을 반환한다(uncertain=True).
 
     복합 도메인(kr+backtest 등) 질문에서는 verify_fn이 반환하는 verdict["per_domain"]을 읽어,
     이미 검증을 통과한 도메인은 그대로 두고 **실패한 도메인만** 다음 시도에서 재-dispatch한다
@@ -865,6 +875,22 @@ def answer_with_verification(
             "code": fallback.get("code"),
             "result": fallback.get("result"),
         }
+        # 재검증 안전망: 폴백 자체는 재시도하지 않는다(무한루프 방지 원칙 유지 — fallback_fn은
+        # 위에서 이미 정확히 1회만 호출됐다). 다만 검증을 아예 안 거치면, 정형 어휘 한계로
+        # 실패한 게 아니라 폴백이 스스로 질문을 잘못 이해한 경우(예: "PER z-score 히스토그램"을
+        # z-score 없이 원본 PER로만 답함)까지 조용히 "정상 답변"으로 나갈 수 있다. 실패해도
+        # 이 결과를 버리지는 않고(최후 수단이라 버리면 대안이 없다) 사유만 남겨, 최종 답변에
+        # 신뢰도 유보 문구를 붙일 근거를 synthesize_fn에 제공한다.
+        fallback_verdict = verify_fn(question, domain_results, llm_fn)
+        if not fallback_verdict.get("valid"):
+            domain_results["free_exec"]["verification_warning"] = fallback_verdict.get("reason")
+            if on_progress:
+                on_progress(
+                    "verify",
+                    f"자유 코드 폴백 결과 재검증 실패(참고용으로 표시): {fallback_verdict.get('reason')}",
+                )
+        elif on_progress:
+            on_progress("verify", "자유 코드 폴백 결과 재검증 통과")
         conclusion = synthesize_fn(question, domain_results, llm_fn)
         return {
             "uncertain": False,

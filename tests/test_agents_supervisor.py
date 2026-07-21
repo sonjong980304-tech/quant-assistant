@@ -935,6 +935,77 @@ def test_answer_with_verification_skips_backtest_escalation_when_already_routed(
     assert res["uncertain"] is True
 
 
+# ── free_exec 폴백 재검증 안전망: 폴백은 "정형 검증이 반복 실패한 뒤의 최후 수단"이라
+#    검증을 다시 거치지 않던 기존 설계에는 구멍이 있었다(실사용 재현: "PER z-score
+#    히스토그램" 요청이 z-score 없이 원본 PER로만 나온 결과가 검증 없이 그대로 나감).
+#    무한루프를 피하려고 폴백을 다시 시도하지는 않되(fallback_fn은 여전히 정확히 1회),
+#    성공한 폴백 결과를 한 번 더 verify_fn에 통과시켜 실패하면 그 사실을
+#    domain_results["free_exec"]["verification_warning"]에 남긴다 — 답 자체는 폐기하지
+#    않고(최후 수단이라 대안이 없음) synthesize_fn이 최종 답변에 신뢰도 유보 문구를
+#    붙일 수 있게 근거만 제공한다. ──────────────────────────────────────────────
+def test_answer_with_verification_flags_fallback_result_when_reverification_fails():
+    fallback_calls: list = []
+
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {"attempt": "x"}}
+
+    def verify_fn(question, domain_results, llm_fn):
+        if "free_exec" in domain_results:
+            return {"valid": False, "reason": "z-score 필드가 결과에 없습니다"}
+        return {"valid": False, "reason": "정형 검증 실패"}
+
+    def stub_synth(question, domain_results, llm_fn):
+        return "종합결론"
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        fallback_calls.append(1)
+        return {"ok": True, "result": {"per": [1, 2, 3]}, "sql": "SELECT 1;", "code": "result=1"}
+
+    res = answer_with_verification(
+        "PER z-score 히스토그램", conn="conn", llm_fn="llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=verify_fn, synthesize_fn=stub_synth,
+        fallback_fn=fake_fallback,
+    )
+
+    assert len(fallback_calls) == 1  # 재검증 실패해도 폴백을 다시 시도하지 않는다(무한루프 방지)
+    assert res["uncertain"] is False  # 답 자체는 폐기하지 않는다(최후 수단이라 대안이 없음)
+    assert res["used_fallback"] is True
+    assert res["domain_results"]["free_exec"]["verification_warning"] == "z-score 필드가 결과에 없습니다"
+
+
+def test_answer_with_verification_does_not_flag_fallback_result_when_reverification_passes():
+    def stub_route(question, llm_fn):
+        return ["kr"]
+
+    def stub_dispatch(routes, question, conn, llm_fn, steps=None):
+        return {"kr": {"attempt": "x"}}
+
+    def verify_fn(question, domain_results, llm_fn):
+        if "free_exec" in domain_results:
+            return {"valid": True}
+        return {"valid": False, "reason": "정형 검증 실패"}
+
+    def stub_synth(question, domain_results, llm_fn):
+        return "종합결론"
+
+    def fake_fallback(question, conn, llm_fn, last_reason=None, **kwargs):
+        return {"ok": True, "result": {"per": [1, 2, 3]}, "sql": "SELECT 1;", "code": "result=1"}
+
+    res = answer_with_verification(
+        "질문", conn="conn", llm_fn="llm",
+        route_fn=stub_route, dispatch_fn=stub_dispatch,
+        verify_fn=verify_fn, synthesize_fn=stub_synth,
+        fallback_fn=fake_fallback,
+    )
+
+    assert res["uncertain"] is False
+    assert "verification_warning" not in res["domain_results"]["free_exec"]
+
+
 def test_answer_with_verification_does_not_attempt_fallback_when_verification_passes():
     fallback_calls: list = []
 
@@ -1052,6 +1123,28 @@ def test_synthesize_prompt_explains_same_company_label():
     # 해도 항상 참이 되는 가짜 검증) — LLM이 실제로 무슨 뜻인지 알 수 있는 설명 문구가
     # 있어야 한다.
     assert "동일 회사" in captured["prompt"] or "같은 회사" in captured["prompt"]
+
+
+def test_synthesize_prompt_explains_free_exec_verification_warning():
+    """free_exec.verification_warning이 domain_results에 그대로 병기되는 것만으로는 LLM이
+    최종 답변에 신뢰도 유보 문구를 붙이지 않는다 — 이 필드가 무슨 뜻인지 알려주는 안내
+    문구가 프롬프트에 있어야 한다(재검증 안전망이 실제로 사용자에게 전달되는지 확인)."""
+    captured = {}
+
+    def fake_llm(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "결론"
+
+    domain_results = {
+        "free_exec": {
+            "fallback_used": True,
+            "result": {"per": [1, 2, 3]},
+            "verification_warning": "z-score 필드가 결과에 없습니다",
+        },
+    }
+    synthesize_conclusion("PER z-score 히스토그램", domain_results, fake_llm)
+    assert "verification_warning" in captured["prompt"]
+    assert "재검증" in captured["prompt"] or "자동검증" in captured["prompt"]
 
 
 # ── on_progress 진행 콜백 — 실시간 트리 상세화. 라우팅/도메인별/검증 시도별로 즉시

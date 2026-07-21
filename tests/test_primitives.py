@@ -147,6 +147,23 @@ def test_neutralize_demean_default_unaffected_by_zscore_addition():
     assert by_code["2"] == pytest.approx(-2.0)
 
 
+def test_neutralize_by_none_computes_whole_market_zscore_ignoring_sector():
+    # by=None이면 sector가 서로 달라도 전체를 한 그룹으로 묶어 z-score를 낸다
+    # ("PER 전체 시장 기준 z-score" 같은 섹터 무관 표준화 요청용).
+    rows = [
+        {"stock_code": "1", "sector": "화학", "per": 8.0},
+        {"stock_code": "2", "sector": "금융", "per": 12.0},
+        {"stock_code": "3", "sector": "화학", "per": 10.0},
+    ]
+    out = neutralize(rows, "per", by=None, method="zscore")
+    by_code = {r["stock_code"]: r["per_neutral"] for r in out}
+    # 전체 평균=10, 모집단표준편차=sqrt(((8-10)^2+(12-10)^2+(10-10)^2)/3)=sqrt(8/3)
+    std = math.sqrt(8.0 / 3.0)
+    assert by_code["1"] == pytest.approx((8.0 - 10.0) / std)
+    assert by_code["2"] == pytest.approx((12.0 - 10.0) / std)
+    assert by_code["3"] == pytest.approx((10.0 - 10.0) / std)
+
+
 # --------------------------------------------------------------------------
 # winsorize — IQR(사분위범위) 기반 이상치 완화(신규, 순위변환·z-score 외 3번째 방식)
 # --------------------------------------------------------------------------
