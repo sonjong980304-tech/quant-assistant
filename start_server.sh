@@ -3,7 +3,7 @@
 #   - FastAPI를 백그라운드로 띄우고
 #   - ngrok http 8000 --basic-auth "아이디:비밀번호" 로 외부 터널 생성
 #   - 외부 접속 URL을 출력한다.
-# 인증 정보는 .env의 NGROK_USERNAME / NGROK_PASSWORD 를 사용.
+# 인증 정보는 .env의 NGROK_USERNAME / NGROK_PASSWORD 를 사용(예시는 .env.example 참고).
 set -euo pipefail
 cd "$(dirname "$0")"
 

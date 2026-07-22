@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FastAPI + ngrok 동시 종료.
+# FastAPI + ngrok 동시 종료. (실행: start_server.sh, URL 확인: show_url.sh)
 echo "■ 서버/터널 종료 중..."
 if pkill -f "ngrok http" 2>/dev/null; then echo "  - ngrok 종료됨"; else echo "  - ngrok 미실행"; fi
 if pkill -f "uvicorn web.app" 2>/dev/null; then echo "  - FastAPI 종료됨"; else echo "  - FastAPI 미실행"; fi
