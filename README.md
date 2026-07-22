@@ -24,29 +24,29 @@
 호출합니다.
 
 ```mermaid
+%%{init: {'themeVariables': {'fontSize': '18px'}}}%%
 flowchart TB
-    Q(["💬 사용자 질문"])
-    SUP{{"🧭 총괄 에이전트<br/>Routing · 정합성 검증 · 재시도(최대 3회)"}}
+    Q(["사용자 질문"])
+    SUP{{"총괄 에이전트<br/>Routing · 정합성 검증<br/>재시도(최대 3회)"}}
 
     Q --> SUP
 
-    subgraph KR_BOX["🇰🇷 한국주식 에이전트"]
+    subgraph KR_BOX["한국주식 에이전트"]
         direction TB
-        KR_FIN["📑 재무<br/>DART · FnGuide (resolve_metric)"]
-        KR_PRICE["📈 주가<br/>순수 시세 (종가/시가/거래량)"]
-        KR_TECH["📐 기술지표<br/>compute_technical_indicator (이동평균·RSI·MACD·볼린저, TA-Lib)"]
+        KR_FIN["재무<br/>DART · FnGuide (resolve_metric)"]
+        KR_PRICE["주가<br/>순수 시세 (종가/시가/거래량)"]
     end
 
-    subgraph MACRO_BOX["🌐 매크로 에이전트"]
+    subgraph MACRO_BOX["매크로 에이전트"]
         direction TB
-        MACRO_DATA["💱 환율 · 해외지수 · 파마프렌치 팩터"]
+        MACRO_DATA["환율 · 해외지수 · 파마프렌치 팩터"]
     end
 
-    subgraph BT_BOX["📊 백테스트 에이전트"]
+    subgraph BT_BOX["백테스트 에이전트"]
         direction TB
-        BT_PIPE["⚙️ 백테스트 엔진"]
-        BT_HARD["🛑 하드차단 3종 (결정론적)<br/>생존편향 · 미래참조 · 공매도"]
-        BT_SOFT["⚠️ 소프트경고 4종 (LLM 판정)<br/>스토리텔링 · 스누핑 · 신호감소 · 이상치"]
+        BT_PIPE["백테스트 엔진"]
+        BT_HARD["하드차단 3종 (결정론적)<br/>생존편향 · 미래참조 · 공매도"]
+        BT_SOFT["소프트경고 4종 (LLM 판정)<br/>스토리텔링 · 스누핑 · 신호감소 · 이상치"]
         BT_PIPE --> BT_HARD --> BT_SOFT
     end
 
@@ -58,15 +58,15 @@ flowchart TB
     MACRO_BOX --> VERIFY
     BT_BOX --> VERIFY
 
-    VERIFY{{"🔁 총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증<br/>불일치 시 도메인 재-dispatch (최대 3회 재시도)"}}
+    VERIFY{{"총괄 에이전트: 원 질문 ↔ 도메인 결과 정합성 검증<br/>불일치 시 도메인 재-dispatch (최대 3회 재시도)"}}
 
-    CHART["🖼️ 차트 에이전트<br/>build_chart_freeform (matplotlib 자유선택)<br/>실패해도 본문 응답은 그대로 유지"]
+    CHART["차트 에이전트<br/>실패해도 본문 응답은 그대로 유지"]
 
     VERIFY -->|"차트 요청 시(wants_chart)"| CHART
     CHART --> RESULT
     VERIFY --> RESULT
 
-    RESULT(["✅ 종합 결론 + 도메인별 원본 데이터 (가공 없음) 병기<br/>(3회 초과해도 uncertain=True로 그 상태 그대로 확정)"])
+    RESULT(["종합결론"])
 
     classDef q fill:#f1f3f5,stroke:#868e96,color:#212529,font-weight:bold
     classDef sup fill:#1f2a44,stroke:#0d1424,color:#ffffff,font-weight:bold
@@ -79,7 +79,7 @@ flowchart TB
     class Q q
     class SUP,VERIFY sup
     class RESULT result
-    class KR_BOX,KR_FIN,KR_PRICE,KR_TECH kr
+    class KR_BOX,KR_FIN,KR_PRICE kr
     class MACRO_BOX,MACRO_DATA macro
     class BT_BOX,BT_PIPE,BT_HARD,BT_SOFT bt
     class CHART chart
