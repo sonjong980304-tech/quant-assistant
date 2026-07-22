@@ -11,7 +11,7 @@
 [![Qwen2.5-coder](https://img.shields.io/badge/Qwen2.5--coder-Local%20LLM-615CED?logo=ollama&logoColor=white)](https://ollama.com/library/qwen2.5-coder)
 
 한국 상장사 재무/주가/매크로 데이터를 SQLite에 적재하고, 자연어 질문에 Python가 SQL을 활용해 llm이 답하는
-시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.
+시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.(GPT-5.4-mini, Exaone3.5, Qwen2.5-coder 적용)
 
 ![복합 통계 질문 응답 화면 — PBR·GPA 상관관계와 5분위별 평균, 근거 데이터가 함께 표시됨](docs/screenshots/02-query-result.png)
 
