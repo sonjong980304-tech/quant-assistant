@@ -198,7 +198,7 @@ def cmd_eval(args):
 
     rep = run_evaluation(limit=args.limit, offline=args.offline)
     if args.json:
-        # 러너(donegate)가 execution_accuracy.ex_pct를 파싱할 수 있도록,
+        # 외부 스크립트/도구가 execution_accuracy.ex_pct 등을 파싱할 수 있도록,
         # stdout에는 리포트 dict의 JSON만 출력한다(부가 텍스트 없이).
         print(json.dumps(rep, ensure_ascii=False))
         return
