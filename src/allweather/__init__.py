@@ -2,11 +2,16 @@
 
 .omc/specs/brainstorming-all-weather-portfolio.md 참고.
 
-quant_trader가 실제 운용 중인 올웨더 포트폴리오(QQQ/삼성전자/TLT/ACE KRX금현물 4종목,
-몬테카를로 최적화 리밸런싱)를 이 프로젝트 웹 화면에서 모니터링한다. 매달 1일 배치가 실제
-10년치 가격으로 walk-forward 백테스트를 돌려 비중·MDD·CAGR·누적수익률·샤프비율을 계산해
-DB(all_weather_snapshot)에 이력으로 쌓고, 화면은 그 저장값을 읽기만 한다. 계산이 끝나면
-quant_trader와 동일한 텔레그램 채널로 직전 달 대비 비중 변경분을 포함한 알림을 보낸다.
+quant_trader가 실제 운용 중인 올웨더 포트폴리오(QQQ/삼성전자/TLT/ACE KRX금현물 + IEF/TIP
+6종목, 무제약 샤프비율 극대화 몬테카를로 리밸런싱)를 이 프로젝트 웹 화면에서 모니터링한다.
+매달 1일 배치가 실제 10년치 가격으로 walk-forward 백테스트를 돌려 비중·MDD·CAGR·누적수익률·
+샤프·소르티노를 계산해 DB(all_weather_snapshot)에 이력으로 쌓고, 화면은 그 저장값을 읽기만
+한다. 계산이 끝나면 quant_trader와 동일한 텔레그램 채널로 직전 달 대비 비중 변경분을 포함한
+알림을 보낸다.
+
+낙폭(MDD) -20% 이내 제약을 건 샤프비율 최적화(run_monte_carlo_mdd_constrained, montecarlo.py)
+도 만들어뒀지만 2026-07 사용자 결정으로 배치 기본값으로는 쓰지 않는다(필요시 pipeline의
+monte_carlo_fn 인자로 주입).
 
 이 기능은 어디까지나 "표시+알림"이며, 실제 매매 주문 실행은 quant_trader의 영역으로 남긴다
 (quant_trader는 read-only 참고만 했고 import·수정하지 않는다 — Approach B로 계산 로직만 복제).

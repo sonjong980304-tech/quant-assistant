@@ -40,6 +40,9 @@ def run_all_weather_pipeline(
     send_fn 미주입 시 send_telegram(미설정 시 조용히 스킵)을 쓴다.
     """
     today = today or date.today()
+    # 2026-07 사용자 결정: 순수 샤프비율 극대화(무제약)를 그대로 유지 — MDD 제약은 걸지 않는다.
+    # MDD -20% 제약 버전(run_monte_carlo_mdd_constrained, montecarlo.py)은 별도로 만들어뒀지만
+    # 이 배치의 기본값으로는 쓰지 않는다(필요하면 monte_carlo_fn 인자로 주입해서 쓸 수 있다).
     monte_carlo_fn = monte_carlo_fn or run_monte_carlo
     send_fn = send_fn or send_telegram
 

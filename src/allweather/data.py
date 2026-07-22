@@ -1,8 +1,11 @@
-"""올웨더 4종목 가격 패널 + 무위험이자율(^IRX) 조회.
+"""올웨더 6종목 가격 패널 + 무위험이자율(^IRX) 조회.
 
 .omc/specs/brainstorming-all-weather-portfolio.md AC1/AC2/AC6/AC7 참고.
 
-- 4종목(QQQ/삼성전자/TLT/ACE KRX금현물) 모두 yfinance로 수집한다.
+- 6종목(QQQ/삼성전자/TLT/ACE KRX금현물/IEF/TIP) 모두 yfinance로 수집한다. IEF(미국 중기국채)·
+  TIP(미국 물가연동채)는 2026-07 MDD 제약(-20% 이내 샤프 최대) 도입과 함께 추가됐다 — 둘 다
+  2003년 전후부터 상장된 유동성 높은 iShares ETF라 기존 티커들과 동일하게 yfinance만으로
+  충분하다(별도 합성/보강 불필요, ACE KRX금현물과 다른 케이스).
 - 삼성전자(005930.KS)는 yfinance 자체가 2000년부터 제공한다(기존 DB의 prices 테이블은 2014년부터라
   더 짧았음 — 20년 이상 백테스트 확보를 위해 DB 대신 yfinance로 직접 조회하도록 바꿨다).
 - ACE KRX금현물(411060.KS)은 2021년 말에야 상장돼 그 이전 데이터가 존재하지 않는다. 이를 GLD(달러
@@ -31,6 +34,8 @@ TICKERS: dict[str, str] = {
     SAMSUNG_TICKER: "삼성전자",
     "TLT": "TLT (미국 장기채)",
     KRX_GOLD_TICKER: "ACE KRX금현물",
+    "IEF": "IEF (미국 중기국채)",
+    "TIP": "TIP (미국 물가연동채)",
 }
 
 

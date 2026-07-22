@@ -25,9 +25,9 @@ from src.allweather.data import (
 )
 
 
-def test_all_four_tickers_present():
-    # AC1: 4종목 모두 조회 대상에 포함.
-    assert set(TICKERS) == {"QQQ", SAMSUNG_TICKER, "TLT", KRX_GOLD_TICKER}
+def test_all_six_tickers_present():
+    # AC1 + 2026-07 MDD 제약 도입: 6종목(기존 4 + IEF/TIP) 모두 조회 대상에 포함.
+    assert set(TICKERS) == {"QQQ", SAMSUNG_TICKER, "TLT", KRX_GOLD_TICKER, "IEF", "TIP"}
 
 
 def test_samsung_sourced_from_yfinance_not_db():
