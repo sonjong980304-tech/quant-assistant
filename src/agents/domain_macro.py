@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Callable
 
 from src.agents.exec_runtime import execute_sql
+from src.factors.fama_french import classify_factor_intent, fetch_factor_data
 
 # web/app.py의 api_macro_signal()과 동일한 SQL(그 핸들러의 conn.execute() 패턴을 그대로
 # 재사용하되, 여기서는 HA-1 실행기(execute_sql)로 실행한다).
@@ -82,16 +83,70 @@ def _macro_payload(question: str, row: dict | None, error: str | None = None) ->
     }
 
 
+def _factor_payload(question: str, intent: dict, fetch_factor_fn: Callable) -> dict:
+    """파마프렌치 팩터 질문 응답 — macro_signal 관련 필드는 전부 None, factor 필드에 결과를 담는다.
+
+    README 설계(웹: 계층형 멀티에이전트 아키텍처)상 파마프렌치 팩터 조회는 매크로 에이전트
+    안에서 처리한다. src/factors/fama_french.py의 handle_query()는 CLI용 input() 기반
+    y/n 확인을 전제로 해 웹 요청-응답 흐름에 맞지 않으므로, 여기서는 확인 없이 바로 조회해
+    답한다(사용자가 이미 명시적으로 질문했으므로 재확인 불필요 — 다른 도메인 에이전트와
+    동일하게 즉시 응답).
+    """
+    try:
+        rows = fetch_factor_fn(
+            intent["dataset"], intent["frequency"],
+            start=intent.get("start"), end=intent.get("end"),
+            latest_only=intent.get("latest_only", True),
+        )
+    except Exception as exc:  # noqa: BLE001 — 접속 실패/데이터 없음을 에러로만 알리고 정상 종료
+        return {
+            "available": False,
+            "question": question,
+            "as_of": None,
+            "overall": None,
+            "spread": {"value": None, "regime": None},
+            "cnn": {"value": None, "band": None},
+            "vix": {"value": None, "band": None},
+            "created_at": None,
+            "factor": {"dataset": intent.get("dataset"), "frequency": intent.get("frequency"), "rows": None},
+            "explanation": "파마프렌치 팩터 조회 실패",
+            "error": str(exc),
+        }
+    return {
+        "available": True,
+        "question": question,
+        "as_of": None,
+        "overall": None,
+        "spread": {"value": None, "regime": None},
+        "cnn": {"value": None, "band": None},
+        "vix": {"value": None, "band": None},
+        "created_at": None,
+        "factor": {"dataset": intent["dataset"], "frequency": intent["frequency"], "rows": rows},
+        "explanation": (
+            f"Ken French Data Library에서 {intent['dataset']}({intent['frequency']}) "
+            "팩터 데이터를 조회했습니다(캐시 없음, 매 요청마다 새로 조회)."
+        ),
+        "error": None,
+    }
+
+
 def answer_macro_question(
     question: str,
     conn,
     execute_sql_fn: Callable | None = None,
+    classify_factor_fn: Callable | None = None,
+    fetch_factor_fn: Callable | None = None,
 ) -> dict:
     """매크로 질문에 macro_signal 테이블의 최신 판정으로 답한다.
 
-    판정을 새로 계산하지 않는다 — 이미 저장된 최신 1행을 읽기만 한다(모듈 docstring
-    참고). conn은 connect_readonly() 읽기전용 연결을 넘겨야 하며(다른 데이터 에이전트
-    관례와 동일), SQL은 execute_sql_fn(기본=execute_sql, HA-1 실행기)을 경유한다.
+    질문이 파마프렌치(Fama-French) 팩터 조회면(classify_factor_fn이 판단) macro_signal을
+    전혀 거치지 않고 Ken French Data Library에서 직접 조회해 답한다(README 계층형 아키텍처
+    설계상 매크로 에이전트의 세 번째 데이터 소스 — 환율·해외지수·파마프렌치 팩터 중 하나).
+
+    팩터 질문이 아니면 기존대로 판정을 새로 계산하지 않는다 — 이미 저장된 최신 1행을
+    읽기만 한다(모듈 docstring 참고). conn은 connect_readonly() 읽기전용 연결을 넘겨야 하며
+    (다른 데이터 에이전트 관례와 동일), SQL은 execute_sql_fn(기본=execute_sql, HA-1 실행기)을
+    경유한다.
 
     macro_signal이 비어 있으면(파이프라인이 아직 한 번도 안 돈 경우) 예외를 던지지 않고
     available=False인 명시적 상태를 반환한다.
@@ -107,6 +162,12 @@ def answer_macro_question(
            그 외(정상 조회 — 신호 있음/빈 테이블 모두 포함)에는 None이다. HA-10(총괄
            에이전트)이 이 함수를 answer_macro_question(question, conn) 형태로 호출한다.
     """
+    classify_factor_fn = classify_factor_fn or classify_factor_intent
+    intent = classify_factor_fn(question)
+    if intent:
+        fetch_factor_fn = fetch_factor_fn or fetch_factor_data
+        return _factor_payload(question, intent, fetch_factor_fn)
+
     execute_sql_fn = execute_sql_fn or execute_sql
     result = execute_sql_fn(_LATEST_SIGNAL_SQL, conn)
     if not result.get("ok"):

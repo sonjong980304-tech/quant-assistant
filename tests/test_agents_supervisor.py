@@ -62,6 +62,20 @@ def test_route_question_fallback_without_llm_detects_macro():
     assert "macro" in routes
 
 
+def test_route_question_fallback_without_llm_detects_fama_french_factor_as_macro():
+    """README 설계상 파마프렌치 팩터 조회는 매크로 에이전트(domain_macro.py) 안에서 처리한다
+    (실사용 버그: "SMB 팩터 최근 값 알려줘"가 엉뚱하게 kr로 라우팅돼 실패하던 것 재현)."""
+    routes = route_question("SMB 팩터 최근 값 알려줘", None)
+    assert "macro" in routes
+
+
+def test_route_prompt_mentions_fama_french_for_llm_routing():
+    """LLM 우선 라우팅 경로도 인식하도록 _route_prompt의 macro 설명에 파마프렌치가 포함돼야
+    한다 — "매크로 신호/금리차"로만 설명되면 LLM도 이 도메인을 놓친다."""
+    prompt = supervisor_mod._route_prompt("아무 질문")
+    assert "파마프렌치" in prompt or "Fama-French" in prompt or "fama" in prompt.lower()
+
+
 def test_route_question_fallback_defaults_to_kr():
     """'삼성' 키워드가 실제로 kr에 매치되어 감지된다(폴백이 아니라 정상 키워드 매치)."""
     assert route_question("삼성전자 PER 알려줘", None) == ["kr"]
