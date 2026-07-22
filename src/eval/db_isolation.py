@@ -1,8 +1,7 @@
 """평가/factcheck용 원본 DB 격리 사본 생성·정리 유틸리티.
 
-hierarchical_runner.py와 factcheck/backtest.py가 공용으로 쓴다(둘 다 "원본 DB를
-건드리지 않고 사본에서만 평가를 실행"해야 하는 요구가 같다). 원래 legacy 평가
-러너(runner.py, 삭제됨)에 있던 것을 분리했다.
+factcheck/backtest.py가 쓴다("원본 DB를 건드리지 않고 사본에서만 평가를 실행"해야
+하는 요구). 원래 legacy 평가 러너(runner.py, 삭제됨)에 있던 것을 분리했다.
 """
 from __future__ import annotations
 

@@ -535,7 +535,7 @@ quant-assistant/
 │   ├── ingest/                # dart, krx, naver_prices, fnguide_metrics, kr_*, macro_* 등
 │   ├── factors/fama_french.py # 파마프렌치 팩터 온디맨드 조회
 │   ├── wiki/store.py          # 질의 기록 로그
-│   ├── eval/                  # factcheck(실측 재검증) · hierarchical_runner · db_isolation
+│   ├── eval/                  # factcheck(실측 재검증) · db_isolation
 │   └── legacy/pipeline.py     # 예전 6노드 파이프라인 (이관 보관, cli.py가 사용)
 ├── web/
 │   ├── app.py                 # FastAPI (신규 계층형 구조 사용)
@@ -841,10 +841,8 @@ OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
 - **factcheck** (`src/eval/factcheck/`, `scripts/eval_factcheck.py`): 무작위로 뽑은
   실제 종목·질문에 대해 시스템(`run_hierarchical`) 답을 낸 뒤, DART 원문·네이버 실시간
   시세·DB 재계산·vision 판정 등 **그때그때 다시 조회한 값**과 대조합니다. 재무제표/
-  실시간 주가/차트/스크리닝/백테스트 5개 도메인을 커버합니다.
-- **`hierarchical_runner.py`**: 신규 계층형 그래프(`run_hierarchical`)의 답을 LLM judge로
-  판정하는 재사용 가능한 로직(응답시간·LLM 호출횟수 측정 포함)만 남아있습니다. 평가는
-  항상 원본 DB의 격리 사본(`db_isolation.py`)에서 실행됩니다(원본 보호).
+  실시간 주가/차트/스크리닝/백테스트 5개 도메인을 커버합니다. 평가는 항상 원본 DB의
+  격리 사본(`db_isolation.py`)에서 실행됩니다(원본 보호).
 
 </details>
 
