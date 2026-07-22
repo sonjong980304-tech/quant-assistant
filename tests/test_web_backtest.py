@@ -62,7 +62,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(bt_da, "build_callbacks",
                         lambda conn: ((lambda d: [{}]), (lambda code, d: None)))
     monkeypatch.setattr(bt_da, "build_benchmark_fn",
-                        lambda dates, mfn, pfn: None)
+                        lambda dates, mfn, pfn, code="KOSPI": None)
     monkeypatch.setattr(bt_engine, "save_backtest_run", lambda *a, **k: None)
 
 
@@ -70,7 +70,7 @@ def test_momentum_is_aliased_to_return_12m(monkeypatch):
     _patch_common(monkeypatch)
     captured = {}
 
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         captured["criteria"] = params["criteria"]
         return {"dates": [], "navs": [], "benchmark": None,
                 "performance": {}, "holdings": []}
@@ -109,12 +109,12 @@ def _patch_trailing(monkeypatch, maxd, full):
     monkeypatch.setattr(bt_da, "rebalance_dates", lambda sy, ey, rb: list(full))
     monkeypatch.setattr(bt_da, "build_callbacks",
                         lambda conn: ((lambda d: [{}]), (lambda code, d: None)))
-    monkeypatch.setattr(bt_da, "build_benchmark_fn", lambda dates, mfn, pfn: None)
+    monkeypatch.setattr(bt_da, "build_benchmark_fn", lambda dates, mfn, pfn, code="KOSPI": None)
     monkeypatch.setattr(bt_engine, "save_backtest_run", lambda *a, **k: None)
 
 
 def _capture_dates(monkeypatch, captured):
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         captured["dates"] = list(dates)
         return {"dates": list(dates), "navs": [1.0] * len(dates), "benchmark": None,
                 "performance": {}, "holdings": []}
@@ -166,7 +166,7 @@ def test_past_end_year_does_not_extend(monkeypatch):
 def test_unknown_metric_returns_400_not_500(monkeypatch):
     _patch_common(monkeypatch)
 
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         # selection._validate_criteria_keys 가 실제로 던지는 예외를 그대로 흉내낸다.
         raise ValueError("존재하지 않는 필드: ['pcr']. 사용 가능한 필드: ['gp_a', 'return_12m']")
 
@@ -185,7 +185,7 @@ def test_domain_default_preserves_kr_pipeline(monkeypatch):
     _patch_common(monkeypatch)
     captured = {}
 
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         captured["ran"] = True
         return {"dates": [], "navs": [], "benchmark": None, "performance": {}, "holdings": []}
 
@@ -256,7 +256,7 @@ def test_winsorize_z_flows_into_engine_params(monkeypatch):
     _patch_common(monkeypatch)
     captured = {}
 
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         captured["winsorize_z"] = params.get("winsorize_z")
         return {"dates": [], "navs": [], "benchmark": None, "performance": {}, "holdings": []}
 
@@ -281,7 +281,7 @@ def test_winsorize_pct_flows_into_engine_params(monkeypatch):
     _patch_common(monkeypatch)
     captured = {}
 
-    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None):
+    def fake_run_backtest(dates, mfn, pfn, params, benchmark_fn=None, **kwargs):
         captured["winsorize_pct"] = params.get("winsorize_pct")
         return {"dates": [], "navs": [], "benchmark": None, "performance": {}, "holdings": []}
 

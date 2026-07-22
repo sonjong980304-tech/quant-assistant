@@ -645,15 +645,18 @@ async function runBacktest(){
   finally{btn.disabled=false;}
 }
 function renderBacktest(d, domain='kr', outlierLabel){
-  // 벤치마크 라벨: 시장 동일가중 유니버스.
-  const benchLabel='시장(동일가중)';
+  // 벤치마크 라벨: 실제 코스피·코스닥 지수(build_benchmark_fn, data_access.py) 정규화 값.
+  // 둘은 완전히 독립된 비교선이다(선택한 markets 필터와 무관하게 항상 둘 다 계산됨).
+  const benchLabel='KOSPI 지수', bench2Label='KOSDAQ 지수';
   const p=d.performance;
   const stat=(n,l)=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`;
   const cards=stat((p.cagr??'-')+'%','CAGR')+stat((p.total_return??'-')+'%','누적수익')
     +stat((p.mdd??'-')+'%','MDD')+stat(p.sharpe??'-','샤프')+stat(p.sortino??'-','소르티노')
     +stat((p.win_rate??'-')+'%','승률')+stat((p.volatility??'-')+'%','변동성')+stat((p.avg_turnover??'-')+'%','평균회전율')
     +(p.benchmark_return!=null?stat((p.benchmark_return)+'%',benchLabel)
-      +stat((p.excess_return>=0?'+':'')+p.excess_return+'%','초과수익')+stat(p.beta??'-','베타'):'');
+      +stat((p.excess_return>=0?'+':'')+p.excess_return+'%','초과수익(vs '+benchLabel+')')+stat(p.beta??'-','베타'):'')
+    +(p.benchmark2_return!=null?stat((p.benchmark2_return)+'%',bench2Label)
+      +stat((p.excess_return2>=0?'+':'')+p.excess_return2+'%','초과수익(vs '+bench2Label+')'):'');
   const hist=(d.holdings||[]).map((h,i)=>{
     const prevNames=i>0?(d.holdings[i-1].names||[]):[];
     const prevSet=new Set(prevNames), curSet=new Set(h.names||[]);
@@ -677,22 +680,30 @@ function renderBacktest(d, domain='kr', outlierLabel){
       <div class="chips" style="margin-top:6px">${chips}</div></div>`;
   }).join('');
   const outlierTag=outlierLabel?` <span class="meta">· 이상치 처리: ${esc(outlierLabel)}</span>`:'';
+  const emptyWarn=(d.empty_periods&&d.empty_periods.length)
+    ?`<div class="card err">⚠ ${d.empty_periods.length}개 리밸런싱 시점에서 선택한 지표 조건에 맞는 종목이 하나도 없어
+      그 구간은 보유 없이 건너뛰었습니다(업종·지표 조합에 따라 재무제표에 해당 지표 자체가 없을 수 있습니다 —
+      예: 은행·증권업은 유동비율·매출총이익 계열 지표가 결측). 해당 시점: ${d.empty_periods.slice(0,5).map(esc).join(', ')}${d.empty_periods.length>5?' 외':''}</div>`
+    :'';
   document.getElementById('bt_result').innerHTML=`
+    ${emptyWarn}
     <div class="card"><b>성과지표</b>${outlierTag}<div class="stat-grid" style="margin-top:10px">${cards}</div></div>
-    <div class="card"><b>수익 곡선</b>${navChart(d.dates,d.navs,d.benchmark,benchLabel)}</div>
+    <div class="card"><b>수익 곡선</b>${navChart(d.dates,d.navs,d.benchmark,benchLabel,d.benchmark2,bench2Label)}</div>
     <div class="card"><b>분기별 보유종목 · 교체 내역</b> <span class="meta">▲ 신규편입 · ＋편입/－편출</span>
       <div style="margin-top:8px">${hist||'<span class="meta">보유 종목 없음</span>'}</div></div>`;
 }
-function navChart(dates,navs,bench,benchLabel='시장(동일가중)'){
+function navChart(dates,navs,bench,benchLabel='KOSPI 지수',bench2,bench2Label='KOSDAQ 지수'){
   if(!navs||navs.length<2) return '<div class="meta">데이터 부족</div>';
   const w=860,h=240,pad=44;
   const hasB=bench&&bench.length===navs.length&&bench.every(v=>v!=null);
-  const all=hasB?navs.concat(bench):navs;
+  const hasB2=bench2&&bench2.length===navs.length&&bench2.every(v=>v!=null);
+  const all=navs.concat(hasB?bench:[],hasB2?bench2:[]);
   const min=Math.min(...all),max=Math.max(...all);
   const X=i=>pad+i*(w-2*pad)/(navs.length-1);
   const Y=v=>h-pad-(v-min)/((max-min)||1)*(h-2*pad);
   const path=navs.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
   const bpath=hasB?bench.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' '):'';
+  const b2path=hasB2?bench2.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' '):'';
   const base=Y(navs[0]);
   // y축 눈금: NAV를 수익률(%)로 환산해 표시(NAV=1.0을 0%로, (nav-1)*100). 값 범위[min,max]를
   // 3등분한 지점(최저/중간/최고)에 라벨을 찍는다 — 기존 Y() 좌표변환을 그대로 재사용.
@@ -716,9 +727,10 @@ function navChart(dates,navs,bench,benchLabel='시장(동일가중)'){
     ${yLabels}
     ${xLabels}
     ${hasB?`<path d="${bpath}" fill="none" stroke="#8b93a7" stroke-width="1.5" stroke-dasharray="5"/>`:''}
+    ${hasB2?`<path d="${b2path}" fill="none" stroke="#e08a3c" stroke-width="1.5" stroke-dasharray="2"/>`:''}
     <path d="${path}" fill="none" stroke="#5b8cff" stroke-width="2"/>
     <text x="${pad}" y="22" fill="#8b93a7" font-size="12">${esc(dates[0])} → ${esc(dates[dates.length-1])}  ·  최종 NAV ${navs[navs.length-1].toFixed(2)} (×${(navs[navs.length-1]/navs[0]).toFixed(2)})</text>
-    ${hasB?`<text x="${pad}" y="38" fill="#8b93a7" font-size="11">— 전략(파랑)   ┄ ${esc(benchLabel)}(회색)</text>`:''}
+    ${(hasB||hasB2)?`<text x="${pad}" y="38" fill="#8b93a7" font-size="11">— 전략(파랑)${hasB?`   ┄ ${esc(benchLabel)}(회색)`:''}${hasB2?`   ┄ ${esc(bench2Label)}(주황)`:''}</text>`:''}
   </svg>`;
 }
 

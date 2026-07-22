@@ -568,22 +568,24 @@ def build_callbacks(conn):
     return metrics_fn, price_fn
 
 
-def build_benchmark_fn(dates: list[str], metrics_fn, price_fn):
-    """실제 코스피 지수 벤치마크(레벨 시계열) 생성.
+def build_benchmark_fn(dates: list[str], metrics_fn, price_fn, code: str = "KOSPI"):
+    """실제 지수(기본 코스피) 벤치마크(레벨 시계열) 생성.
 
-    prices 테이블의 stock_code='KOSPI'(네이버 fchart 지수 심볼 — 개별종목과 동일한 방식으로
-    수집, scripts/backfill_kospi_index.py 참고) 종가를 그대로 정규화해 쓴다. 예전엔 그 시점
-    유니버스를 동일가중 보유했을 때의 가상 NAV로 근사했으나, 실제 코스피 지수 자체와 직접
-    비교하도록 바꿨다. 첫 시점 종가를 1.0으로 놓고, 이후 각 시점 종가를 첫 시점 종가로 나눈
-    비율을 그대로 레벨로 쓴다(price_fn은 기존과 동일하게 date<=asof 최근 종가 원칙을 지켜
-    look-ahead가 없다). metrics_fn은 예전 동일가중 계산에 쓰였으나 지금은 쓰지 않는다 —
-    다른 benchmark_fn_factory 구현과 시그니처를 맞추려고 그대로 남겨둔다.
+    prices 테이블의 stock_code=code(네이버 fchart 지수 심볼 — 개별종목과 동일한 방식으로
+    수집, scripts/backfill_kospi_index.py·backfill_kosdaq_index.py 참고) 종가를 그대로
+    정규화해 쓴다. 예전엔 그 시점 유니버스를 동일가중 보유했을 때의 가상 NAV로 근사했으나,
+    실제 지수 자체와 직접 비교하도록 바꿨다. 첫 시점 종가를 1.0으로 놓고, 이후 각 시점 종가를
+    첫 시점 종가로 나눈 비율을 그대로 레벨로 쓴다(price_fn은 기존과 동일하게 date<=asof 최근
+    종가 원칙을 지켜 look-ahead가 없다). code="KOSDAQ"을 주면 코스피 대신 코스닥 지수로
+    같은 방식으로 계산한다(코스피·코스닥을 각각 별도 비교선으로 보여주기 위함). metrics_fn은
+    예전 동일가중 계산에 쓰였으나 지금은 쓰지 않는다 — 다른 benchmark_fn_factory 구현과
+    시그니처를 맞추려고 그대로 남겨둔다.
     """
-    base = price_fn(dates[0], "KOSPI")
+    base = price_fn(dates[0], code)
     if not base:
         return lambda d: None
     levels = {}
     for d in dates:
-        close = price_fn(d, "KOSPI")
+        close = price_fn(d, code)
         levels[d] = (close / base) if close else None
     return lambda d: levels.get(d)

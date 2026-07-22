@@ -12,7 +12,7 @@ import numpy as np
 
 
 def performance(navs: list[float], periods_per_year: float, benchmark: list[float] | None = None,
-                rf: float = 0.0) -> dict:
+                rf: float = 0.0, benchmark2: list[float] | None = None) -> dict:
     nav = np.asarray(navs, dtype=float)
     if len(nav) < 2:
         return {"error": "데이터 부족(시점 2개 미만)"}
@@ -59,4 +59,12 @@ def performance(navs: list[float], periods_per_year: float, benchmark: list[floa
             # 분모를 공분산과 같은 ddof=1로 맞춘다.
             beta = float(np.cov(rets, brets)[0, 1] / brets.var(ddof=1))
             out["beta"] = round(beta, 3)
+
+    if benchmark2 is not None and len(benchmark2) == len(nav):
+        # 두 번째 비교 지수(예: 코스닥 — 코스피와 독립적으로 별도 표시). beta는 굳이 계산하지
+        # 않는다(주 벤치마크가 이미 있고, 두 번째는 "따로 보여주는 비교선" 용도이기 때문).
+        b2 = np.asarray(benchmark2, dtype=float)
+        b2_total = b2[-1] / b2[0] - 1
+        out["benchmark2_return"] = round(b2_total * 100, 2)
+        out["excess_return2"] = round((total_return - b2_total) * 100, 2)
     return out

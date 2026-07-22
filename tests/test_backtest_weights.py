@@ -172,6 +172,68 @@ def test_holdings_log_records_period_return_each_rebalance():
     assert holdings[1]["period_return"] == pytest.approx(0.15)
 
 
+def test_engine_records_empty_periods_when_criterion_all_none():
+    """은행/증권처럼 선택한 지표가 전 종목 None이면 매 리밸런싱마다 0개 선정되는데,
+    이걸 조용히 NAV 고정으로만 넘기지 않고 empty_periods에 남겨 원인을 알 수 있게 한다."""
+    dates = ["2026-01-31", "2026-02-28", "2026-03-31"]
+    rows = [
+        {"stock_code": "AAA", "sector": "은행", "market": "KOSPI", "gp_a": None},
+        {"stock_code": "BBB", "sector": "은행", "market": "KOSPI", "gp_a": None},
+    ]
+    res = run_backtest(
+        dates, metrics_fn=lambda d: rows, price_fn=lambda d, c: 100.0,
+        params={"criteria": [{"key": "gp_a", "direction": "high", "weight": 1.0}], "n": 2,
+                "fee_rate": 0.0, "tax_rate": 0.0, "slippage_rate": 0.0},
+    )
+    assert res["navs"] == [1.0, 1.0, 1.0]
+    assert res["empty_periods"] == ["2026-01-31", "2026-02-28"]
+
+
+def test_engine_tracks_second_benchmark_alongside_first_when_no_stock_selected():
+    """종목이 하나도 안 뽑히는 구간(편입 종목 없음 분기)에서도 benchmark_fn2가 매 시점 기록된다."""
+    kospi_levels = {"2026-01-31": 1.0, "2026-02-28": 1.1, "2026-03-31": 1.2}
+    kosdaq_levels = {"2026-01-31": 1.0, "2026-02-28": 0.9, "2026-03-31": 0.8}
+    res = run_backtest(
+        _DATES, metrics_fn=lambda d: [], price_fn=_price_fn,
+        params={"criteria": [{"key": "per", "direction": "low", "weight": 1.0}], "n": 2,
+                "fee_rate": 0.0, "tax_rate": 0.0, "slippage_rate": 0.0},
+        benchmark_fn=lambda d: kospi_levels[d],
+        benchmark_fn2=lambda d: kosdaq_levels[d],
+    )
+    assert res["benchmark"] == [1.0, 1.1, 1.2]
+    assert res["benchmark2"] == [1.0, 0.9, 0.8]
+
+
+def test_engine_tracks_second_benchmark_alongside_first_when_stocks_are_selected():
+    """종목이 정상적으로 편입되는 구간(정상 리밸런싱 분기)에서도 benchmark_fn2가 매 시점 기록돼야
+    한다 — 편입 종목 없음 분기만 고쳐두고 이 정상 분기를 빠뜨리는 회귀를 잡기 위한 테스트."""
+    dates = ["2026-01-31", "2026-02-28", "2026-03-31"]
+    rows = [
+        {"stock_code": "AAA", "sector": "화학", "market": "KOSPI", "per": 5.0},
+        {"stock_code": "BBB", "sector": "화학", "market": "KOSPI", "per": 9.0},
+    ]
+    kospi_levels = {"2026-01-31": 1.0, "2026-02-28": 1.1, "2026-03-31": 1.2}
+    kosdaq_levels = {"2026-01-31": 1.0, "2026-02-28": 0.9, "2026-03-31": 0.8}
+    res = run_backtest(
+        dates, metrics_fn=lambda d: rows, price_fn=_price_fn,
+        params={"criteria": [{"key": "per", "direction": "low", "weight": 1.0}], "n": 2,
+                "fee_rate": 0.0, "tax_rate": 0.0, "slippage_rate": 0.0},
+        benchmark_fn=lambda d: kospi_levels[d],
+        benchmark_fn2=lambda d: kosdaq_levels[d],
+    )
+    assert res["benchmark"] == [1.0, 1.1, 1.2]
+    assert res["benchmark2"] == [1.0, 0.9, 0.8]
+
+
+def test_weights_mode_always_returns_empty_periods_key():
+    """weights 모드는 select_stocks를 안 쓰므로 항상 빈 리스트지만, 프런트가 항상 안전하게
+    d.empty_periods를 읽을 수 있도록 키 자체는 criteria 모드와 동일하게 존재해야 한다."""
+    res = run_backtest(_DATES, metrics_fn=lambda d: [], price_fn=_price_fn,
+                       params={"fee_rate": 0.0, "tax_rate": 0.0, "slippage_rate": 0.0},
+                       weights={"AAA": 0.6, "BBB": 0.4})
+    assert res["empty_periods"] == []
+
+
 # --------------------------------------------------------------------------
 # 차트 PNG
 # --------------------------------------------------------------------------

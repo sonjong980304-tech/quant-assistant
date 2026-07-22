@@ -473,3 +473,17 @@ def test_build_benchmark_fn_returns_none_when_kospi_data_missing(tmp_path):
     bench_fn = build_benchmark_fn(["2024-01-31", "2024-04-30"], metrics_fn=None, price_fn=_price_fn(conn))
     assert bench_fn("2024-01-31") is None
     assert bench_fn("2024-04-30") is None
+
+
+def test_build_benchmark_fn_code_param_selects_kosdaq_independently_of_kospi(tmp_path):
+    """code="KOSDAQ"을 주면 KOSPI가 아니라 KOSDAQ 종가로 정규화한다(코스피·코스닥 별도 비교선).
+
+    기본값은 code="KOSPI"라 기존 호출부(인자 3개만 넘기던 곳)는 그대로 동작해야 한다(하위호환)."""
+    conn = _conn(tmp_path)
+    _seed_prices(conn, "KOSPI", [("2024-01-31", 2500.0), ("2024-04-30", 2750.0)])
+    _seed_prices(conn, "KOSDAQ", [("2024-01-31", 800.0), ("2024-04-30", 600.0)])
+    dates = ["2024-01-31", "2024-04-30"]
+    kospi_fn = build_benchmark_fn(dates, metrics_fn=None, price_fn=_price_fn(conn))
+    kosdaq_fn = build_benchmark_fn(dates, metrics_fn=None, price_fn=_price_fn(conn), code="KOSDAQ")
+    assert kospi_fn("2024-04-30") == pytest.approx(1.1)
+    assert kosdaq_fn("2024-04-30") == pytest.approx(0.75)

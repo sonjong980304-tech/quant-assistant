@@ -790,9 +790,11 @@ def api_backtest(req: BacktestReq):
             dates = dates + [maxd]
         if len(dates) < 2:
             raise HTTPException(400, "선택 기간에 데이터가 부족합니다(주가 시계열 범위 확인).")
-        # 엔진 콜백/벤치마크(company/prices/financials 어댑터, 동일가중 유니버스 벤치마크).
+        # 엔진 콜백/벤치마크(company/prices/financials 어댑터). 코스피·코스닥을 각각 독립된
+        # 비교선으로 보여준다(사용자가 고른 markets 필터와 무관하게 항상 둘 다 계산).
         mfn, pfn = build_callbacks(conn)
-        bench_fn = build_benchmark_fn(dates, mfn, pfn)
+        bench_fn = build_benchmark_fn(dates, mfn, pfn, code="KOSPI")
+        bench_fn2 = build_benchmark_fn(dates, mfn, pfn, code="KOSDAQ")
         names_sql = "SELECT stock_code,name FROM company"
         params = {
             "n": req.n, "criteria": criteria, "combine": req.combine,
@@ -802,13 +804,15 @@ def api_backtest(req: BacktestReq):
             "tax_rate": req.tax_rate if req.tax_rate is not None else CONFIG.tax_rate,
             "slippage_rate": req.slippage_rate if req.slippage_rate is not None else CONFIG.slippage_rate,
         }
-        res = run_backtest(dates, mfn, pfn, params, benchmark_fn=bench_fn)
+        res = run_backtest(dates, mfn, pfn, params, benchmark_fn=bench_fn, benchmark_fn2=bench_fn2)
         save_backtest_run(conn, req.name, params, res["performance"], req.start_year, req.end_year)
         names = {r["stock_code"]: r["name"] for r in conn.execute(names_sql)}
         holdings = [{"date": h["date"], "names": [names.get(c, c) for c in h["codes"]]}
                     for h in res["holdings"]]
         return {"dates": res["dates"], "navs": res["navs"], "benchmark": res.get("benchmark"),
-                "performance": res["performance"], "holdings": holdings}
+                "benchmark2": res.get("benchmark2"),
+                "performance": res["performance"], "holdings": holdings,
+                "empty_periods": res.get("empty_periods", [])}
     except ValueError as e:
         # 존재하지 않는 지표 선택 등 사용자 입력 오류는 500(평문 'Internal Server Error')이 아니라
         # 400(JSON detail)으로 반환한다. 500 평문 본문은 프런트의 r.json() 파싱을 실패시켜

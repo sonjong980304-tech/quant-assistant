@@ -22,6 +22,7 @@ def run_backtest(
     price_fn,              # (date, code) -> close | None
     params: dict,
     benchmark_fn=None,     # (date) -> index level | None
+    benchmark_fn2=None,    # (date) -> index level | None (예: 코스피와 별도로 코스닥 비교선)
     weights: dict | None = None,  # {종목:비중} 외부 비중벡터 입력 모드 (None이면 기존 동작 그대로)
 ) -> dict:
     """포트폴리오 리밸런싱 시뮬레이션.
@@ -30,6 +31,8 @@ def run_backtest(
     - weights={종목:비중}: 외부에서 계산된 비중벡터(예: optimize_weights)로 buy&hold 시뮬레이션.
       engine은 공매도를 표현할 수 없으므로 음수 비중이 오면 조용히 틀린 결과를 내지 않고
       명시적으로 거부(ValueError)한다.
+    - benchmark_fn2: benchmark_fn과 완전히 독립적인 두 번째 비교 지수(코스피·코스닥을 각각
+      따로 보여주기 위함). None이면 기존과 동일하게 무시된다(하위호환).
     """
     combine = params.get("combine", "zscore")
     sectors = params.get("sectors")
@@ -46,7 +49,7 @@ def run_backtest(
 
     if weights is not None:
         return _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn,
-                                      benchmark_fn, rebalance)
+                                      benchmark_fn, rebalance, benchmark_fn2)
 
     n = params.get("n", 20)
     criteria = params["criteria"]
@@ -54,9 +57,11 @@ def run_backtest(
     navs = [1.0]
     out_dates = [rebalance_dates[0]]
     bench = [benchmark_fn(rebalance_dates[0])] if benchmark_fn else None
+    bench2 = [benchmark_fn2(rebalance_dates[0])] if benchmark_fn2 else None
     prev_codes: set[str] = set()
     turnovers: list[float] = []
     holdings_log = []
+    empty_periods: list[str] = []
 
     for i in range(len(rebalance_dates) - 1):
         t, t_next = rebalance_dates[i], rebalance_dates[i + 1]
@@ -67,11 +72,14 @@ def run_backtest(
         codes = [r["stock_code"] for r in selected]
         holdings_log.append({"date": t, "codes": codes})
         if not codes:
+            empty_periods.append(t)  # 선택 조건에 맞는 종목이 하나도 없었던 시점(원인 추적용)
             holdings_log[-1]["period_return"] = 0.0  # 편입 종목 없음 → 구간수익 0
             navs.append(nav)
             out_dates.append(t_next)
             if bench is not None:
                 bench.append(benchmark_fn(t_next))
+            if bench2 is not None:
+                bench2.append(benchmark_fn2(t_next))
             continue
 
         new = set(codes)
@@ -97,23 +105,29 @@ def run_backtest(
         out_dates.append(t_next)
         if bench is not None:
             bench.append(benchmark_fn(t_next))
+        if bench2 is not None:
+            bench2.append(benchmark_fn2(t_next))
         prev_codes = new
 
     ppy = PERIODS_PER_YEAR.get(rebalance, 4)
     bench_clean = bench if (bench and all(b is not None for b in bench)) else None
-    perf = performance(navs, ppy, benchmark=bench_clean)
+    bench2_clean = bench2 if (bench2 and all(b is not None for b in bench2)) else None
+    perf = performance(navs, ppy, benchmark=bench_clean, benchmark2=bench2_clean)
     perf["avg_turnover"] = round(sum(turnovers) / len(turnovers) * 100, 1) if turnovers else 0.0
 
     return {
         "dates": out_dates,
         "navs": navs,
         "benchmark": bench_clean,
+        "benchmark2": bench2_clean,
         "performance": perf,
         "holdings": holdings_log,
+        "empty_periods": empty_periods,
     }
 
 
-def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, benchmark_fn, rebalance):
+def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, benchmark_fn, rebalance,
+                            benchmark_fn2=None):
     """외부 비중벡터로 buy&hold 시뮬레이션. 음수 비중은 거부(공매도 불가)."""
     neg = {k: v for k, v in weights.items() if v is not None and v < 0}
     if neg:
@@ -128,6 +142,7 @@ def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, be
     navs = [1.0]
     out_dates = [rebalance_dates[0]]
     bench = [benchmark_fn(rebalance_dates[0])] if benchmark_fn else None
+    bench2 = [benchmark_fn2(rebalance_dates[0])] if benchmark_fn2 else None
 
     for i in range(len(rebalance_dates) - 1):
         t, t_next = rebalance_dates[i], rebalance_dates[i + 1]
@@ -139,18 +154,23 @@ def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, be
         out_dates.append(t_next)
         if bench is not None:
             bench.append(benchmark_fn(t_next))
+        if bench2 is not None:
+            bench2.append(benchmark_fn2(t_next))
 
     ppy = PERIODS_PER_YEAR.get(rebalance, 4)
     bench_clean = bench if (bench and all(b is not None for b in bench)) else None
-    perf = performance(navs, ppy, benchmark=bench_clean)
+    bench2_clean = bench2 if (bench2 and all(b is not None for b in bench2)) else None
+    perf = performance(navs, ppy, benchmark=bench_clean, benchmark2=bench2_clean)
     perf["avg_turnover"] = 100.0  # 진입 시 1회 전액 매수(이후 buy&hold)
     return {
         "dates": out_dates,
         "navs": navs,
         "benchmark": bench_clean,
+        "benchmark2": bench2_clean,
         "performance": perf,
         "holdings": [{"date": rebalance_dates[0], "codes": codes}],
         "weights": {c: weights[c] / total for c in codes},
+        "empty_periods": [],
     }
 
 
