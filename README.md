@@ -447,6 +447,7 @@ quant-assistant/
 │   ├── version.py            # data_version 유효시점 로직
 │   ├── llm.py                # LLM provider 추상화 (ollama/openai)
 │   ├── sql_exec.py           # 읽기 전용 SQL 안전 실행
+│   ├── data_quality.py       # 가격 이상치 asof-국소 제외(생존편향 재유입 방지)
 │   ├── agents/                    # 신규 계층형 멀티에이전트 (웹이 사용)
 │   │   ├── graph.py               # LangGraph StateGraph 감싸기 (run_hierarchical/run_streaming)
 │   │   ├── supervisor.py          # 라우팅 + 정합성검증 + 재시도(answer_with_verification)
@@ -461,7 +462,7 @@ quant-assistant/
 │   ├── backtest/              # engine, primitives(26개 프리미티브, QVM 포함), pipeline_exec, auditor, selection 등
 │   ├── allweather/            # 올웨더 포트폴리오: data(가격수집)/montecarlo(비중최적화)/
 │   │                          # backtest(walk-forward)/store/notify(텔레그램)/pipeline(오케스트레이션)
-│   ├── ingest/                # dart, krx, naver_prices, fnguide_metrics, kr_*, macro_* 등
+│   ├── ingest/                # dart, naver_prices, fnguide_metrics, kr_*(pykrx 기반 KRX 데이터), macro_* 등
 │   ├── factors/fama_french.py # 파마프렌치 팩터 온디맨드 조회
 │   ├── wiki/store.py          # 질의 기록 로그
 │   └── eval/                  # factcheck(실측 재검증) · db_isolation
