@@ -391,8 +391,8 @@ def verify_answer(
                 # web의 _build_llm_fn은 LLM 호출 실패(quota 소진 등)를 예외가 아니라
                 # 빈 문자열로 전파한다(LLMClient.complete가 예외를 삼키고 text="" 반환).
                 # 빈 응답은 "잘못된 판정"이 아니라 "판정 불가" 신호 — 아래 except와 동일하게
-                # 검증 불가로 처리한다. 안 그러면 LLM 장애 시 멀쩡한 데이터를 두고 3회
-                # 재시도를 전부 소모한 뒤 불확실 응답으로 끝난다(실사용 재현).
+                # 검증 불가로 처리한다. 안 그러면 LLM 장애 시 멀쩡한 데이터를 두고 재시도를
+                # 전부 소모한 뒤 불확실 응답으로 끝난다(실사용 재현).
                 joint_verdict = {
                     "valid": True,
                     "reason": "검증 불가(LLM 응답 없음) — 데이터 존재 확인만으로 통과시킴.",
@@ -420,9 +420,10 @@ def verify_answer(
     # 도메인별로 개별 판정한다 — 복합 도메인 질문(kr+backtest 등)에서 일부 도메인만 검증에
     # 실패해도 그 도메인만 부분 재-dispatch할 수 있도록(answer_with_verification이 이
     # per_domain을 읽어 실패한 도메인만 재시도한다. 이미 통과한 도메인을 매번 다시
-    # 실행하는 낭비를 없앤다). 이 프로젝트 스펙(AC3)이 요구하는 "검증 실패 시 최대 3회
-    # 재시도, 무한루프 없음" 자체는 그대로 지킨다 — 부분/전체 재-dispatch는 그 시도
-    # 횟수 계약과 무관한 구현 디테일이다.
+    # 실행하는 낭비를 없앤다). 이 프로젝트 스펙(AC3)이 요구하는 "검증 실패 시 최대
+    # max_retries회 재시도, 무한루프 없음"(기본값은 2 — 실사용 관찰로 3→2로 줄임,
+    # test_answer_with_verification_default_max_retries_is_two 참고) 자체는 그대로
+    # 지킨다 — 부분/전체 재-dispatch는 그 시도 횟수 계약과 무관한 구현 디테일이다.
     per_domain: dict[str, dict] = {}
     for domain, result in domain_results.items():
         try:

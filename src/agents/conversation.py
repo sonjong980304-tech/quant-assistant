@@ -8,8 +8,8 @@
 (_classify_topic) — 이어지면 Python 가공 단계만 재실행하고, 무관한 새 주제면 신규 턴과
 동일하게 answer_with_verification부터 다시 시작한다.
 
-신규 턴에 exec_fallback(run_free_exec_fallback)을 직접 쓰지 않는 이유: 그건 "정형 검증이 3회
-반복 실패한 뒤의 최후 수단"으로 설계된 것이라(exec_fallback.py 참고), "삼성전자 오늘 종가"처럼
+신규 턴에 exec_fallback(run_free_exec_fallback)을 직접 쓰지 않는 이유: 그건 "정형 검증이
+재시도를 모두 소진한 뒤의 최후 수단"으로 설계된 것이라(exec_fallback.py 참고), "삼성전자 오늘 종가"처럼
 기존 단발 질의 화면(/query)의 정형 도메인 엔진이 안정적으로 answer_with_verification 답하던
 쉬운 질문까지 신규 턴에서 항상 자유 코드 생성부터 거치게 되면(구 default 화면에서는 없었던
 안전장치 우회) LLM이 매번 원본 데이터를 처음부터 즉석으로 다시 계산하다 실패하는 경우가

@@ -1,4 +1,4 @@
-"""자유 실행 폴백 — 정형 도메인 경로가 3회 검증에 실패했을 때 쓰는 마지막 안전망.
+"""자유 실행 폴백 — 정형 도메인 경로가 max_retries회 검증에 실패했을 때 쓰는 마지막 안전망.
 
 answer_with_verification(supervisor.py)의 재시도 루프(정확히 max_retries회, 무한루프 없음)와는
 별개다. 고정 스크리닝 기준(criteria key/direction/top_n)이나 백테스트 파이프라인 연산
@@ -167,7 +167,7 @@ def run_free_exec_fallback(
     execute_python_fn: Callable | None = None,
     max_code_attempts: int = 2,
 ) -> dict:
-    """정형 3회 실패 후 폴백 — LLM이 SQL+Python을 직접 작성해 최종 답을 만든다.
+    """정형 재시도 소진 후 폴백 — LLM이 SQL+Python을 직접 작성해 최종 답을 만든다.
 
     Args:
         question: 원본 사용자 질문(재시도 피드백이 섞이지 않은 순수 원본).

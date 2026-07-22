@@ -60,13 +60,13 @@ class HierarchicalState(TypedDict, total=False):
     routes: List[str]                  # 라우팅된 도메인(["kr"] | ["kr","backtest"] ...)
     domain_results: Dict[str, Any]     # 도메인별 원본 결과(가공 없음)
     conclusion: Optional[str]          # 검증 통과 시 종합결론
-    uncertain: Optional[bool]          # 검증 실패(3회) 시 True
+    uncertain: Optional[bool]          # 검증 실패(재시도 소진, 기본 max_retries=2) 시 True
     attempts: Optional[int]            # 실제 시도 횟수
     reason: Optional[str]              # 불확실 사유(실패 시)
     chart_base64: Optional[str]        # 차트 요청 시 이미지(PNG base64, 접두사 없음), 아니면 None
     chart_title: Optional[str]         # 차트 제목(차트가 있을 때만)
     charts: Optional[List[Dict[str, Any]]]  # 차트가 여러 개(산점도+막대그래프 등)면 전부. 없으면 None
-    used_fallback: Optional[bool]      # 정형 검증 3회 실패 후 자유 코드 생성 폴백으로 답했으면 True
+    used_fallback: Optional[bool]      # 정형 검증 재시도 소진 후 자유 코드 생성 폴백으로 답했으면 True
 
     # 스트리밍 이벤트 누적(노드 완료 시점마다 append). 여러 노드로 확장돼도 누적되도록 reducer 지정.
     events: Annotated[List[Dict[str, Any]], operator.add]
@@ -98,8 +98,9 @@ def supervisor_node(
     """총괄 에이전트를 감싼 LangGraph 노드.
 
     HA-10의 answer_with_verification 을 호출한다 — 라우팅(route_question)·도메인 실행
-    (dispatch_domains)·정합성 검증(verify_answer)·최대 3회 재시도가 이 한 번의 호출 안에서
-    모두 수행된다. 즉 총괄 에이전트의 라우팅·검증 로직이 이 노드로 구현된 것이다(AC5).
+    (dispatch_domains)·정합성 검증(verify_answer)·최대 max_retries(기본 2)회 재시도가 이
+    한 번의 호출 안에서 모두 수행된다. 즉 총괄 에이전트의 라우팅·검증 로직이 이 노드로
+    구현된 것이다(AC5).
 
     conn/llm_fn 은 build_hierarchical_graph 가 클로저로 주입한다. 인자로 안 넘어오면
     state 에서 폴백으로 읽어(직접 노드 등록도 지원) answer_with_verification 에 전달한다.
@@ -171,8 +172,8 @@ def run_streaming(
     큐에서 꺼내 하나씩 yield 한다(HA-12 확장 — 실시간 트리 상세화).
 
     기존에는 `.stream()`이 "노드가 끝난 시점"에만 이벤트를 방출해, route→dispatch(도메인
-    N개)→verify→(최대 3회 재시도)가 전부 끝난 뒤 요약 한 줄만 나오는 문제가 있었다(사실상
-    "완료 후 요약"이지 "실시간"이 아니었다). 그래프 구조(START→supervisor→END, AC5)는 그대로
+    N개)→verify→(최대 max_retries회 재시도)가 전부 끝난 뒤 요약 한 줄만 나오는 문제가
+    있었다(사실상 "완료 후 요약"이지 "실시간"이 아니었다). 그래프 구조(START→supervisor→END, AC5)는 그대로
     유지하되, supervisor_node가 answer_with_verification에 전달하는 on_progress 콜백이
     호출될 때마다(라우팅 확정/도메인별 조회 시작·완료/검증 시도별 결과) 즉시 큐에 넣고,
     이 제너레이터가 그 큐를 실시간으로 소비한다 — 그래프 실행(worker 스레드)과 이벤트 소비
