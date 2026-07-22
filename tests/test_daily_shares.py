@@ -137,6 +137,62 @@ def test_backfill_marketcap_prefers_daily_shares_over_financials(tmp_path):
     assert row["market_cap"] != round(10000 * 2_199_268)
 
 
+# ── _fromdate_for: 증분 갱신(매일 예약 대비) ─────────────────────────────────
+
+def test_fromdate_for_incremental_starts_day_after_last_covered_date(tmp_path):
+    """daily_shares 에 이미 데이터가 있으면 그 다음날부터만(전체 재수집 아님)."""
+    from scripts.backfill_shares_daily import _fromdate_for
+
+    conn = _conn(tmp_path)
+    upsert_daily_shares(conn, "134380", [
+        {"date": "2026-07-21", "shares_outstanding": 21_992_680},
+    ])
+    conn.commit()
+    assert _fromdate_for(conn, "134380") == "20260722"
+
+
+def test_fromdate_for_falls_back_to_price_min_date_without_daily_shares(tmp_path):
+    """daily_shares 가 아예 없는 종목(최초 백필)은 기존대로 prices 최소 date부터."""
+    from scripts.backfill_shares_daily import _fromdate_for
+
+    conn = _conn(tmp_path)
+    conn.execute(
+        "INSERT INTO prices(stock_code, date, close, market_cap) VALUES ('134380','2020-03-02',100,NULL)"
+    )
+    conn.commit()
+    assert _fromdate_for(conn, "134380") == "20200302"
+
+
+def test_fromdate_for_falls_back_to_start_date_without_prices_or_daily_shares(tmp_path):
+    """prices 도 daily_shares 도 없는 종목(신규상장 등)은 프로젝트 시작일(START_DATE)."""
+    from scripts.backfill_shares_daily import START_DATE, _fromdate_for
+
+    conn = _conn(tmp_path)
+    assert _fromdate_for(conn, "999999") == START_DATE
+
+
+def test_backfill_shares_daily_skips_already_up_to_date_code_without_fetching(tmp_path, monkeypatch):
+    """daily_shares 가 이미 오늘 날짜까지 커버돼 있으면(증분분이 없으면) pykrx 호출 자체를 안 한다."""
+    from scripts.backfill_shares_daily import backfill_shares_daily
+
+    conn = _conn(tmp_path)
+    conn_path = str(tmp_path / "ds.db")
+    upsert_daily_shares(conn, "134380", [{"date": "2026-07-22", "shares_outstanding": 21_992_680}])
+    conn.commit()
+    conn.close()
+
+    def _boom(code, frm, to):
+        raise AssertionError("이미 오늘까지 커버된 종목인데 pykrx를 호출했다")
+
+    monkeypatch.setattr("scripts.backfill_shares_daily.fetch_daily_shares", _boom)
+    report = backfill_shares_daily(
+        db_path=conn_path, codes=["134380"], on=__import__("datetime").date(2026, 7, 22),
+    )
+    assert report["ok"] == 0
+    assert report["failed"] == 0
+    assert report["skipped"] == 1
+
+
 def test_backfill_marketcap_falls_back_to_financials_without_daily(tmp_path):
     """daily_shares 가 없는 종목은 기존대로 financials 기반으로 계산(회귀 보호)."""
     from scripts.backfill_marketcap import backfill_marketcap

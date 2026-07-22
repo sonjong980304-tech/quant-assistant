@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,7 +40,16 @@ def _company_codes(conn) -> list[str]:
 
 
 def _fromdate_for(conn, code: str) -> str:
-    """종목의 prices 최소 date(YYYYMMDD). 없으면 START_DATE."""
+    """증분 갱신 시작일(YYYYMMDD).
+
+    daily_shares 에 이미 데이터가 있으면 그 마지막 날짜 다음날부터만(매일 예약 실행 시
+    전체 재수집을 피해 몇 초 안에 끝나게 하기 위함). 없으면(최초 백필) 기존대로 종목의
+    prices 최소 date, 그마저도 없으면 START_DATE.
+    """
+    row = conn.execute("SELECT MAX(date) AS d FROM daily_shares WHERE stock_code=?", (code,)).fetchone()
+    if row and row["d"]:
+        last = date.fromisoformat(row["d"])
+        return (last + timedelta(days=1)).strftime("%Y%m%d")
     row = conn.execute("SELECT MIN(date) AS d FROM prices WHERE stock_code=?", (code,)).fetchone()
     if row and row["d"]:
         return str(row["d"]).replace("-", "")
@@ -80,6 +89,9 @@ def backfill_shares_daily(
                 skipped += 1
                 continue
             frm = _fromdate_for(conn, code)
+            if frm > todate:  # 증분분 없음(이미 오늘까지 커버) → pykrx 호출 자체를 생략
+                skipped += 1
+                continue
             if dry_run:
                 print(f"[dry-run] {code} fromdate={frm} todate={todate}", flush=True)
                 continue
