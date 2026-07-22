@@ -305,6 +305,14 @@ def _domain_has_data(result: dict) -> bool:
         isinstance(p, dict) and p.get("financial") for p in periods
     ):
         return True
+    # kr 다중지표(multi-metric, domain_kr._resolve_metrics): 한 종목의 여러 지표(예: "PER PBR
+    # PSR")를 조회하면 최상위 financial은 None이고 실제 데이터는 metrics 리스트에 지표별로
+    # 담긴다(periods/entities와 동일 관례). 하나라도 financial이 있으면 데이터 있음으로 본다.
+    metrics = result.get("metrics")
+    if isinstance(metrics, list) and any(
+        isinstance(m, dict) and m.get("financial") for m in metrics
+    ):
+        return True
     # macro: available=True.
     if result.get("available"):
         return True

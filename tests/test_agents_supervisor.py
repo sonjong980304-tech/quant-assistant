@@ -1520,6 +1520,36 @@ def test_domain_has_data_returns_false_when_all_periods_empty():
     assert supervisor_mod._domain_has_data(kr_result) is False
 
 
+# ── kr 다중지표(multi-metric) 결과의 데이터 존재 판정 ──────────────────────────────
+# "현대차 PER PBR PSR"처럼 한 종목의 여러 지표를 조회하면 최상위 financial은 None이고
+# 실제 데이터는 metrics 리스트에 지표별로 담긴다(다중분기/다중종목과 동일 관례).
+# _domain_has_data가 이 구조도 인식해야 verify_answer가 정상 진행한다.
+
+def test_domain_has_data_recognizes_multi_metric_kr_result():
+    kr_result = {
+        "stock_code": "005380", "question": "...", "intent": "financial",
+        "financial": None, "price": None,
+        "metrics": [
+            {"metric": "per", "financial": {"value": 12.5}, "errors": []},
+            {"metric": "pbr", "financial": {"value": 1.8}, "errors": []},
+        ],
+        "errors": [],
+    }
+    assert supervisor_mod._domain_has_data(kr_result) is True
+
+
+def test_domain_has_data_returns_false_when_all_metrics_empty():
+    kr_result = {
+        "stock_code": "005380", "question": "...", "intent": "financial",
+        "financial": None, "price": None,
+        "metrics": [
+            {"metric": "per", "financial": None, "errors": ["재무데이터 조회 실패"]},
+        ],
+        "errors": [],
+    }
+    assert supervisor_mod._domain_has_data(kr_result) is False
+
+
 # ── 복합 도메인(kr+backtest 등) 검증 — 도메인 하나가 전체 질문을 혼자 못 채운다는
 #    이유만으로 부당하게 실패 처리되지 않아야 한다 ────────────────────────────────
 # 실서버 재현 버그: "SK하이닉스 최근 10년 골든크로스 전략 수익률과 그래프"가 kr+backtest

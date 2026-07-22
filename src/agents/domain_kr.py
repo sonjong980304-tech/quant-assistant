@@ -1469,6 +1469,93 @@ def _extract_metric(question: str) -> str | None:
     return None
 
 
+def _extract_metrics(question: str) -> list[str]:
+    """질문에서 언급된 재무 지표를 모두 인식해 질문에 등장한 순서대로 반환한다.
+
+    _extract_metric(단수형)은 설계상 첫 매치 하나만 반환한다 — "현대차 PER PBR PSR"처럼
+    한 질문에 지표를 여러 개 물으면 PER 외에는 통째로 누락되던 실서버 재현 버그의 원인이다
+    (지표는 이미 metrics 테이블에 다 저장돼 있어 조회 자체는 가능한데, 추출 단계가 하나만
+    뽑아 나머지를 조회조차 안 했다).
+
+    _extract_metric과 동일한 별칭 사전(_COMPUTED_KO_ALIASES/METRIC_SOURCE_MAP/
+    _METRIC_KO_ALIASES)을 쓰되, 첫 매치에서 멈추지 않고 전부 스캔한다. 다만 "매출성장"이
+    "매출"을 부분문자열로 포함하는 것처럼 짧은 별칭이 긴 별칭 안에 우연히 포함된 경우
+    이중 인식되면 안 되므로, 별칭을 길이 내림차순으로 먼저 매치시켜 그 구간을 점유하고
+    (그리디 최장일치), 이미 점유된 구간과 겹치는 짧은 별칭은 건너뛴다 — _extract_metric의
+    tier 우선순위(긴 것 먼저)와 동일한 원칙을 다중 매치 스캔 방식으로 구현한 것이다.
+    """
+    q = question.lower()
+    candidates: list[tuple[str, str]] = [
+        (ko, _COMPUTED_KO_ALIASES[ko]) for ko in _COMPUTED_METRIC_ORDER
+    ]
+    candidates += [(key, key) for key in METRIC_SOURCE_MAP]
+    candidates += list(_METRIC_KO_ALIASES.items())
+    candidates.sort(key=lambda c: len(c[0]), reverse=True)
+
+    consumed = [False] * len(q)
+    hits: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for alias, key in candidates:
+        if not alias or key in seen:
+            continue
+        start = q.find(alias)
+        if start == -1:
+            continue
+        end = start + len(alias)
+        if any(consumed[start:end]):
+            continue
+        for i in range(start, end):
+            consumed[i] = True
+        hits.append((start, key))
+        seen.add(key)
+    hits.sort(key=lambda t: t[0])
+    return [key for _, key in hits]
+
+
+def _resolve_metrics(
+    resolve_metric_fn: Callable,
+    conn,
+    stock_code: str,
+    metrics: list[str],
+    period: dict | None,
+    llm_fn: Callable[[str], str] | None,
+    computed_metric_fn: Callable,
+    execute_sql_fn: Callable,
+) -> list[dict]:
+    """한 종목에 대해 여러 재무지표를 각각 조회해 지표별 결과 리스트로 담는다.
+
+    반환 원소: {"metric": <지표키>, "financial": <조회 결과 or None>, "errors": [...]}.
+    _resolve_metric_over_periods(다중 기간)와 동일한 '리스트-of-딕셔너리' 관례를 따른다.
+    지표마다 계산전용 여부(_COMPUTED_ONLY_FIELDS)에 따라 올바른 경로를 고른다 — 단일지표
+    경로(answer_kr_question의 else 분기)와 동일한 분기 로직이다. period는 모든 지표에
+    동일하게 적용된다(호출부가 다중 기간일 때는 이 경로로 오지 않는다 — 다중기간 x
+    다중지표 조합은 아직 요청된 적 없어 범위 밖).
+    """
+    out: list[dict] = []
+    for metric in metrics:
+        entry: dict = {"metric": metric, "financial": None, "errors": []}
+        if metric in _COMPUTED_ONLY_FIELDS:
+            computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
+            financial, err = _call_with_retry(
+                lambda metric=metric: computed_metric_fn(
+                    conn, stock_code, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
+                )
+            )
+        else:
+            financial, err = _call_with_retry(
+                lambda metric=metric: _resolve_metric_with_fallback(
+                    conn, stock_code, metric, period, llm_fn,
+                    resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+                )
+            )
+        if err:
+            entry["errors"].append(f"재무데이터 조회 실패: {err}")
+        else:
+            entry["financial"] = financial
+        out.append(entry)
+    return out
+
+
 def resolve_computed_metric(
     conn,
     stock_code: str,
@@ -2078,47 +2165,58 @@ def answer_kr_question(
         active_indicators = _extract_indicators(base_question)
 
     if "financial" in intent:
-        metric = _extract_metric(question)
-        if metric is None:
-            result["errors"].append("재무 지표를 인식하지 못함")
-        elif len(periods) >= 2:
-            # 다중분기("25년과 26년 1분기"): 각 분기를 개별 조회해 기간별로 구분해 담는다.
-            # 최상위 financial은 None으로 두고(다중종목 entities와 동일 관례) periods에 담는다.
-            # 문제 C: 이 분기를 계산전용(_COMPUTED_ONLY_FIELDS) 검사보다 먼저 둬, 계산전용
-            # 지표(PSR 등)도 다중분기면 여기로 위임된다. 계산전용 라우팅과 6개 지표(문제 A)
-            # 폴백은 _resolve_metric_over_periods가 기간별로 모두 처리한다.
-            result["periods"] = _resolve_metric_over_periods(
-                resolve_metric_fn, conn, stock_code, metric, periods, llm_fn,
+        # 다중지표("현대차 PER PBR PSR")는 기존 단일지표 분기(아래 else)와 완전히 분리한다 —
+        # 기존 경로를 한 글자도 바꾸지 않아 압도적 다수인 단일지표 질문은 회귀 위험이 0이다.
+        # 다중기간과의 조합(periods>=2 동시)은 아직 요청된 적 없어 범위 밖으로 두고(YAGNI),
+        # 그 경우는 기존처럼 첫 지표만 쓰는 단일지표 분기로 흘러간다(회귀 없음, 기존 동작 유지).
+        metrics = _extract_metrics(question) if len(periods) < 2 else []
+        if len(metrics) >= 2:
+            result["metrics"] = _resolve_metrics(
+                resolve_metric_fn, conn, stock_code, metrics, period, llm_fn,
                 computed_metric_fn=computed_metric_fn, execute_sql_fn=execute_sql_fn,
             )
-        elif metric in _COMPUTED_ONLY_FIELDS:
-            computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
-            financial, err = _call_with_retry(
-                lambda: computed_metric_fn(
-                    conn, stock_code, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
-                )
-            )
-            if err:
-                result["errors"].append(f"계산 지표 조회 실패: {err}")
-            else:
-                result["financial"] = financial
-                mismatch_note = _computed_metric_period_mismatch_note(period, financial)
-                if mismatch_note:
-                    result["errors"].append(mismatch_note)
         else:
-            # 재무제표/사전계산 지표: resolve_metric 우선, per/pbr/roe/operating_margin/
-            # debt_ratio/market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백(문제 A).
-            # period가 None이면 폴백을 시도하지 않아 기존 최신값 경로에 무영향(회귀 없음).
-            financial, err = _call_with_retry(
-                lambda: _resolve_metric_with_fallback(
-                    conn, stock_code, metric, period, llm_fn,
-                    resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+            metric = _extract_metric(question)
+            if metric is None:
+                result["errors"].append("재무 지표를 인식하지 못함")
+            elif len(periods) >= 2:
+                # 다중분기("25년과 26년 1분기"): 각 분기를 개별 조회해 기간별로 구분해 담는다.
+                # 최상위 financial은 None으로 두고(다중종목 entities와 동일 관례) periods에 담는다.
+                # 문제 C: 이 분기를 계산전용(_COMPUTED_ONLY_FIELDS) 검사보다 먼저 둬, 계산전용
+                # 지표(PSR 등)도 다중분기면 여기로 위임된다. 계산전용 라우팅과 6개 지표(문제 A)
+                # 폴백은 _resolve_metric_over_periods가 기간별로 모두 처리한다.
+                result["periods"] = _resolve_metric_over_periods(
+                    resolve_metric_fn, conn, stock_code, metric, periods, llm_fn,
+                    computed_metric_fn=computed_metric_fn, execute_sql_fn=execute_sql_fn,
                 )
-            )
-            if err:
-                result["errors"].append(f"재무데이터 조회 실패: {err}")
+            elif metric in _COMPUTED_ONLY_FIELDS:
+                computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
+                financial, err = _call_with_retry(
+                    lambda: computed_metric_fn(
+                        conn, stock_code, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
+                    )
+                )
+                if err:
+                    result["errors"].append(f"계산 지표 조회 실패: {err}")
+                else:
+                    result["financial"] = financial
+                    mismatch_note = _computed_metric_period_mismatch_note(period, financial)
+                    if mismatch_note:
+                        result["errors"].append(mismatch_note)
             else:
-                result["financial"] = financial
+                # 재무제표/사전계산 지표: resolve_metric 우선, per/pbr/roe/operating_margin/
+                # debt_ratio/market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백(문제 A).
+                # period가 None이면 폴백을 시도하지 않아 기존 최신값 경로에 무영향(회귀 없음).
+                financial, err = _call_with_retry(
+                    lambda: _resolve_metric_with_fallback(
+                        conn, stock_code, metric, period, llm_fn,
+                        resolve_metric_fn, computed_metric_fn, execute_sql_fn,
+                    )
+                )
+                if err:
+                    result["errors"].append(f"재무데이터 조회 실패: {err}")
+                else:
+                    result["financial"] = financial
 
     if "price" in intent or "technical" in intent:
         # period가 명시됐으면 그 시점 이하 최근 거래일 종가를 가져온다(다중종목 경로와

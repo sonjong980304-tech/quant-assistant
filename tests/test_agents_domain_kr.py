@@ -18,6 +18,7 @@ from src.agents.domain_kr import (
     _COMPUTED_ONLY_FIELDS,
     _extract_indicators,
     _extract_metric,
+    _extract_metrics,
     _parse_period,
     _parse_periods,
     _parse_price_target_date,
@@ -1062,6 +1063,35 @@ def test_extract_metric_psr_pcr_ev_ebitda_korean_aliases():
     assert _extract_metric("삼성전자 매출 알려줘") == "revenue"
 
 
+# ── 다중 지표 인식(_extract_metrics) — 실서버 재현 버그: "현대차 PER PBR PSR"처럼 한 질문에
+# 지표를 여러 개 물으면 _extract_metric(단수형)은 설계상 하나만 반환해 첫 지표(PER) 외에는
+# 통째로 누락됐다. _extract_metrics(복수형)는 질문에 등장한 모든 지표를 등장 순서대로 반환한다.
+
+def test_extract_metrics_returns_all_metrics_in_question_order():
+    assert _extract_metrics("현대차 PER PBR PSR 알려줘") == ["per", "pbr", "psr"]
+    # 순서가 바뀌어도 질문에 등장한 순서를 그대로 따라야 한다(사전 순회 순서가 아니라).
+    assert _extract_metrics("삼성전자 PSR PBR PER") == ["psr", "pbr", "per"]
+
+
+def test_extract_metrics_single_metric_matches_extract_metric():
+    # 지표가 하나뿐이면 기존 _extract_metric과 동일한 결과를 내야 한다(회귀 없음).
+    assert _extract_metrics("삼성전자 PER 알려줘") == ["per"]
+    assert _extract_metrics("삼성전자 영업이익률") == ["operating_margin"]
+
+
+def test_extract_metrics_no_metric_returns_empty_list():
+    assert _extract_metrics("삼성전자 알려줘") == []
+
+
+def test_extract_metrics_avoids_double_counting_substring_collision():
+    # "매출성장"은 "매출"을 부분문자열로 포함한다 — 긴 별칭이 먼저 매치돼 그 구간을
+    # 점유해야 "매출"이 별도 지표로 이중 인식되지 않는다(_extract_metric의 tier 우선순위와
+    # 동일한 원칙을 다중 매치 스캔에서도 지켜야 함).
+    assert _extract_metrics("삼성전자 매출성장률 알려줘") == ["revenue_growth"]
+    # 회귀: 매출과 매출성장률을 정말로 둘 다 물으면 둘 다 인식돼야 한다.
+    assert _extract_metrics("삼성전자 매출이랑 매출성장률 알려줘") == ["revenue", "revenue_growth"]
+
+
 def test_answer_kr_question_operating_margin_routes_ratio_metric(tmp_path):
     # end-to-end: "영업이익률" 질문이 resolve_metric_fn에 operating_margin으로 전달돼야 한다
     # (operating_profit 금액이 아니라). 실서버에서 kr 도메인 경로가 영업이익 '금액'만 답하던 원인.
@@ -1206,6 +1236,60 @@ def test_answer_kr_question_single_quarter_unchanged_no_periods_key(tmp_path):
 
     assert result["financial"]["value"] == 12.5
     assert result.get("periods") is None
+
+
+# ── 다중지표 배선: answer_kr_question이 여러 지표를 각각 조회해 result["metrics"]에 담는다 ──
+# 실서버 재현 버그: "현대차 PER PBR PSR"이 PER만 조회하고 PBR/PSR을 통째로 버렸다(검증 단계에서
+# "PBR과 PSR 값이 없습니다"로 매번 실패 재현됨). 이제 지표별로 개별 조회해 명확히 구분해 담는다.
+
+def test_answer_kr_question_multi_metric_returns_value_per_metric(tmp_path):
+    db = _seed(tmp_path)
+    seen: list = []
+
+    def spy_resolve_metric(conn, stock_code, metric, llm_fn=None, period=None):
+        seen.append(metric)
+        return {
+            "stock_code": stock_code, "metric": metric,
+            "value": {"per": 12.5, "pbr": 1.8, "psr": 0.9}[metric],
+            "source": "DART", "period": "2025Q1",
+        }
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 PER PBR PSR 알려줘", conn, resolve_metric_fn=spy_resolve_metric
+        )
+    finally:
+        conn.close()
+
+    assert seen == ["per", "pbr", "psr"]
+    metrics = result["metrics"]
+    assert [m["metric"] for m in metrics] == ["per", "pbr", "psr"]
+    assert metrics[0]["financial"]["value"] == 12.5
+    assert metrics[1]["financial"]["value"] == 1.8
+    assert metrics[2]["financial"]["value"] == 0.9
+    # 다중지표는 metrics에 구분해 담으므로 최상위 financial은 쓰지 않는다(다중분기/다중종목과 동일 관례).
+    assert result["financial"] is None
+
+
+def test_answer_kr_question_single_metric_unchanged_no_metrics_key(tmp_path):
+    # 회귀: 단일 지표 질문(압도적 다수)은 기존처럼 financial 하나만, metrics 키는 없다.
+    db = _seed(tmp_path)
+
+    def spy_resolve_metric(conn, stock_code, metric, llm_fn=None, period=None):
+        return {"stock_code": stock_code, "metric": metric,
+                "value": 12.5, "source": "DART", "period": "2025Q1"}
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 PER 알려줘", conn, resolve_metric_fn=spy_resolve_metric
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"]["value"] == 12.5
+    assert result.get("metrics") is None
 
 
 # ── price_history 첨부(버그A): "최근 1년 주가 그래프" 질문에 1년 시계열을 담아 검증 통과 ────
