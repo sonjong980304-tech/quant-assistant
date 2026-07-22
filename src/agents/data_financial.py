@@ -52,6 +52,31 @@ METRIC_SOURCE_MAP: dict[str, str] = {
     "operating_margin": DART,
     "debt_ratio": DART,
     "market_cap": DART,
+    # --- DART: metrics 계산 지표(컬럼형, 시가총액 파생 밸류 팩터) — per/pbr과 완전히 동일한
+    # 메커니즘(ingest 시 metrics 테이블에 사전계산돼 있고, _fetch_dart/_fetch_dart_at_quarter가
+    # _METRICS_TABLE_COLS 키를 범용적으로 처리하므로 새 계산 로직 없이 등록만으로 direct-WHERE
+    # 분기 매치가 된다). 실서버 재현 버그: 이 등록이 빠져 있어 _COMPUTED_ONLY_FIELDS(asof 기반
+    # cross-section 경로)로 잘못 분류돼 있었다.
+    "psr": DART,
+    "pcr": DART,
+    "ev_ebitda": DART,
+    "peg": DART,
+    # --- DART: _FLOW_RATIO_ACCOUNTS(EAV 두 계정 즉석 비율계산, operating_margin과 동일 경로) ---
+    # 실서버 재현 버그: 이 등록이 빠져 있어 gross_margin 등이 _COMPUTED_ONLY_FIELDS(asof/
+    # look-ahead 경로)로 잘못 분류됐다. _fetch_flow_ratio는 이미 이 셋을 지원했는데
+    # (test_resolve_metric_net_gross_cogs_ratios_fall_back_to_eav) 라우팅이 안 태웠다.
+    "gross_margin": DART,
+    "net_margin": DART,
+    "cogs_ratio": DART,
+    # --- DART: _RATIO_TTM_ACCOUNTS(TTM/스냅샷 혼합 비율, 가격 불필요 → EAV 직접 quarter 매치) ---
+    "roa": DART,
+    "gp_a": DART,
+    "interest_coverage": DART,
+    "current_ratio": DART,
+    # --- DART: _YOY_GROWTH_ACCOUNTS(전년 동기 대비 성장률, 가격 불필요 → EAV 직접 매치) ---
+    "revenue_growth": DART,
+    "op_growth": DART,
+    "ni_growth": DART,
     # --- FnGuide 전용 지표(fnguide_metrics.metric_key) ---
     "target_price": FNGUIDE,
     "consensus_target_price": FNGUIDE,
@@ -69,13 +94,17 @@ _FNGUIDE_KEY_ALIASES: dict[str, str] = {
 
 # DART 계산 지표(metrics 테이블 컬럼) 화이트리스트 — SQL 식별자로 직접 쓰므로
 # 반드시 이 집합 안의 값만 사용한다(주입 방지).
-_METRICS_TABLE_COLS = {"per", "pbr", "roe", "operating_margin", "debt_ratio", "market_cap"}
+_METRICS_TABLE_COLS = {
+    "per", "pbr", "roe", "operating_margin", "debt_ratio", "market_cap",
+    "psr", "pcr", "ev_ebitda", "peg",
+}
 
 # 위 metrics 컬럼 중 "주가에 의존하는" 지표. 이 지표들은 metrics 행에 함께 적재된
 # price_date(종가 기준일, 적재 시 version.effective_price_date로 확정)를 계산에 실제로 쓰므로,
 # 조회 결과에 그 price_date를 함께 실어 사용자가 "어느 종가 기준 값이냐"를 검증할 수 있게 한다.
 # roe/operating_margin/debt_ratio는 순수 재무비율이라 price_date가 무의미하므로 제외한다.
-_PRICE_BASED_METRICS = {"per", "pbr", "market_cap"}
+# psr/pcr/ev_ebitda는 시가총액을, peg는 per(시가총액 기반)를 분자에 쓰므로 전부 포함한다.
+_PRICE_BASED_METRICS = {"per", "pbr", "market_cap", "psr", "pcr", "ev_ebitda", "peg"}
 
 # 연간(annual) 요청 시 4개 분기를 합산해야 하는 손익계산서/현금흐름 흐름값 계정.
 # 재무상태표 잔액(total_assets/total_liabilities/total_equity/shares_outstanding)이나
@@ -211,6 +240,109 @@ def _fetch_flow_ratio(
     return num / den * 100.0, label, None
 
 
+# 분자·분모 각각이 "TTM(추세 12개월, 4분기 합)"인지 "그 분기 스냅샷(잔액)"인지가 다른 비율
+# 지표. src/backtest/data_access.py의 metrics_at() 실제 계산식과 동일 정의를 재사용한다
+# (roa=ni_ttm/assets, gp_a=gp_ttm/assets, interest_coverage=op_ttm/int_ttm, current_ratio=
+# cur_assets/cur_liab). scale=100.0(%)|1.0(배율, interest_coverage만 배수 표기).
+_RATIO_TTM_ACCOUNTS: dict[str, tuple[tuple[bool, str], tuple[bool, str], float]] = {
+    "roa": ((True, "net_income"), (False, "total_assets"), 100.0),
+    "gp_a": ((True, "gross_profit"), (False, "total_assets"), 100.0),
+    "interest_coverage": ((True, "operating_profit"), (True, "interest_expense"), 1.0),
+    "current_ratio": ((False, "current_assets"), (False, "current_liabilities"), 100.0),
+}
+
+
+def _trailing_quarters(end_quarter: str, n: int = 4) -> list[str]:
+    """end_quarter로 끝나는 최근 n개 분기 문자열(과거→최신)을 만든다("2026Q1"→[...,2026Q1])."""
+    year, q = int(end_quarter[:4]), int(end_quarter[5])
+    out = []
+    for _ in range(n):
+        out.append(f"{year}Q{q}")
+        q -= 1
+        if q == 0:
+            q, year = 4, year - 1
+    return list(reversed(out))
+
+
+def _sum_trailing_four_quarters(conn: sqlite3.Connection, key: str, stock_code: str, end_quarter: str) -> float | None:
+    """end_quarter로 끝나는 TTM(연간 캘린더가 아니라 그 분기 기준 최근 4분기) 합.
+
+    _sum_four_quarters(연간=1~4월, 특정 연도 고정)와 달리 어느 분기에서든 "그 분기까지의
+    최근 4분기"를 구한다(roa 등 TTM 지표가 분기 질문에서도 정확한 추세치를 내려면 필요).
+    4개 분기 중 하나라도 없으면 None(SoT: 누락 분기 추정 금지, _sum_four_quarters와 동일 원칙).
+    """
+    quarters = _trailing_quarters(end_quarter, 4)
+    placeholders = ",".join("?" for _ in quarters)
+    rows = conn.execute(
+        f"SELECT quarter, amount FROM financials WHERE stock_code=? AND account_key=? "
+        f"AND quarter IN ({placeholders})",
+        (stock_code, key, *quarters),
+    ).fetchall()
+    amounts = {r["quarter"]: r["amount"] for r in rows if r["amount"] is not None}
+    return sum(amounts.values()) if len(amounts) == 4 else None
+
+
+def _resolve_ratio_component(conn: sqlite3.Connection, stock_code: str, quarter: str, spec: tuple[bool, str]) -> float | None:
+    is_ttm, account = spec
+    if is_ttm:
+        return _sum_trailing_four_quarters(conn, account, stock_code, quarter)
+    return _fetch_eav_amount(conn, account, stock_code, quarter)
+
+
+def _fetch_ratio_ttm(
+    conn: sqlite3.Connection, key: str, stock_code: str, period: dict
+) -> tuple[float, str, str | None] | None:
+    """TTM/스냅샷 혼합 비율 지표(_RATIO_TTM_ACCOUNTS)를 그 분기(annual이면 연말 Q4) 기준으로
+    즉석 계산한다. metrics_at()과 동일 정의를 EAV에서 직접 재현하되, 가격/시가총액은 전혀
+    쓰지 않는 순수 재무비율이라 look-ahead용 asof 없이 지목된 분기를 그대로 쓸 수 있다."""
+    quarter = period["quarter"] if period.get("kind") == "quarter" else f"{period['year']}Q4"
+    num_spec, den_spec, scale = _RATIO_TTM_ACCOUNTS[key]
+    num = _resolve_ratio_component(conn, stock_code, quarter, num_spec)
+    den = _resolve_ratio_component(conn, stock_code, quarter, den_spec)
+    if num is None or not den:
+        return None
+    return num / den * scale, quarter, None
+
+
+# 전년 동기(YoY) 대비 성장률. 두 시점 모두 그 계정의 원본 값(quarter는 단일분기,
+# annual은 4분기 합)이 있어야 하고, 전년 값이 0 이하면 계산하지 않는다(SoT: 적자→흑자
+# 전환처럼 기준값이 0/음수인 성장률은 부호가 무의미해 억지 추정하지 않는다).
+_YOY_GROWTH_ACCOUNTS: dict[str, str] = {
+    "revenue_growth": "revenue",
+    "op_growth": "operating_profit",
+    "ni_growth": "net_income",
+}
+
+
+def _fetch_yoy_growth(
+    conn: sqlite3.Connection, key: str, stock_code: str, period: dict
+) -> tuple[float, str, str | None] | None:
+    account = _YOY_GROWTH_ACCOUNTS[key]
+    if period.get("kind") == "annual":
+        year = period["year"]
+        cur = _sum_four_quarters(conn, account, stock_code, year)
+        prev = _sum_four_quarters(conn, account, stock_code, year - 1)
+        label = f"{year} 연간"
+    else:
+        quarter = period["quarter"]
+        prev_quarter = f"{int(quarter[:4]) - 1}{quarter[4:]}"
+        cur = _fetch_eav_amount(conn, account, stock_code, quarter)
+        prev = _fetch_eav_amount(conn, account, stock_code, prev_quarter)
+        label = quarter
+    if cur is None or not prev or prev <= 0:
+        return None
+    return (cur - prev) / prev * 100.0, label, None
+
+
+def _latest_quarter_with_account(conn: sqlite3.Connection, stock_code: str, account_key: str) -> str | None:
+    """그 계정이 실존하는 가장 최근 분기(period 미지정 질문의 '최신값' 폴백용)."""
+    row = conn.execute(
+        "SELECT MAX(quarter) AS q FROM financials WHERE stock_code=? AND account_key=? AND amount IS NOT NULL",
+        (stock_code, account_key),
+    ).fetchone()
+    return row["q"] if row else None
+
+
 def _fetch_dart(
     conn: sqlite3.Connection,
     stock_code: str,
@@ -251,14 +383,33 @@ def _fetch_dart(
             if row is not None and row["v"] is not None:
                 price_date = row["price_date"] if key in _PRICE_BASED_METRICS else None
                 return row["v"], row["quarter"], price_date
+        # 즉석계산 비율/성장률 지표(_FLOW_RATIO_ACCOUNTS/_RATIO_TTM_ACCOUNTS/_YOY_GROWTH_ACCOUNTS)는
+        # financials/metrics에 그 이름의 컬럼이 없어 위에서 항상 못 찾는다 — "가장 최근 데이터가
+        # 있는 분기"를 찾아 그 분기 기준으로 위임한다(period 명시 질문과 동일한 계산, 대상 분기만
+        # 자동 산정). 앵커 계정은 되도록 스냅샷 쪽(분기마다 하나씩만 있어 최신판별이 명확)을 쓴다.
+        if key in _FLOW_RATIO_ACCOUNTS:
+            anchor = _latest_quarter_with_account(conn, stock_code, _FLOW_RATIO_ACCOUNTS[key][0])
+            return _fetch_flow_ratio(conn, key, stock_code, {"kind": "quarter", "quarter": anchor}) if anchor else None
+        if key in _RATIO_TTM_ACCOUNTS:
+            num_spec, den_spec, _scale = _RATIO_TTM_ACCOUNTS[key]
+            anchor_account = den_spec[1] if not den_spec[0] else num_spec[1]
+            anchor = _latest_quarter_with_account(conn, stock_code, anchor_account)
+            return _fetch_ratio_ttm(conn, key, stock_code, {"kind": "quarter", "quarter": anchor}) if anchor else None
+        if key in _YOY_GROWTH_ACCOUNTS:
+            anchor = _latest_quarter_with_account(conn, stock_code, _YOY_GROWTH_ACCOUNTS[key])
+            return _fetch_yoy_growth(conn, key, stock_code, {"kind": "quarter", "quarter": anchor}) if anchor else None
         return None
 
     if period.get("kind") == "quarter":
         result = _fetch_dart_at_quarter(conn, key, stock_code, period["quarter"])
-        # metrics 스냅샷에 없는 과거 분기라도 단순 흐름비율은 원본 EAV 두 계정으로 즉석
-        # 계산한다(폴백). metrics 값이 있으면 위에서 이미 반환되므로 사전계산값이 최우선.
+        # metrics 스냅샷에 없는 과거 분기라도 단순 흐름비율/TTM비율/성장률은 원본 EAV 계정
+        # 으로 즉석 계산한다(폴백). metrics 값이 있으면 위에서 이미 반환되므로 사전계산값 최우선.
         if result is None and key in _FLOW_RATIO_ACCOUNTS:
             return _fetch_flow_ratio(conn, key, stock_code, period)
+        if result is None and key in _RATIO_TTM_ACCOUNTS:
+            return _fetch_ratio_ttm(conn, key, stock_code, period)
+        if result is None and key in _YOY_GROWTH_ACCOUNTS:
+            return _fetch_yoy_growth(conn, key, stock_code, period)
         return result
 
     # kind == "annual"
@@ -270,6 +421,10 @@ def _fetch_dart(
     # (Q4 단일분기 마진을 연간 마진으로 오인하지 않게 — 재무 관례상 연간 합계 기준 비율).
     if key in _FLOW_RATIO_ACCOUNTS:
         return _fetch_flow_ratio(conn, key, stock_code, period)
+    if key in _RATIO_TTM_ACCOUNTS:
+        return _fetch_ratio_ttm(conn, key, stock_code, period)
+    if key in _YOY_GROWTH_ACCOUNTS:
+        return _fetch_yoy_growth(conn, key, stock_code, period)
     # 그 외 흐름값이 아닌 계정(잔액/주가비율)은 연말(Q4) 스냅샷.
     return _fetch_dart_at_quarter(conn, key, stock_code, f"{year}Q4")
 

@@ -56,15 +56,39 @@ def _stock_code_candidates(text: str) -> list[str]:
 # 지표명(한국어) → METRIC_SOURCE_MAP(src/agents/data_financial.py) 키. 질문에서 흔히
 # 쓰이는 한국어 표현만 최소한으로 다룬다(복잡한 NL 파싱은 이 에이전트의 책임이 아님).
 _METRIC_KO_ALIASES: dict[str, str] = {
+    # "주가매출비율"(PSR)은 "매출"을 부분문자열로 포함하므로 반드시 "매출"(revenue) 별칭보다
+    # 먼저 와야 한다(같은 이유로 딕셔너리 맨 앞에 둔다 — 매출 계열 별칭 전체보다도 먼저).
+    # psr/pcr/ev_ebitda는 per/pbr과 동일하게 METRIC_SOURCE_MAP(metrics 테이블 direct-WHERE
+    # 조회)에 등록돼 있어(_COMPUTED_KO_ALIASES가 아니라 여기서) 한국어 별칭을 등록해야 인식된다.
+    # 영문 약어(PSR/PCR/PEG)는 METRIC_SOURCE_MAP 원본 키 매치(tier 2)로 이미 인식되지만,
+    # "EV/EBITDA"는 실제 키가 "ev_ebitda"(밑줄)라 슬래시 표기를 별도로 등록해야 한다.
+    "주가매출비율": "psr",
+    "주가현금흐름비율": "pcr",
+    "ev/ebitda": "ev_ebitda", "ev-ebitda": "ev_ebitda",
+    # "매출총이익률"/"매출원가율"/"매출성장률"(비율·성장률)은 반드시 "매출액"/"매출"(원본
+    # 계정 금액)보다 먼저 와야 한다 — 셋 다 "매출"을 부분문자열로 포함해서, 뒤에 두면 raw
+    # 계정(revenue)으로 오매핑된다(실서버 재현 버그: "SK하이닉스 26년 1분기 매출총이익률"이
+    # gross_margin이 아니라 revenue 원본 금액으로 조회됨). gross_margin/cogs_ratio/
+    # revenue_growth는 METRIC_SOURCE_MAP에 등록돼 있어(operating_margin과 동일하게 EAV
+    # 즉석계산) resolve_metric으로 조회 가능하다.
+    "매출총이익률": "gross_margin",
+    "매출원가율": "cogs_ratio",
+    "매출성장률": "revenue_growth", "매출성장": "revenue_growth", "매출증가율": "revenue_growth",
     "매출액": "revenue",
     "매출": "revenue",
-    # "영업이익률"(비율)은 반드시 "영업이익"(원본 계정 금액)보다 먼저 와야 한다 — _extract_metric이
-    # 이 딕셔너리를 삽입 순서대로 순회하며 첫 부분일치를 채택하므로, 더 긴 "영업이익률"을 앞에 두지
-    # 않으면 부분문자열 "영업이익"이 먼저 매치돼 operating_profit으로 오매핑된다(실서버 재현 버그).
-    # operating_margin은 metrics 테이블에 사전계산돼 resolve_metric으로 조회 가능하다(computed-only
-    # 가 아니라 _COMPUTED_KO_ALIASES 경로로는 안 잡혀 여기서 별칭을 명시해야 인식된다).
+    # "영업이익률"/"영업이익성장률"(비율·성장률)은 반드시 "영업이익"(원본 계정 금액)보다 먼저
+    # 와야 한다 — _extract_metric이 이 딕셔너리를 삽입 순서대로 순회하며 첫 부분일치를
+    # 채택하므로, 더 긴 별칭을 앞에 두지 않으면 부분문자열 "영업이익"이 먼저 매치돼
+    # operating_profit으로 오매핑된다(실서버 재현 버그). operating_margin은 metrics 테이블에
+    # 사전계산돼 resolve_metric으로 조회 가능하다(computed-only가 아니라 _COMPUTED_KO_ALIASES
+    # 경로로는 안 잡혀 여기서 별칭을 명시해야 인식된다).
     "영업이익률": "operating_margin",
+    "영업이익성장률": "op_growth", "영업이익성장": "op_growth",
     "영업이익": "operating_profit",
+    # "순이익률"/"순이익성장률"(비율·성장률)도 동일한 이유로 "당기순이익"/"순이익"(원본
+    # 계정)보다 먼저 와야 한다.
+    "순이익률": "net_margin",
+    "순이익성장률": "ni_growth", "순이익성장": "ni_growth",
     "당기순이익": "net_income",
     "순이익": "net_income",
     "자산총계": "total_assets",
@@ -73,6 +97,14 @@ _METRIC_KO_ALIASES: dict[str, str] = {
     "배당": "dividend",
     "목표주가": "target_price",
     "투자의견": "analyst_opinion",
+    # ── 여기부터 이번 세션에 새로 WHERE(직접 quarter 매치) 경로로 옮긴 지표들 ──────────
+    # 전부 가격/시가총액이 필요 없는 순수 재무비율이라 look-ahead asof 간접참조 없이 지목된
+    # 분기를 그대로 쓸 수 있다(roa/gp_a/interest_coverage/current_ratio는 _RATIO_TTM_ACCOUNTS,
+    # revenue_growth/op_growth/ni_growth는 위에서 이미 등록한 _YOY_GROWTH_ACCOUNTS 경로).
+    "총자산이익률": "roa",
+    "매출총이익/총자산": "gp_a", "gpa": "gp_a", "gp/a": "gp_a",
+    "이자보상배율": "interest_coverage",
+    "유동비율": "current_ratio",
 }
 
 # 순수 시세(종가/시가/거래량 등) 키워드 — get_price_snapshot_kr(indicators=None) 경로.
@@ -321,6 +353,9 @@ _SCREEN_METRIC_ALIASES: dict[str, str] = {
     "per": "per", "주가수익비율": "per",
     "pbr": "pbr", "주가순자산비율": "pbr",
     "psr": "psr", "주가매출비율": "psr",
+    "pcr": "pcr", "주가현금흐름비율": "pcr",
+    "ev/ebitda": "ev_ebitda", "ev_ebitda": "ev_ebitda", "ev-ebitda": "ev_ebitda",
+    "peg": "peg",
     "roe": "roe", "자기자본이익률": "roe",
     "roa": "roa", "총자산이익률": "roa",
     "영업이익률": "operating_margin",
@@ -794,6 +829,37 @@ def _resolve_screening_asof(
     if not result.get("ok") or not result["rows"]:
         return None
     return result["rows"][0].get("d")
+
+
+def _computed_metric_period_mismatch_note(period: dict | None, financial: dict | None) -> str | None:
+    """계산전용 지표(_COMPUTED_ONLY_FIELDS)가 질문이 지목한 분기와 다른 분기로 계산됐으면
+    그 사실을 사용자에게 알릴 경고문을 만든다. 다르지 않거나 판단할 정보가 없으면 None.
+
+    실서버 재현 버그: "SK하이닉스 26년 1분기 매출총이익률"이 아직 공시 전인 26년 1분기 대신
+    25년 4분기 값을 아무 표시 없이 반환했다. _COMPUTED_ONLY_FIELDS 지표는 look-ahead 방지를
+    위해 asof(분기 말일 이하 최신 거래일)까지 공시된 최신 분기를 쓰는데(get_cross_section/
+    effective_quarter_at, 백테스트와 공유하는 안전장치 — 수정 금지), 분기 말일과 실제 공시일
+    사이엔 DART 정기공시 특성상 항상 수십일의 시차가 있어 지목한 분기 자체가 매번 조용히
+    그 이전 분기로 대체된다. operating_margin 등 resolve_metric(DART financials 직접 quarter
+    매치) 경로는 이 간접참조를 안 거쳐 영향받지 않는다(같은 분기 질문에 정상 응답하는 이유).
+    안전장치 자체는 그대로 두고, resolve_computed_metric이 이미 넘겨주는 data_quarter(실제
+    사용된 분기)가 요청 분기와 다르면 조용한 대체를 정직한 대체로 바꾼다.
+
+    return_12m(가격모멘텀)은 예외다 — get_cross_section의 모든 행이 공통으로 "quarter"
+    필드를 달고 나오지만, return_12m 자체의 값(1년 전 종가 대비 수익률)은 재무제표 분기와
+    전혀 무관하게 순수 가격만으로 계산된다. 그대로 두면 실측 재현된 오탐(실제로는 정확한
+    최신 시세인데 "아직 공시 안 됨" 경고가 붙음)이 발생하므로 이 지표만 건너뛴다.
+    """
+    if period is None or not financial or financial.get("metric") == "return_12m":
+        return None
+    target = period["quarter"] if period.get("kind") == "quarter" else f"{period['year']}Q4"
+    actual = financial.get("data_quarter")
+    if actual is None or actual == target:
+        return None
+    return (
+        f"요청하신 {target} 데이터는 아직 공시되지 않아, 대신 공시된 가장 최근 분기"
+        f"({actual}) 기준으로 계산되었습니다."
+    )
 
 
 def _normalize_override_spec(raw: dict) -> dict | None:
@@ -1370,7 +1436,10 @@ def _extract_metric(question: str) -> str | None:
         if key in q:
             return key
     for ko, key in _METRIC_KO_ALIASES.items():
-        if ko in question:
+        # q(소문자화)로 비교한다 — 한글 별칭은 대소문자 개념이 없어 영향이 없고, "gpa"/"gp/a"
+        # 처럼 영문 별칭이 섞여 있는 항목은 대문자 입력("GPA")도 인식돼야 한다(회귀 재현:
+        # "삼성전자 GPA 알려줘"가 원본 question과 대조돼 소문자 별칭과 매치 못 하던 버그).
+        if ko in q:
             return key
     return None
 
@@ -1402,12 +1471,18 @@ def resolve_computed_metric(
     estimated는 행에 '{metric}_estimated' 컴패니언 필드(예: roc_estimated — 감가상각비
     데이터가 없어 0으로 근사했는지)가 있으면 그 값을, 없으면 None을 담는다 — metrics_at()이
     계산한 근사 여부가 단일종목 조회에서도 조용히 사라지지 않게 한다.
+
+    data_quarter는 metrics_at()이 그 행 계산에 실제로 사용한 재무 분기(row["quarter"],
+    look-ahead 방지로 asof 시점까지 공시된 분기)다. period(asof, 가격 기준일)와는 별개다 —
+    질문이 특정 분기를 지목했는데 아직 그 분기가 공시 전이면 asof 기준으로 더 이전 분기가
+    조용히 선택될 수 있고, 호출부가 이 필드로 그 대체를 사용자에게 알릴 수 있게 한다.
     """
     execute_sql_fn = execute_sql_fn or execute_sql
     cross_section_fn = cross_section_fn or (lambda c, a: get_cross_section(c, a))
     asof = asof or _default_screening_asof(conn, "prices", execute_sql_fn)
     value = None
     estimated = None
+    data_quarter = None
     if asof:
         row = next(
             (r for r in cross_section_fn(conn, asof) if r.get("stock_code") == stock_code),
@@ -1416,9 +1491,11 @@ def resolve_computed_metric(
         if row is not None:
             value = row.get(metric)
             estimated = row.get(f"{metric}_estimated")
+            data_quarter = row.get("quarter")
     return {
         "stock_code": stock_code, "metric": metric,
         "value": value, "source": "computed", "period": asof, "estimated": estimated,
+        "data_quarter": data_quarter,
     }
 
 
@@ -2000,6 +2077,9 @@ def answer_kr_question(
                 result["errors"].append(f"계산 지표 조회 실패: {err}")
             else:
                 result["financial"] = financial
+                mismatch_note = _computed_metric_period_mismatch_note(period, financial)
+                if mismatch_note:
+                    result["errors"].append(mismatch_note)
         else:
             # 재무제표/사전계산 지표: resolve_metric 우선, per/pbr/roe/operating_margin/
             # debt_ratio/market_cap이 과거 시점 metrics 부재로 None이면 계산 폴백(문제 A).

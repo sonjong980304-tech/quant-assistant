@@ -15,6 +15,7 @@ from datetime import date
 import pytest
 
 from src.agents.domain_kr import (
+    _COMPUTED_ONLY_FIELDS,
     _extract_indicators,
     _extract_metric,
     _parse_period,
@@ -779,20 +780,21 @@ def test_answer_kr_question_computed_metric_fn_is_injectable(tmp_path):
 def test_answer_kr_question_revenue_growth_keyword_prefers_computed_metric_over_shorter_financial_alias(
     tmp_path,
 ):
-    """"매출성장"(계산지표, revenue_growth)이 "매출"(재무지표, revenue)의 상위 문자열이라
-    구체적인 계산지표 별칭이 먼저 매치돼야 한다 — computed_metric_fn이 호출되고 resolve_metric_fn
-    (financial, revenue)은 호출되지 않아야 한다."""
+    """"매출성장"(revenue_growth)이 "매출"(재무지표, revenue)의 상위 문자열이라 더 구체적인
+    별칭이 먼저 매치돼야 한다. revenue_growth는 이번 세션에 EAV 직접 quarter 매치 경로로
+    옮겨져(가격 불필요) 이제 computed_metric_fn이 아니라 resolve_metric_fn을 통해 조회된다
+    (routing 목적지는 바뀌었지만, "매출"로 오매핑되지 않는다는 핵심 회귀는 그대로 지킨다)."""
     db = _seed_with_price_history(tmp_path)
     financial_calls: list[tuple] = []
     computed_calls: list[tuple] = []
 
-    def spy_resolve_metric(conn, stock_code, metric, llm_fn=None):
+    def spy_resolve_metric(conn, stock_code, metric, period=None, llm_fn=None):
         financial_calls.append((stock_code, metric))
-        return {"stock_code": stock_code, "metric": metric, "value": -1.0, "source": "DART", "period": None}
+        return {"stock_code": stock_code, "metric": metric, "value": 5.0, "source": "DART", "period": "x"}
 
     def fake_computed(conn, stock_code, metric, **kwargs):
         computed_calls.append((stock_code, metric))
-        return {"stock_code": stock_code, "metric": metric, "value": 5.0, "source": "computed", "period": "x"}
+        return {"stock_code": stock_code, "metric": metric, "value": -1.0, "source": "computed", "period": "x"}
 
     conn = connect_readonly(db)
     try:
@@ -805,8 +807,8 @@ def test_answer_kr_question_revenue_growth_keyword_prefers_computed_metric_over_
     finally:
         conn.close()
 
-    assert computed_calls == [("005930", "revenue_growth")]
-    assert financial_calls == []
+    assert financial_calls == [("005930", "revenue_growth")]
+    assert computed_calls == []
     assert result["financial"]["value"] == 5.0
 
 
@@ -981,6 +983,21 @@ def test_extract_metric_operating_margin_ratio_not_raw_profit():
     assert _extract_metric("삼성전자 영업이익") == "operating_profit"
     # 회귀: "순이익률"은 computed 경로로 net_margin(기존 정상 동작 유지).
     assert _extract_metric("삼성전자 순이익률") == "net_margin"
+
+
+# ── 지표 파싱(_extract_metric) — psr/pcr/ev_ebitda가 METRIC_SOURCE_MAP으로 옮겨가며
+# computed-only 별칭(_COMPUTED_KO_ALIASES)에서 빠졌는데, _METRIC_KO_ALIASES에 한국어 별칭이
+# 새로 등록되지 않으면 한국어 질문이 인식되지 않는다(영어 약어 "PSR"/"PCR"는 METRIC_SOURCE_MAP
+# 원본 키 매치로 그대로 인식되지만 "주가매출비율" 같은 한국어 표현은 별도 등록이 필요하다).
+# "주가매출비율"은 "매출"을 부분문자열로 포함하므로, "매출"(revenue) 별칭보다 먼저 매치돼야
+# 한다(영업이익률/순이익률과 동일한 순서 규율).
+
+def test_extract_metric_psr_pcr_ev_ebitda_korean_aliases():
+    assert _extract_metric("삼성전자 주가매출비율 알려줘") == "psr"
+    assert _extract_metric("삼성전자 주가현금흐름비율 알려줘") == "pcr"
+    assert _extract_metric("삼성전자 EV/EBITDA 알려줘") == "ev_ebitda"
+    # 회귀: "매출"(원본 계정)은 여전히 revenue로 남아야 한다.
+    assert _extract_metric("삼성전자 매출 알려줘") == "revenue"
 
 
 def test_answer_kr_question_operating_margin_routes_ratio_metric(tmp_path):
@@ -1455,6 +1472,127 @@ def test_resolve_computed_metric_falls_back_to_default_asof_when_not_given():
     assert result["period"] == "2026-07-16"
 
 
+# ── 실서버 재현 버그: "SK하이닉스 26년 1분기 매출총이익률"이 아직 공시 전인 26년 1분기
+#    대신 25년 4분기 값을 아무 경고 없이 그대로 반환했다. gross_margin 등 계산전용 지표는
+#    look-ahead 방지를 위해 asof(분기 말일 이하 최신 거래일)까지 공시된 최신 분기를 쓰는데
+#    (get_cross_section/effective_quarter_at, 백테스트와 공유하는 안전장치 — 수정 금지),
+#    분기 말일과 실제 공시일 사이엔 DART 정기공시 특성상 항상 수십일의 시차가 있어 사용자가
+#    지목한 분기 자체가 매번 조용히 그 이전 분기로 대체된다. operating_margin 등
+#    resolve_metric(DART financials 직접 quarter 매치) 경로는 이 간접참조를 안 거쳐
+#    영향받지 않는다(같은 분기 질문에 정상 응답하는 이유). 안전장치 자체(effective_quarter_at)
+#    는 그대로 두고, get_cross_section 각 행에 이미 있는 실제 사용 분기("quarter" 필드)를
+#    resolve_computed_metric이 data_quarter로 노출해, 조용한 대체를 정직한 대체로 바꾼다. ──
+
+def test_resolve_computed_metric_surfaces_data_quarter_from_cross_section_row():
+    fake_execute_sql = lambda sql, conn: {"ok": True, "rows": [{"d": "2026-03-31"}]}
+    fake_cross_section = lambda conn, asof: [
+        {"stock_code": "000660", "gross_margin": 68.775, "quarter": "2025Q4"},
+    ]
+    result = resolve_computed_metric(
+        None, "000660", "gross_margin",
+        execute_sql_fn=fake_execute_sql, cross_section_fn=fake_cross_section,
+    )
+    assert result["data_quarter"] == "2025Q4"
+
+
+def test_answer_kr_question_warns_when_computed_metric_quarter_differs_from_requested(tmp_path):
+    """실측 재현(원 버그는 gross_margin이었으나 그건 근본수정으로 이 경로를 더 이상 안 타므로,
+    여전히 _COMPUTED_ONLY_FIELDS로 남는 roc로 동일 시나리오를 검증한다): '하이닉스 26년 1분기
+    투하자본수익률' 요청 시 아직 공시 전이라 get_cross_section이 2025Q4 데이터를 대신 골랐다면
+    (look-ahead 방지 정상 동작), 그 사실을 조용히 숨기지 말고 명시적으로 경고해야 한다."""
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+
+    def fake_cross_section(conn, asof):
+        return [{"stock_code": "000660", "roc": 68.775, "quarter": "2025Q4"}]
+
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 26년 1분기 투하자본수익률", conn,
+            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
+                conn, code, metric, cross_section_fn=fake_cross_section,
+                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-03-31"}]},
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"]["value"] == 68.775
+    assert result["financial"]["data_quarter"] == "2025Q4"
+    assert any("2025Q4" in e and "2026Q1" in e for e in result["errors"]), result["errors"]
+
+
+def test_answer_kr_question_no_warning_when_computed_metric_quarter_matches_requested(tmp_path):
+    """회귀 방지: 요청 분기와 실제 사용 분기가 같으면(정상 케이스) 경고를 붙이지 않는다."""
+    db = _seed_two_companies(tmp_path)
+    conn = connect_readonly(db)
+
+    def fake_cross_section(conn, asof):
+        return [{"stock_code": "000660", "roc": 79.274, "quarter": "2026Q1"}]
+
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 26년 1분기 투하자본수익률", conn,
+            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
+                conn, code, metric, cross_section_fn=fake_cross_section,
+                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-03-31"}]},
+            ),
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"]["value"] == 79.274
+    assert not any("아직 공시되지" in e for e in result["errors"])
+
+
+# ── 근본 원인 수정: gross_margin/net_margin/cogs_ratio는 이미 _FLOW_RATIO_ACCOUNTS
+#    (src/agents/data_financial.py)로 EAV 두 계정 직접 quarter 매치가 구현/테스트돼
+#    있었는데(test_resolve_metric_net_gross_cogs_ratios_fall_back_to_eav), METRIC_SOURCE_MAP
+#    에 등록이 안 돼 있어 단일종목 질문 라우팅이 이 경로를 타지 못하고 _COMPUTED_ONLY_FIELDS
+#    (asof/look-ahead 경로)로 잘못 빠졌다. operating_margin과 동일하게 등록하면 그 경로가
+#    아예 필요 없어진다(경고문이 아니라 애초에 정답이 나옴). ──────────────────────────
+
+def test_gross_margin_net_margin_cogs_ratio_are_not_computed_only():
+    assert "gross_margin" not in _COMPUTED_ONLY_FIELDS
+    assert "net_margin" not in _COMPUTED_ONLY_FIELDS
+    assert "cogs_ratio" not in _COMPUTED_ONLY_FIELDS
+
+
+def test_answer_kr_question_gross_margin_named_quarter_uses_eav_direct_match(tmp_path):
+    """실측 재현 수정 확인: 'SK하이닉스 26년 1분기 매출총이익률'이 이제 asof/cross_section을
+    거치지 않고 operating_margin처럼 EAV에서 그 분기를 직접 찾아 정답을 낸다. computed_metric_fn
+    (cross_section 경로)이 호출되면 boom을 던지게 해, 정말로 그 경로를 안 타는지도 함께 검증."""
+    db = _seed_two_companies(tmp_path)
+    conn = connect(db)
+    conn.execute(
+        "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+        "VALUES(?,?,?,?,?)",
+        ("000660", "2026Q1", "2026-05-15", "revenue", 52576287000000.0),
+    )
+    conn.execute(
+        "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+        "VALUES(?,?,?,?,?)",
+        ("000660", "2026Q1", "2026-05-15", "gross_profit", 41679414000000.0),
+    )
+    conn.commit()
+    conn.close()
+    conn = connect_readonly(db)
+
+    def _boom(*a, **kw):
+        raise AssertionError("gross_margin이 여전히 computed_metric_fn(cross_section) 경로를 탐")
+
+    try:
+        result = answer_kr_question(
+            "SK하이닉스 26년 1분기 매출총이익률", conn, computed_metric_fn=_boom,
+        )
+    finally:
+        conn.close()
+
+    assert result["financial"]["value"] == pytest.approx(79.274, abs=0.01)
+    assert result["financial"]["source"] == "DART"
+    assert result["errors"] == []
+
+
 def test_answer_kr_question_passes_explicit_year_to_computed_metric(tmp_path):
     """'삼성전자 25년 투하자본수익률' — 질문의 2025년이 computed_metric_fn의 asof로 전달돼야
     한다(오늘 날짜로 계산해 질문 연도와 안 맞다고 검증 실패하는 결정론적 버그 재현 방지)."""
@@ -1488,25 +1626,38 @@ def test_answer_kr_question_passes_explicit_year_to_computed_metric(tmp_path):
 
 
 def test_answer_kr_question_recognizes_gpa_single_stock(tmp_path):
+    """"GPA"(대문자)가 gp_a로 인식되고, 이제 gp_a는 가격이 필요 없는 EAV 직접 quarter 매치
+    경로(_RATIO_TTM_ACCOUNTS)를 타므로 computed_metric_fn 없이도 resolve_metric_fn(기본
+    resolve_metric)만으로 답이 나와야 한다. period 미지정 질문이라 '데이터가 있는 가장
+    최근 분기'로 자동 산정되는지도 함께 검증한다."""
     db = _seed_two_companies(tmp_path)
+    conn = connect(db)
+    for q in ("2025Q2", "2025Q3", "2025Q4", "2026Q1"):  # gp_a 분자는 TTM(최근 4분기 합)
+        conn.execute(
+            "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+            "VALUES(?,?,?,?,?)",
+            ("005930", q, "2026-05-15", "gross_profit", 2.0e12),
+        )
+    conn.execute(  # 분모(총자산)는 스냅샷이라 해당 분기 하나만
+        "INSERT INTO financials(stock_code, quarter, disclosed_date, account_key, amount) "
+        "VALUES(?,?,?,?,?)",
+        ("005930", "2026Q1", "2026-05-15", "total_assets", 40.0e12),
+    )
+    conn.commit()
+    conn.close()
     conn = connect_readonly(db)
 
-    def fake_cross_section(conn, asof):
-        return [{"stock_code": "005930", "gp_a": 21.0}]
+    def _boom(*a, **kw):
+        raise AssertionError("gp_a가 여전히 computed_metric_fn(cross_section) 경로를 탐")
 
     try:
-        result = answer_kr_question(
-            "삼성전자 GPA 알려줘", conn,
-            computed_metric_fn=lambda conn, code, metric, **kw: resolve_computed_metric(
-                conn, code, metric, cross_section_fn=fake_cross_section,
-                execute_sql_fn=lambda sql, c: {"ok": True, "rows": [{"d": "2026-07-15"}]},
-            ),
-        )
+        result = answer_kr_question("삼성전자 GPA 알려줘", conn, computed_metric_fn=_boom)
     finally:
         conn.close()
 
     assert "재무 지표를 인식하지 못함" not in result["errors"]
-    assert result["financial"]["value"] == 21.0
+    assert result["financial"]["value"] == 8.0e12 / 40.0e12 * 100.0
+    assert result["financial"]["period"] == "2026Q1"
 
 
 # ── _parse_recent_return_months: "최근 N개월/N년 수익률" → 개월수 ─────────────────

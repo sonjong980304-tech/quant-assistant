@@ -562,3 +562,193 @@ def test_resolve_metric_net_gross_cogs_ratios_fall_back_to_eav(tmp_path):
     assert gm["value"] == 30.0 / 100.0 * 100.0
     assert cr["value"] == 70.0 / 100.0 * 100.0
     assert nm["source"] == gm["source"] == cr["source"] == "DART"
+
+
+# ── 스크리닝 UI에 노출된 나머지 지표(ROA/GP_A/이자보상배율/유동비율/성장률 3종)도 가격이
+#    필요 없는 순수 재무비율이라 operating_margin과 동일하게 EAV 직접 quarter 매치로 옮겼다
+#    (metrics_at의 TTM/스냅샷 계산식과 동일 정의를 EAV에서 재현 — _RATIO_TTM_ACCOUNTS/
+#    _YOY_GROWTH_ACCOUNTS). ──────────────────────────────────────────────────────
+
+def test_resolve_metric_roa_gp_a_use_ttm_numerator_over_snapshot_assets(tmp_path):
+    db = str(tmp_path / "roa.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        for q, ni, gp in [
+            ("2025Q2", 1.0e12, 2.0e12), ("2025Q3", 1.0e12, 2.0e12),
+            ("2025Q4", 1.0e12, 2.0e12), ("2026Q1", 1.0e12, 2.0e12),
+        ]:
+            _seed_eav(conn, "000660", q, "net_income", ni)
+            _seed_eav(conn, "000660", q, "gross_profit", gp)
+        _seed_eav(conn, "000660", "2026Q1", "total_assets", 40.0e12)  # 스냅샷(그 분기만)
+        conn.commit()
+        q = {"kind": "quarter", "quarter": "2026Q1"}
+        roa = resolve_metric(conn, "000660", "roa", period=q)
+        gpa = resolve_metric(conn, "000660", "gp_a", period=q)
+    finally:
+        conn.close()
+
+    assert roa["value"] == 4.0e12 / 40.0e12 * 100.0  # ni TTM(4x1.0e12)÷총자산
+    assert gpa["value"] == 8.0e12 / 40.0e12 * 100.0  # gp TTM(4x2.0e12)÷총자산
+    assert roa["source"] == gpa["source"] == "DART"
+    assert roa["period"] == gpa["period"] == "2026Q1"
+
+
+def test_resolve_metric_roa_none_when_any_trailing_quarter_missing(tmp_path):
+    # SoT: TTM 4분기 중 하나라도 없으면 억지 추정하지 않고 None.
+    db = str(tmp_path / "roa_partial.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        for q in ("2025Q3", "2025Q4", "2026Q1"):  # 2025Q2 누락
+            _seed_eav(conn, "000660", q, "net_income", 1.0e12)
+        _seed_eav(conn, "000660", "2026Q1", "total_assets", 40.0e12)
+        conn.commit()
+        res = resolve_metric(
+            conn, "000660", "roa", period={"kind": "quarter", "quarter": "2026Q1"},
+        )
+    finally:
+        conn.close()
+
+    assert res["value"] is None
+
+
+def test_resolve_metric_interest_coverage_and_current_ratio(tmp_path):
+    db = str(tmp_path / "stability.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        for q in ("2025Q2", "2025Q3", "2025Q4", "2026Q1"):
+            _seed_eav(conn, "000660", q, "operating_profit", 3.0e12)
+            _seed_eav(conn, "000660", q, "interest_expense", 0.5e12)
+        _seed_eav(conn, "000660", "2026Q1", "current_assets", 20.0e12)
+        _seed_eav(conn, "000660", "2026Q1", "current_liabilities", 10.0e12)
+        conn.commit()
+        q = {"kind": "quarter", "quarter": "2026Q1"}
+        ic = resolve_metric(conn, "000660", "interest_coverage", period=q)
+        cr = resolve_metric(conn, "000660", "current_ratio", period=q)
+    finally:
+        conn.close()
+
+    assert ic["value"] == (3.0e12 * 4) / (0.5e12 * 4)  # TTM÷TTM, 배율(퍼센트 아님)
+    assert cr["value"] == 20.0e12 / 10.0e12 * 100.0  # 스냅샷÷스냅샷(%)
+
+
+def test_resolve_metric_revenue_op_ni_growth_yoy(tmp_path):
+    db = str(tmp_path / "growth.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        _seed_eav(conn, "000660", "2025Q1", "revenue", 100.0)
+        _seed_eav(conn, "000660", "2026Q1", "revenue", 150.0)
+        _seed_eav(conn, "000660", "2025Q1", "operating_profit", 10.0)
+        _seed_eav(conn, "000660", "2026Q1", "operating_profit", 20.0)
+        _seed_eav(conn, "000660", "2025Q1", "net_income", 5.0)
+        _seed_eav(conn, "000660", "2026Q1", "net_income", 4.0)
+        conn.commit()
+        q = {"kind": "quarter", "quarter": "2026Q1"}
+        rg = resolve_metric(conn, "000660", "revenue_growth", period=q)
+        og = resolve_metric(conn, "000660", "op_growth", period=q)
+        ng = resolve_metric(conn, "000660", "ni_growth", period=q)
+    finally:
+        conn.close()
+
+    assert rg["value"] == (150.0 - 100.0) / 100.0 * 100.0  # 50.0
+    assert og["value"] == (20.0 - 10.0) / 10.0 * 100.0  # 100.0
+    assert ng["value"] == (4.0 - 5.0) / 5.0 * 100.0  # -20.0(역성장도 유효)
+    assert rg["period"] == og["period"] == ng["period"] == "2026Q1"
+
+
+def test_resolve_metric_growth_none_when_prior_year_quarter_missing(tmp_path):
+    db = str(tmp_path / "growth_missing.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        _seed_eav(conn, "000660", "2026Q1", "revenue", 150.0)  # 2025Q1 없음
+        conn.commit()
+        res = resolve_metric(
+            conn, "000660", "revenue_growth", period={"kind": "quarter", "quarter": "2026Q1"},
+        )
+    finally:
+        conn.close()
+
+    assert res["value"] is None
+
+
+# ---------- psr/pcr/ev_ebitda/peg — PER/PBR과 동일한 direct-WHERE(metrics 테이블) 조회 ----------
+# metrics 테이블은 ingest 시점에 psr/pcr/ev_ebitda/peg를 이미 per/pbr과 나란히 계산해 저장한다
+# (src/ingest/metrics.py). 그런데도 METRIC_SOURCE_MAP에 등록이 안 돼 있어 _COMPUTED_ONLY_FIELDS
+# (asof 기반 cross-section 경로, look-ahead/분기 혼동 위험)로 잘못 분류돼 있었다. per/pbr과
+# 완전히 동일한 등록(_METRICS_TABLE_COLS/_PRICE_BASED_METRICS/METRIC_SOURCE_MAP)만으로
+# _fetch_dart의 기존 범용 로직이 그대로 적용되는지 확인한다(새 계산 로직 불필요).
+
+def test_resolve_metric_psr_pcr_ev_ebitda_peg_route_to_dart_metrics_table(tmp_path):
+    db = str(tmp_path / "valuation_ratios.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        conn.execute(
+            "INSERT INTO metrics(stock_code, quarter, price_date, psr, pcr, ev_ebitda, peg) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("000660", "2026Q1", "2026-04-01", 1.5, 8.2, 6.7, 0.9),
+        )
+        conn.commit()
+        psr = resolve_metric(conn, "000660", "psr", period={"kind": "quarter", "quarter": "2026Q1"})
+        pcr = resolve_metric(conn, "000660", "pcr", period={"kind": "quarter", "quarter": "2026Q1"})
+        ev = resolve_metric(conn, "000660", "ev_ebitda", period={"kind": "quarter", "quarter": "2026Q1"})
+        peg = resolve_metric(conn, "000660", "peg", period={"kind": "quarter", "quarter": "2026Q1"})
+    finally:
+        conn.close()
+
+    assert (psr["value"], psr["source"], psr["period"]) == (1.5, "DART", "2026Q1")
+    assert (pcr["value"], pcr["source"], pcr["period"]) == (8.2, "DART", "2026Q1")
+    assert (ev["value"], ev["source"], ev["period"]) == (6.7, "DART", "2026Q1")
+    assert (peg["value"], peg["source"], peg["period"]) == (0.9, "DART", "2026Q1")
+    # per/pbr처럼 주가 기반 지표라 그 값 계산에 쓰인 종가 기준일(price_date)도 함께 노출된다.
+    assert psr["price_date"] == pcr["price_date"] == ev["price_date"] == peg["price_date"] == "2026-04-01"
+
+
+def test_resolve_metric_psr_no_period_uses_metrics_snapshot(tmp_path):
+    # 회귀: per/pbr과 동일하게 기간 미지정이면 metrics 최신 스냅샷(quarter DESC)을 쓴다.
+    db = str(tmp_path / "psr_latest.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        conn.execute(
+            "INSERT INTO metrics(stock_code, quarter, price_date, psr) VALUES(?,?,?,?)",
+            ("000660", "2026Q1", "2026-04-01", 2.2),
+        )
+        conn.commit()
+        res = resolve_metric(conn, "000660", "psr")
+    finally:
+        conn.close()
+
+    assert res["value"] == 2.2
+    assert res["period"] == "2026Q1"
+
+
+def test_resolve_metric_psr_annual_uses_q4_snapshot(tmp_path):
+    # per/pbr과 동일하게 annual 요청은 흐름값 합산이 아니라 연말(Q4) 스냅샷을 쓴다.
+    db = str(tmp_path / "psr_annual.db")
+    init_db(db)
+    conn = connect(db)
+    try:
+        seed_kr_companies(conn, ["000660"])
+        conn.execute(
+            "INSERT INTO metrics(stock_code, quarter, price_date, psr) VALUES(?,?,?,?)",
+            ("000660", "2025Q4", "2025-12-30", 1.8),
+        )
+        conn.commit()
+        res = resolve_metric(conn, "000660", "psr", period={"kind": "annual", "year": 2025})
+    finally:
+        conn.close()
+
+    assert res["value"] == 1.8
+    assert res["period"] == "2025Q4"
