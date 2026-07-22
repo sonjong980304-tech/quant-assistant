@@ -507,3 +507,16 @@ def test_post_audit_passes_steps_to_soft_inspectors(tmp_path):
     assert len(seen) == 4
     assert all("correlation" in p for p in seen)
 
+
+def test_post_audit_list_result_does_not_crash_soft_inspectors(tmp_path):
+    """실서버 재현 버그: "PER PBR PSR" 같은 순위(cross-section) 결과는 list 형태다. 소프트
+    검사관(inspect_storytelling 등)이 result.get(...)을 호출해 'list' object has no
+    attribute 'get'로 크래시했다 — holdings 추출만 dict 가드가 있고 소프트검사관 호출부는
+    가드가 없었다. list 결과는 검사할 performance/holdings 자체가 없으므로 크래시 대신
+    안전하게 넘어가야 한다."""
+    conn = _seeded_conn(tmp_path)
+    result = [{"stock_code": "000001", "per": 8.0}, {"stock_code": "000002", "per": 12.0}]
+    audit = auditor.post_audit(result, conn, "질문", llm_fn=_json_llm(True, "경고"))
+    assert audit["blocked"] is False
+    assert audit["soft"] == []
+

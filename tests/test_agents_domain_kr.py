@@ -328,6 +328,68 @@ def test_find_stock_code_resolves_group_prefix_omitted_inotek(tmp_path):
     assert code == "011070"
 
 
+# ── find_stock_code: 불규칙 축약형(중간 글자 생략) 종목명 정합성 ────────────────────────
+# 실서버 재현 버그: "현대차 PER 알려줘"를 물으면 "현대차"가 정식 사명 "현대자동차"의 부분
+# 문자열이 아니라서(가운데 "자동" 두 글자가 빠짐) 종목을 못 찾았다. 그룹접두어 제거
+# (_GROUP_PREFIXES)는 "앞부분만 잘라내는" 알고리즘이라 이런 중간 축약은 다루지 못한다 —
+# 별도 명시 별칭 사전(_IRREGULAR_NAME_ALIASES)으로 보강한다. "현대차증권"처럼 우연히
+# "현대차"를 포함하는 무관한 회사가 있어도(느슨한 LIKE가 아니라 명시 별칭 매칭이므로)
+# 잘못 걸리면 안 된다.
+
+def _seed_irregular_alias_companies(tmp_path) -> str:
+    """불규칙 축약형 매칭 재현용: 현대자동차 + 우연히 "현대차"를 포함하는 무관한 현대차증권."""
+    db = tmp_path / "irregular_alias.db"
+    init_db(str(db))
+    conn = connect(str(db))
+    try:
+        rows = [
+            ("005380", "현대자동차", "KOSPI", "운수장비"),
+            ("001500", "현대차증권", "KOSPI", "금융"),  # "현대차"를 우연히 포함하는 무관한 회사
+            ("000270", "기아", "KOSPI", "운수장비"),
+        ]
+        for r in rows:
+            conn.execute(
+                "INSERT INTO company(stock_code, name, market, sector) VALUES(?,?,?,?)", r
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return str(db)
+
+
+def test_find_stock_code_resolves_irregular_abbreviation_hyundai_motor(tmp_path):
+    """"현대차"(중간 축약)는 무관한 현대차증권(001500)이 아니라 현대자동차(005380)로 resolve돼야 한다."""
+    db = _seed_irregular_alias_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "현대차 PER 알려줘")
+    finally:
+        conn.close()
+    assert code == "005380"
+
+
+def test_find_stock_code_resolves_irregular_abbreviation_kia(tmp_path):
+    """"기아차"(중간 축약)도 기아(000270)로 resolve된다(현대차 외 불규칙 축약 사례)."""
+    db = _seed_irregular_alias_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "기아차 실적 알려줘")
+    finally:
+        conn.close()
+    assert code == "000270"
+
+
+def test_find_stock_code_full_official_name_still_resolves_correct_company(tmp_path):
+    """회귀: 정식 사명("현대자동차")을 그대로 물으면 여전히 정확히 매칭된다(별칭 추가로 안 깨짐)."""
+    db = _seed_irregular_alias_companies(tmp_path)
+    conn = connect_readonly(db)
+    try:
+        code = find_stock_code(conn, "현대자동차 PER 알려줘")
+    finally:
+        conn.close()
+    assert code == "005380"
+
+
 def test_find_stock_code_keeps_genuine_short_name_when_no_expansion(tmp_path):
     """안전장치: 진짜로 "이닉스"를 물으면(그룹명+이닉스 회사가 실제로 없으므로) 확장하지 않고
     이닉스(452400) 그대로 둔다 — 무조건 확장하는 게 아니라 확장형이 실재할 때만 우선한다."""

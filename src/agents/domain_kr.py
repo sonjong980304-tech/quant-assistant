@@ -148,19 +148,34 @@ _GROUP_PREFIXES: tuple[str, ...] = (
 # 같은 2글자 일반어가 접두어 제거로 무관한 질문에 오탐되는 것을 막는다(하이닉스=4, 이노텍=3).
 _MIN_STRIPPED_REMAINDER = 3
 
+# 그룹접두어 제거(_GROUP_PREFIXES)로는 유도할 수 없는 불규칙 축약형(중간 글자 생략) 별칭.
+# 실서버 재현 버그: "현대차 PER 알려줘"가 정식 사명 "현대자동차"의 부분문자열이 아니라서
+# ("자동" 두 글자가 중간에서 빠짐) 종목을 못 찾아, 위험도 높은 backtest 도메인까지 불필요하게
+# 에스컬레이션되고 거기서 별개의 크래시(auditor.py list-attribute 버그)까지 유발했다.
+# _name_match_sql의 "접두어 제거"는 앞부분만 잘라내는 알고리즘이라 이런 중간 축약은 원리상
+# 다룰 수 없어, 소수의 흔한 사례만 명시 사전으로 보강한다(느슨한 LIKE가 아니라 정식 사명
+# 정확일치라 "현대차증권"처럼 우연히 "현대차"를 포함하는 무관한 회사는 걸리지 않는다).
+_IRREGULAR_NAME_ALIASES: dict[str, str] = {
+    "현대차": "현대자동차",
+    "기아차": "기아",
+}
+
 
 def _name_match_sql(escaped_text: str) -> str:
     """질문 텍스트에서 종목명 매칭 후보를 한 번의 SQL로 뽑는 쿼리를 만든다.
 
-    두 종류의 매칭을 UNION 으로 합친다(단일 execute_sql 호출 유지):
+    세 종류의 매칭을 UNION 으로 합친다(단일 execute_sql 호출 유지):
     - direct: 질문이 회사 공식명을 통째로 포함(기존 역방향 LIKE). matched_text=회사명.
     - stripped: 그룹·지주 접두어(_GROUP_PREFIXES)를 뗀 나머지가 질문에 포함되는 실재 회사.
       matched_text=접두어를 뗀 나머지. company 테이블에 실제로 있는 회사만 후보가 되므로
       "접두어+매칭텍스트가 실존할 때만 확장"이 자동으로 보장된다(무조건 확장 아님).
+    - irregular: 명시 별칭 사전(_IRREGULAR_NAME_ALIASES)의 별칭이 질문에 포함되고 그 정식
+      사명이 실제로 존재하는 회사. matched_text=별칭 자체. 정식 사명 정확일치(=)라 느슨한
+      LIKE로 인한 오매칭(예: "현대차"가 "현대차증권"에 우연히 걸리는 것)이 원천 불가능하다.
 
     정렬: 매칭된 텍스트 길이 DESC → direct 우선 → 회사명 길이 DESC. "하이닉스"(stripped,4)가
     "이닉스"(direct,3)를 이겨 그룹명 생략 구어체를 정확한 종목으로 resolve하고, 무관한 짧은
-    이름의 오탐을 억제한다("가장 구체적인 매치 우선" 원칙을 두 매칭 방식에 걸쳐 확장한 것).
+    이름의 오탐을 억제한다("가장 구체적인 매치 우선" 원칙을 세 매칭 방식에 걸쳐 확장한 것).
     """
     when_clauses = "\n".join(
         f"        WHEN name LIKE '{p.replace(chr(39), chr(39) * 2)}%' "
@@ -168,11 +183,21 @@ def _name_match_sql(escaped_text: str) -> str:
         f"THEN SUBSTR(name, {len(p) + 1})"
         for p in _GROUP_PREFIXES
     )
+    irregular_clauses = "\n  UNION ALL\n".join(
+        "  SELECT stock_code, name, '{alias}' AS matched_text, 1 AS is_direct FROM company\n"
+        "    WHERE name = '{real}' AND '{text}' LIKE '%{alias}%'".format(
+            alias=alias.replace("'", "''"),
+            real=real.replace("'", "''"),
+            text=escaped_text,
+        )
+        for alias, real in _IRREGULAR_NAME_ALIASES.items()
+    )
     return (
         "SELECT stock_code, name, matched_text, is_direct FROM (\n"
         "  SELECT stock_code, name, name AS matched_text, 1 AS is_direct FROM company\n"
         f"    WHERE name IS NOT NULL AND name != '' AND '{escaped_text}' LIKE '%' || name || '%'\n"
-        "  UNION ALL\n"
+        + (f"  UNION ALL\n{irregular_clauses}\n" if irregular_clauses else "")
+        + "  UNION ALL\n"
         "  SELECT stock_code, name, matched_text, 0 AS is_direct FROM (\n"
         "    SELECT stock_code, name, CASE\n"
         f"{when_clauses}\n"

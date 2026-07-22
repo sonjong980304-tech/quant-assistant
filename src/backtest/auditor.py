@@ -385,7 +385,12 @@ def post_audit(result: dict, conn, question: str, llm_fn: Callable | None = None
     ]
     blocked = any(v["blocked"] for v in hard)
     soft: list[dict] = []
-    if not blocked and llm_fn is not None:
+    # 소프트검사관(inspect_storytelling 등)은 result가 dict(성과/보유종목 구조)일 때만
+    # 의미가 있다 — "PER PBR PSR" 같은 순위(cross-section) 결과는 list라 검사할 performance/
+    # holdings 자체가 없다. 가드 없이 넘기면 result.get(...)에서 AttributeError로 크래시해
+    # fail-closed 하드차단으로 오인되던 실서버 버그(홀딩스 추출은 이미 dict 가드가 있었는데
+    # 소프트검사관 호출부만 빠져 있었다).
+    if not blocked and llm_fn is not None and isinstance(result, dict):
         soft = run_soft_inspectors(result, question, llm_fn, steps=steps)
     return {"blocked": blocked, "hard": hard, "soft": soft}
 
