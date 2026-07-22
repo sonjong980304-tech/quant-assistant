@@ -149,8 +149,8 @@ def api_query(req: QueryReq):
 
     (과거 HA-16에서 legacy 자동 폴백 안전망을 붙였으나, 신규 구조가 스스로 정확히
     답하지 못하는 원인을 legacy 우회로 가리는 대신 근본 원인을 고치는 쪽으로 방향을
-    바꿔 폴백 로직을 제거했다. legacy 파이프라인 자체는 src/legacy/ 에 참고용으로
-    남아 있으나 이 라이브 경로에서는 더 이상 호출하지 않는다.)
+    바꿔 폴백 로직을 제거했다. legacy 파이프라인(src/legacy/, cli.py)은 그 뒤로도
+    한동안 별도 CLI 진입점으로 남아 있었으나, 그마저 쓰임이 없어져 완전히 삭제했다.)
 
     conn 은 요청마다 새 읽기전용 연결(connect_readonly) — 도메인/데이터 에이전트가 LLM 생성
     SQL 을 실행하므로 읽기전용 연결을 요구한다. llm_fn 은 HA-12 가 만든 _build_llm_fn 어댑터를
@@ -367,7 +367,7 @@ def _build_llm_fn(model: Optional[str], role: str = "sql"):
     """LLMClient 를 도메인 에이전트 규약(Callable[[str], str])으로 감싼다.
 
     가용하지 않으면(키/데몬 없음) None 을 반환해 총괄·도메인 로직이 결정론적 휴리스틱으로
-    폴백하게 한다(src/legacy/graph/nodes.py 의 llm_fn 어댑팅 관례와 동일). 총괄→도메인이 쓰는
+    폴백하게 한다. 총괄→도메인이 쓰는
     주 작업이 SQL·파이썬 코드 생성이라 기본 role="sql"(openai_model_sql 티어)로 모델을 고른다. 차트
     종류 판정처럼 저가 모델로 충분한 호출부는 role="chart"를 넘긴다 — LLMClient.model_for가
     sql/judge/diagnose 어디에도 안 걸리는 role을 기본 저가 모델(openai_model)로 떨어뜨리므로,

@@ -63,29 +63,3 @@ def test_readonly_cannot_be_toggled_off(tmp_path):
             c.execute("UPDATE company SET name='해킹'")
     finally:
         c.close()
-
-
-# ── 사이클 5: Pipeline 배선 — 질의 경로는 읽기전용, 앱 쓰기는 쓰기 가능 ──
-def test_pipeline_query_conn_is_readonly(seeded_db):
-    """LLM SQL이 실행되는 deps.conn 은 읽기전용(쓰기 거부), 읽기는 정상."""
-    from src.legacy.pipeline import Pipeline
-
-    p = Pipeline(db_path=seeded_db, offline=True)
-    try:
-        with pytest.raises(sqlite3.Error):
-            p.deps.conn.execute("UPDATE company SET name='해킹'")
-        assert p.deps.conn.execute("SELECT COUNT(*) FROM company").fetchone()[0] >= 1
-    finally:
-        p.close()
-
-
-def test_pipeline_wiki_conn_still_writable(seeded_db):
-    """WikiStore용 연결(self.conn)은 정상 쓰기 가능해야 한다(성공 질의 기록 저장용)."""
-    from src.legacy.pipeline import Pipeline
-
-    p = Pipeline(db_path=seeded_db, offline=True)
-    try:
-        p.conn.execute("UPDATE company SET name=name WHERE 1=0")  # no-op write → 성공해야 함
-        p.conn.commit()
-    finally:
-        p.close()
