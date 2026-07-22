@@ -118,6 +118,24 @@ CREATE TABLE IF NOT EXISTS prices (
     UNIQUE(stock_code, date)
 );
 
+-- 일자별 상장주식수 (pykrx get_market_cap_by_date 의 '상장주식수' 컬럼). prices.market_cap
+-- 재계산(backfill_marketcap)의 최우선 상장주식수 소스다. financials.shares_outstanding 은
+-- 분기 재무제표(stockTotqySttus)에 딸려서만 갱신돼 액면분할·무상증자가 분기 결산일 '사이'에
+-- 나면 다음 분기 보고서(최대 3개월 지연)까지 옛 주식수에 멈춰 있는 반면(그동안 prices.close 는
+-- 매일 갱신 → '분할 전 주식수 × 분할 후 가격'으로 시총이 분할비율만큼 축소되는 구조적 버그),
+-- pykrx 는 그 날짜에 실제 발효 중이던 상장주식수를 일자별로 정확히 준다(결산일 지연·look-ahead
+-- 없음 — 그 값 자체가 그 날짜의 실제 값이므로 staleness/이상치 가드가 불필요하다).
+-- backfill_shares_daily.py 가 종목별 1회 API 호출로 수집해 채운다. 자연어 SQL 질의 대상 아님
+-- (QUERYABLE_TABLES 미포함 — metrics 와 동일 관례).
+CREATE TABLE IF NOT EXISTS daily_shares (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code         TEXT NOT NULL,      -- 종목코드 (6자리 문자열)
+    date               TEXT NOT NULL,      -- 날짜 (YYYY-MM-DD, 거래일) — pykrx 기준 그 날 실제 발효 상장주식수
+    shares_outstanding REAL,               -- 상장주식수 (주)
+    source             TEXT NOT NULL DEFAULT 'pykrx',
+    UNIQUE(stock_code, date)
+);
+
 -- FnGuide 재무지표(밸류에이션·수익성·컨센서스 목표주가 등, "다 가져오는" 폭넓은 지표라
 -- 지표가 계속 늘어날 수 있음) — DART 계산치 전용 metrics 테이블과 완전히 분리된 EAV 스키마.
 CREATE TABLE IF NOT EXISTS fnguide_metrics (
@@ -320,6 +338,7 @@ CREATE INDEX IF NOT EXISTS idx_fin_rev_lookup ON financials_revision(stock_code,
 CREATE INDEX IF NOT EXISTS idx_fin_rev_code_disc ON financials_revision(stock_code, disclosed_date, quarter);
 CREATE INDEX IF NOT EXISTS idx_price_code_d ON prices(stock_code, date);
 CREATE INDEX IF NOT EXISTS idx_price_date   ON prices(date);
+CREATE INDEX IF NOT EXISTS idx_daily_shares_code_d ON daily_shares(stock_code, date);
 CREATE INDEX IF NOT EXISTS idx_metrics_code ON metrics(stock_code, quarter);
 CREATE INDEX IF NOT EXISTS idx_metrics_full ON metrics(stock_code, quarter, price_date);
 CREATE INDEX IF NOT EXISTS idx_kr_stock_changes_code ON kr_stock_changes(stock_code);

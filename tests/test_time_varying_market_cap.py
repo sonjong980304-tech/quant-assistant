@@ -150,6 +150,64 @@ def test_backfill_marketcap_nulls_confirmed_spike_pollution(tmp_path):
     assert polluted["market_cap"] is None  # ×1000 오염 → NULL 정리
 
 
+def _seed_daily_shares(conn, code, rows):
+    """rows: [(date, shares_outstanding)]"""
+    for d, shares in rows:
+        conn.execute(
+            "INSERT INTO daily_shares(stock_code, date, shares_outstanding, source) VALUES (?,?,?,'pykrx')",
+            (code, d, shares),
+        )
+    conn.commit()
+
+
+def test_backfill_marketcap_prefers_daily_shares_over_financials(tmp_path):
+    """분기 결산일 '사이'에 액면분할이 나면 financials는 분할 전 값에 멈춰 있지만(최대 3개월
+    지연), daily_shares는 그 날짜에 실제 발효 중이던 분할 후 값을 즉시 반영한다 — 이 시차가
+    바로 daily_shares 테이블을 새로 만든 이유(원래 버그)이므로, 두 소스가 서로 다른 값을 줄 때
+    daily_shares가 이긴다는 것을 회귀로 고정한다."""
+    from scripts.backfill_marketcap import backfill_marketcap
+
+    db_path = str(tmp_path / "m.db")
+    init_db(db_path)
+    conn = connect(db_path)
+    # financials: 분할 전 분기값(다음 분기 보고서 전까지 정체)
+    _seed_shares(conn, "005930", [("2024Q1", "2024-05-15", 1_000_000)])
+    # daily_shares: 같은 날짜에 이미 분할이 반영된 실제값(50:1 분할)
+    _seed_daily_shares(conn, "005930", [("2024-06-28", 50_000_000)])
+    _seed_price(conn, "005930", "2024-06-28", 100.0, None)
+    conn.close()
+
+    backfill_marketcap(db_path=db_path)
+
+    conn = connect(db_path)
+    row = conn.execute(
+        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-06-28'"
+    ).fetchone()
+    assert row["market_cap"] == round(100.0 * 50_000_000)  # financials(1M)이 아닌 daily_shares(50M)
+
+
+def test_backfill_marketcap_falls_back_to_financials_when_no_daily_shares(tmp_path):
+    """daily_shares에 그 종목 데이터가 아예 없으면(백필 미대상 등) 기존 financials 경로로
+    폴백한다 — daily_shares 도입이 기존 동작을 깨지 않는다는 회귀 확인."""
+    from scripts.backfill_marketcap import backfill_marketcap
+
+    db_path = str(tmp_path / "m.db")
+    init_db(db_path)
+    conn = connect(db_path)
+    _seed_shares(conn, "005930", [("2024Q1", "2024-05-15", 1_000_000)])
+    # daily_shares 행 없음
+    _seed_price(conn, "005930", "2024-06-28", 100.0, 999_999_900)  # 틀린 값
+    conn.close()
+
+    backfill_marketcap(db_path=db_path)
+
+    conn = connect(db_path)
+    row = conn.execute(
+        "SELECT market_cap FROM prices WHERE stock_code='005930' AND date='2024-06-28'"
+    ).fetchone()
+    assert row["market_cap"] == round(100.0 * 1_000_000)  # financials 폴백값으로 교정
+
+
 def test_backfill_marketcap_dry_run_makes_no_change(tmp_path):
     """dry_run=True 는 UPDATE 하지 않고 규모만 집계한다."""
     from scripts.backfill_marketcap import backfill_marketcap

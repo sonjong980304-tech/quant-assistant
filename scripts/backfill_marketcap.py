@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import sys
 import time
 from pathlib import Path
@@ -75,29 +76,74 @@ def _effective_shares(series: list, on_compact: str):
     return best
 
 
-def backfill_marketcap(db_path: str | None = None, *, dry_run: bool = False, progress_every: int = 500) -> dict:
-    """prices.market_cap 을 종가 × (그 시점 공시된 상장주식수)로 재계산한다.
+def _daily_shares_for(conn, code: str) -> tuple[list, list]:
+    """daily_shares 에서 code 의 (date 오름차순 리스트, shares 리스트). 비양수/NULL 제외.
 
+    pykrx 일자별 정식 상장주식수 — backfill_marketcap 의 최우선 시총 소스다. date 는
+    'YYYY-MM-DD' 라 문자열 정렬=시간순이므로 bisect 로 date<=asof 최신값을 O(log n) 조회한다.
+    """
+    rows = conn.execute(
+        "SELECT date, shares_outstanding FROM daily_shares "
+        "WHERE stock_code=? AND shares_outstanding IS NOT NULL AND shares_outstanding>0 "
+        "ORDER BY date",
+        (code,),
+    ).fetchall()
+    dates = [r["date"] for r in rows]
+    vals = [r["shares_outstanding"] for r in rows]
+    return dates, vals
+
+
+def _daily_shares_at(dates: list, vals: list, asof: str):
+    """date<=asof 중 최신 상장주식수(없으면 None). 가드 없음 — 그 값 자체가 그 날짜의 실제 값.
+
+    daily_shares 는 KRX 일자별 정식 데이터라 disclosed_date/staleness/이상치 가드가 필요 없다
+    (financials 기반 _effective_shares_outstanding 과 달리 단순 date<=asof 최신값만 고른다).
+    """
+    i = bisect.bisect_right(dates, asof)  # asof 초과 첫 인덱스
+    return vals[i - 1] if i else None
+
+
+def backfill_marketcap(
+    db_path: str | None = None,
+    *,
+    dry_run: bool = False,
+    progress_every: int = 500,
+    codes: list[str] | None = None,
+) -> dict:
+    """prices.market_cap 을 종가 × (그 시점 유효 상장주식수)로 재계산한다.
+
+    상장주식수 소스 우선순위: daily_shares(pykrx 일자별 정식값, 결산일 지연 없음) > financials.
+    shares_outstanding(분기 공시, look-ahead/staleness/이상치 가드 포함) 폴백.
     dry_run=True 면 UPDATE 하지 않고 바뀔 행/종목 수만 집계해 보고한다(사전 규모 파악용).
-    시점별 주식수 판정은 _effective_shares_outstanding(look-ahead+staleness+이상치 가드)를 재사용한다.
+    codes 지정 시 그 종목들만 대상으로 한다(daily_shares 검증 등 소규모 실행용).
     """
     init_db(db_path)
     conn = connect(db_path)
     try:
         series_map = _shares_series(conn)  # {code: [(disc, shares)...]} — 82k행, 메모리 무해
-        codes = [r["stock_code"] for r in conn.execute(
-            "SELECT DISTINCT stock_code FROM prices WHERE close IS NOT NULL ORDER BY stock_code"
-        ).fetchall()]
-        total_codes = len(codes)
+        if codes:
+            qmarks = ",".join("?" * len(codes))
+            code_list = [r["stock_code"] for r in conn.execute(
+                f"SELECT DISTINCT stock_code FROM prices WHERE close IS NOT NULL "
+                f"AND stock_code IN ({qmarks}) ORDER BY stock_code",
+                codes,
+            ).fetchall()]
+        else:
+            code_list = [r["stock_code"] for r in conn.execute(
+                "SELECT DISTINCT stock_code FROM prices WHERE close IS NOT NULL ORDER BY stock_code"
+            ).fetchall()]
+        total_codes = len(code_list)
 
         price_rows = changed = unchanged = no_shares = codes_changed = spike_nulled = 0
         started = time.time()
 
-        for idx, code in enumerate(codes, 1):
+        for idx, code in enumerate(code_list, 1):
             series = series_map.get(code)
             # 종목 median(이상치 판정 기준). _effective_shares_outstanding 과 동일 정의.
             amounts = sorted(a for _, a in series) if series else []
             median = amounts[len(amounts) // 2] if amounts else 0
+            # 최우선 소스: daily_shares(pykrx 일자별 정식 상장주식수, 결산일 지연 없음).
+            d_dates, d_vals = _daily_shares_for(conn, code)
             rows = conn.execute(
                 "SELECT date, close, market_cap FROM prices WHERE stock_code=? AND close IS NOT NULL",
                 (code,),
@@ -106,7 +152,10 @@ def backfill_marketcap(db_path: str | None = None, *, dry_run: bool = False, pro
             for r in rows:
                 price_rows += 1
                 # prices.date·disclosed_date 모두 'YYYY-MM-DD' → 변환 없이 사전식=시간순 비교
-                shares = _effective_shares_outstanding(series, r["date"]) if series else None
+                # daily_shares 우선(그 날짜 실제 값), 없는 구간만 financials 폴백(공시일 기반 가드값).
+                shares = _daily_shares_at(d_dates, d_vals, r["date"]) if d_dates else None
+                if not shares:
+                    shares = _effective_shares_outstanding(series, r["date"]) if series else None
                 if not shares:
                     no_shares += 1
                     # 확정 스파이크 오염 정리: 가드는 None 이지만 무가드 최신값(raw)이 이상치이고,
@@ -173,6 +222,8 @@ def backfill_marketcap(db_path: str | None = None, *, dry_run: bool = False, pro
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="prices.market_cap 시점별 상장주식수로 재계산")
     ap.add_argument("--dry-run", action="store_true", help="쓰기 없이 영향 규모/예상 시간만 보고")
+    ap.add_argument("--codes", default=None, help="쉼표구분 종목코드만 대상(예: 134380,003350,298000)")
     ap.add_argument("--db", default=None, help="DB 경로(기본: CONFIG.db_path)")
     args = ap.parse_args()
-    print(backfill_marketcap(db_path=args.db, dry_run=args.dry_run))
+    code_list = [c.strip() for c in args.codes.split(",") if c.strip()] if args.codes else None
+    print(backfill_marketcap(db_path=args.db, dry_run=args.dry_run, codes=code_list))
