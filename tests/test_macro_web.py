@@ -87,6 +87,7 @@ def test_api_macro_vkospi_returns_latest_value(tmp_path, monkeypatch):
     assert data["available"] is True
     assert data["date"] == "2026-07-21"   # 최신 날짜(2026-07-20이 아님)
     assert data["value"] == 84.89
+    assert data["band"] == "공포"   # 84.89 >= 30 → VIX와 동일 구간 기준
 
 
 def test_api_macro_vkospi_empty_db_is_graceful(tmp_path, monkeypatch):
@@ -99,6 +100,7 @@ def test_api_macro_vkospi_empty_db_is_graceful(tmp_path, monkeypatch):
     data = r.json()
     assert data["available"] is False
     assert data["value"] is None
+    assert data["band"] is None
 
 
 # --------------------------------------------------------------------------

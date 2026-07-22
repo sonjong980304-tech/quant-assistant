@@ -47,6 +47,7 @@ from src.agents.graph import run_hierarchical, run_streaming
 from src.config import CONFIG
 from src.db import connect, connect_readonly
 from src.ingest.exchange_rate import fetch_usdkrw_rate_live
+from src.ingest.macro_signal import classify_vkospi_band
 from src.wiki.store import WikiStore
 
 app = FastAPI(title="Quant Assistant")
@@ -646,8 +647,13 @@ def api_macro_vkospi():
     finally:
         conn.close()
     if row is None:
-        return {"available": False, "date": None, "value": None}
-    return {"available": True, "date": row["date"], "value": row["value"]}
+        return {"available": False, "date": None, "value": None, "band": None}
+    return {
+        "available": True,
+        "date": row["date"],
+        "value": row["value"],
+        "band": classify_vkospi_band(row["value"]),
+    }
 
 
 @app.get("/api/macro/history")

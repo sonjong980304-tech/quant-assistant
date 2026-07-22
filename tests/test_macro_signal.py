@@ -16,6 +16,7 @@ from src.ingest.macro_signal import (
     classify_cnn_band,
     classify_spread_regime,
     classify_vix_band,
+    classify_vkospi_band,
     compute_signal,
     regime_to_overall,
     run_signal,
@@ -64,6 +65,23 @@ def test_classify_cnn_band_boundaries(value, expected):
 )
 def test_classify_vix_band_boundaries(value, expected):
     assert classify_vix_band(value) == expected
+
+
+# --------------------------------------------------------------------------
+# VKOSPI 밴드 분류 — VIX와 산출 방식(옵션 내재변동성)이 동일해 같은 구간을 그대로
+# 적용한다(<15 안정, 15~20 보통, 20~30 경계, >=30 공포). 참고 표시 전용.
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (14.9, "안정"),
+        (15.0, "보통"), (19.9, "보통"),
+        (20.0, "경계"), (29.9, "경계"),
+        (30.0, "공포"), (84.89, "공포"),
+    ],
+)
+def test_classify_vkospi_band_boundaries(value, expected):
+    assert classify_vkospi_band(value) == expected
 
 
 # --------------------------------------------------------------------------
