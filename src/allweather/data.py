@@ -36,6 +36,7 @@ TICKERS: dict[str, str] = {
     KRX_GOLD_TICKER: "ACE KRX금현물",
     "IEF": "IEF (미국 중기국채)",
     "TIP": "TIP (미국 물가연동채)",
+    "BIL": "BIL (미국 초단기국채, 1~3개월물)",
 }
 
 

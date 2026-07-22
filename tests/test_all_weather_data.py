@@ -25,9 +25,12 @@ from src.allweather.data import (
 )
 
 
-def test_all_six_tickers_present():
-    # AC1 + 2026-07 MDD 제약 도입: 6종목(기존 4 + IEF/TIP) 모두 조회 대상에 포함.
-    assert set(TICKERS) == {"QQQ", SAMSUNG_TICKER, "TLT", KRX_GOLD_TICKER, "IEF", "TIP"}
+def test_all_seven_tickers_present():
+    # AC1 + 2026-07 MDD 제약 도입: 7종목(기존 4 + IEF/TIP/BIL) 모두 조회 대상에 포함.
+    # SGOV(2020년 상장)는 백테스트 구간을 지나치게 줄여 BIL(2007년 상장)로 대체했다.
+    assert set(TICKERS) == {
+        "QQQ", SAMSUNG_TICKER, "TLT", KRX_GOLD_TICKER, "IEF", "TIP", "BIL",
+    }
 
 
 def test_samsung_sourced_from_yfinance_not_db():

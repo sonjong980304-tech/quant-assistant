@@ -20,7 +20,7 @@ from typing import Callable
 from ..db import connect, init_db
 from .backtest import run_walk_forward
 from .data import build_price_panel, fetch_irx_series
-from .montecarlo import N_SIMULATIONS, run_monte_carlo
+from .montecarlo import N_SIMULATIONS, run_monte_carlo_mdd_constrained
 from .notify import build_delta_message, send_telegram
 from .store import get_latest_snapshot, persist_snapshot
 
@@ -40,10 +40,10 @@ def run_all_weather_pipeline(
     send_fn 미주입 시 send_telegram(미설정 시 조용히 스킵)을 쓴다.
     """
     today = today or date.today()
-    # 2026-07 사용자 결정: 순수 샤프비율 극대화(무제약)를 그대로 유지 — MDD 제약은 걸지 않는다.
-    # MDD -20% 제약 버전(run_monte_carlo_mdd_constrained, montecarlo.py)은 별도로 만들어뒀지만
-    # 이 배치의 기본값으로는 쓰지 않는다(필요하면 monte_carlo_fn 인자로 주입해서 쓸 수 있다).
-    monte_carlo_fn = monte_carlo_fn or run_monte_carlo
+    # 2026-07 사용자 최종 결정: BIL(초단기국채) 추가 후 실측 비교(무제약 vs MDD -20% 제약)에서
+    # 제약 버전이 샤프비율(0.892>0.857)·MDD(-26.0%>-27.3%) 둘 다 더 나은 것으로 확인돼
+    # run_monte_carlo_mdd_constrained를 기본값으로 채택한다(매달 배치가 이 방식으로 계속 재학습).
+    monte_carlo_fn = monte_carlo_fn or run_monte_carlo_mdd_constrained
     send_fn = send_fn or send_telegram
 
     init_db(db_path)
