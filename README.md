@@ -578,7 +578,7 @@ quant-assistant/
 #### 4. 시가총액 시점별 정확화 (`_shares_outstanding_at`)
 - **무엇**: 과거 시가총액을 계산할 때 '오늘'의 상장주식수가 아니라 **그 시점의 실제 상장주식수**를 씁니다(`src/ingest/metrics.py`의 `_shares_outstanding_at`/`_effective_shares_outstanding`, `disclosed_date <= asof` 기준).
 - **왜**: 유상증자·자사주소각·액면분할로 주식수가 바뀐 종목은 오늘 주식수로 과거 시총을 계산하면 틀립니다(PER/PBR 랭킹 오염).
-- **어떻게**: 공시일 오름차순 이력에서 asof 유효값을 고르되, 종목 전체 median 대비 `_SHARES_ANOMALY_RATIO` 배 이상 벗어난 값은 단위오류(×1000 원복형 스파이크, 실측 다수 종목)로 보고 무효화하는 **이상치 가드**를 조회(read) 시점에 한 번 더 적용합니다(액면분할 같은 정상 변화는 배수가 작아 살아남습니다 — `prices.market_cap`·text-to-SQL 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
+- **어떻게**: 공시일 오름차순 이력에서 asof 유효값을 고르되, 종목 전체 median 대비 `_SHARES_ANOMALY_RATIO` 배 이상 벗어난 값은 단위오류(×1000 원복형 스파이크, 실측 다수 종목)로 보고 무효화하는 **이상치 가드**를 조회(read) 시점에 한 번 더 적용합니다(액면분할 같은 정상 변화는 배수가 작아 살아남습니다 — `prices.market_cap`·스크리닝 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
 
 #### 5. 가격 이상치 가드 asof-국소화 (`src/data_quality.py`)
 - **무엇/왜/어떻게**: 정리매매·감자 등으로 인한 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이 되레 재유입됩니다. `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고 `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에 asof가 들어갈 때만 국소적으로 제외합니다(멀리 떨어진 과거 정상 시점 데이터는 보존). 위 [데이터 품질 안전장치](#데이터-품질-안전장치) 절의 그 장치입니다.

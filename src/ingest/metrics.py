@@ -104,7 +104,7 @@ def _effective_shares_outstanding(series, asof):
       액면분할(삼성 50:1 등, 지속적 계단변화)은 median 이 분할 후 값 쪽으로 수렴해 배수가 100
       미만이라 죽지 않는다(실측 최대 분할이 50:1). insert 시점 _shares_jump_anomalous 가드는
       백필 중 분기 역순 삽입으로 원복형 스파이크를 놓쳤어서, read 시점에 한 번 더 방어한다
-      (prices.market_cap·text-to-SQL 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
+      (prices.market_cap·스크리닝 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
     """
     if not series:
         return None

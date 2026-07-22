@@ -1,4 +1,4 @@
-"""SQLite 연결/초기화 + 스키마 카탈로그(Text-to-SQL 프롬프트용).
+"""SQLite 연결/초기화 + 스키마 카탈로그(LLM 프롬프트용, 자유형 SQL 폴백 경로에서 사용).
 
 컬럼명은 영어 snake_case로 두되, 각 컬럼의 한글 의미를 schema_catalog로
 LLM에 제공한다. 한글 컬럼명은 SQL 인용 처리 이슈가 있어 피한다.
@@ -405,7 +405,7 @@ CREATE TABLE IF NOT EXISTS all_weather_snapshot (
 );
 """
 
-# 읽기 전용 쿼리에 노출되는 테이블 (Text-to-SQL 대상).
+# 읽기 전용 쿼리에 노출되는 테이블 (스키마 카탈로그 노출 대상).
 # metrics(사전계산 스냅샷)는 제외 — 모든 지표는 financials/prices 원본에서 질의 시점에 계산한다.
 QUERYABLE_TABLES = ["company", "financials", "prices"]
 
