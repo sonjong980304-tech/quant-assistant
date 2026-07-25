@@ -10,8 +10,10 @@
 [![EXAONE](https://img.shields.io/badge/EXAONE-Local%20LLM-000000?logo=ollama&logoColor=white)](https://ollama.com/library/exaone3.5)
 [![Qwen2.5-coder](https://img.shields.io/badge/Qwen2.5--coder-Local%20LLM-615CED?logo=ollama&logoColor=white)](https://ollama.com/library/qwen2.5-coder)
 
-한국 상장사 재무/주가/매크로 데이터를 SQLite에 적재하고, 자연어 질문에 Python가 SQL을 활용해 llm이 답하는
-시스템입니다. **두 개의 진입점이 서로 다른 아키텍처로 동작**합니다.(GPT-5.4-mini, Exaone3.5, Qwen2.5-coder 적용)
+한국 상장사 재무·주가·매크로 데이터를 SQLite로 통합하고, LangGraph 계층형 멀티에이전트가 자연어 질문을
+SQL·검증된 백테스트 프리미티브로 번역해 답합니다. 화면은 멀티턴 대화(`/chat`)와 단발 질의(`/query`)
+두 가지이며, **내부 아키텍처는 하나의 총괄 에이전트(`answer_with_verification`)를 공유**합니다.
+(GPT-5.4-mini / EXAONE 3.5 / Qwen2.5-coder 3종 지원)
 
 ![복합 통계 질문 응답 화면 — PBR·GPA 상관관계와 5분위별 평균, 근거 데이터가 함께 표시됨](docs/screenshots/02-query-result.png)
 
@@ -115,9 +117,11 @@ walk-forward, 매달 자동으로 늘어남), 매크로 레짐 신호, launchd �
 5개 영역을 실제 시스템에 물어본 뒤 DART 원문·네이버 시세·DB 재계산·
 vision 판정과 대조하였습니다.
 
-**Result** — 로컬 LLM(EXAONE·Qwen) vs GPT 정확도·속도를 평가하였습니다. 아래 36개 사실확인 항목 전부(100%)가 시스템 스스로의 주장이 아니라 외부
-1차 소스 재조회 또는 DB 직접 재계산과 대조해 통과를 확인한 결과입니다. 이 프로젝트가
-실제로 신뢰할 만하게 동작하는지를 보여주는 증거입니다.
+**Result** — 로컬 LLM(EXAONE·Qwen) vs GPT 정확도·속도를 평가하였습니다. 36개 사실확인 항목을 만들어
+GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 방식**입니다 — 시스템의 자기 주장을
+믿지 않고, DART 원문·네이버 시세를 그때그때 재조회하거나 DB에서 직접 재계산한 값과 맞춰봤습니다.
+통과율은 GPT 35/36(97.2%), Qwen 30/36, EXAONE 27/36으로, 로컬 모델의 실패 지점이 어디인지가
+그대로 드러납니다.
 - 재무제표 10종목(영업이익 등) — DART 원문 재조회(±1% 오차 허용)
 - 실시간 주가 10종목 — 네이버 증권 재조회
 - 스크리닝(PER·PBR·ROE 등) 10케이스 — DB 직접 재계산
