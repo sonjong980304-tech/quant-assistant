@@ -457,8 +457,9 @@ quant-assistant/
 │   │   ├── exec_runtime.py        # LLM 생성 SQL/파이썬 안전 실행기(읽기전용 conn + 별도 프로세스)
 │   │   ├── exec_fallback.py       # 정형 재시도 소진 후 최후 1회 자유 코드 폴백
 │   │   ├── conversation.py        # 멀티턴 대화 세션(신규/이어가기 분기, 프로세스 메모리)
+│   │   ├── chart_agent.py         # matplotlib 자유형 차트 생성(build_chart_freeform)
 │   │   └── charting.py            # 라인/산점도/막대/히스토그램 → base64 PNG
-│   ├── backtest/              # engine, primitives(26개 프리미티브, QVM 포함), pipeline_exec, auditor, selection 등
+│   ├── backtest/              # engine, primitives(26개 프리미티브, QVM 포함), pipeline_exec, auditor, selection, data_access, performance 등
 │   ├── allweather/            # 올웨더 포트폴리오: data(가격수집)/montecarlo(비중최적화)/
 │   │                          # backtest(walk-forward)/store/notify(텔레그램)/pipeline(오케스트레이션)
 │   ├── ingest/                # dart, naver_prices, fnguide_metrics, kr_*(pykrx 기반 KRX 데이터), macro_* 등
@@ -468,7 +469,11 @@ quant-assistant/
 ├── web/
 │   ├── app.py                 # FastAPI (신규 계층형 구조 사용)
 │   └── static/                # chat.html(기본), index.html(/query), macro.html, allweather.html
-└── scripts/                   # 데이터 수집/백필/launchd 진입점
+├── scripts/                   # 데이터 수집/백필 진입점 (scripts/launchd/에 launchd plist 11개 + 안내 README)
+├── references/                # 매크로 지표 임계값·증권거래세율 이력 등 참조 문서
+├── tests/                     # pytest 스위트 (에이전트/백테스트/올웨더/factcheck 등 전 영역 커버)
+├── docs/screenshots/          # README에 쓰이는 화면 스크린샷 6종
+└── start_server.sh / stop_server.sh / show_url.sh  # 웹 서버 기동·중지·접속 URL 확인 스크립트
 ```
 
 
