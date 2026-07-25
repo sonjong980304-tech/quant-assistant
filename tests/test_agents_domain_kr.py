@@ -23,6 +23,7 @@ from src.agents.domain_kr import (
     _parse_periods,
     _parse_price_target_date,
     _parse_recent_return_months,
+    _resolve_metric_periods,
     _strip_retry_feedback,
     answer_kr_question,
     classify_intent,
@@ -1112,6 +1113,118 @@ def test_answer_kr_question_operating_margin_routes_ratio_metric(tmp_path):
         conn.close()
 
     assert seen["metric"] == "operating_margin"
+
+
+# ── _resolve_metric_periods: 다중지표 질문의 지표별 기준시점 판단(실서버 재현 버그) ──────
+# "삼성전자 25년 2분기 영업이익과 현재 PER"처럼 한 질문에 지표가 여러 개 섞이면 지표마다
+# 기준시점이 다를 수 있는데(영업이익=25년 2분기, PER=현재), 예전엔 질문 전체에서 뽑은
+# 기간 하나를 모든 지표에 무조건 적용해 "현재"를 원하는 PER까지 25년 2분기 기준 오래된
+# 가격으로 조회됐다. LLM이 지표별로 시점을 판단하게 하고, 실패 시 기존처럼 전역 period를
+# 모든 지표에 동일 적용하는 것으로 폴백한다.
+
+def test_resolve_metric_periods_no_llm_fn_uses_global_period_for_all():
+    period = {"kind": "quarter", "quarter": "2025Q2"}
+    result = _resolve_metric_periods(
+        "삼성전자 25년 2분기 영업이익과 현재 PER", ["operating_profit", "per"], period,
+        date(2026, 7, 24), llm_fn=None,
+    )
+    assert result == {"operating_profit": period, "per": period}
+
+
+def test_resolve_metric_periods_single_metric_skips_llm():
+    calls = []
+
+    def fake_llm(prompt):
+        calls.append(prompt)
+        return "per: CURRENT"
+
+    period = {"kind": "quarter", "quarter": "2025Q2"}
+    result = _resolve_metric_periods(
+        "삼성전자 25년 2분기 PER", ["per"], period, date(2026, 7, 24), llm_fn=fake_llm,
+    )
+    assert result == {"per": period}
+    assert calls == []  # 지표가 하나면 애매할 일이 없어 LLM을 호출하지 않는다
+
+
+def test_resolve_metric_periods_llm_resolves_different_periods_per_metric():
+    fake_llm = lambda prompt: "operating_profit: 2025Q2\nper: CURRENT"
+    result = _resolve_metric_periods(
+        "삼성전자 25년 2분기 영업이익과 현재 PER", ["operating_profit", "per"],
+        {"kind": "quarter", "quarter": "2025Q2"}, date(2026, 7, 24), llm_fn=fake_llm,
+    )
+    assert result == {
+        "operating_profit": {"kind": "quarter", "quarter": "2025Q2"},
+        "per": None,
+    }
+
+
+def test_resolve_metric_periods_llm_annual_period_token():
+    fake_llm = lambda prompt: "revenue: 2025\nper: CURRENT"
+    result = _resolve_metric_periods(
+        "삼성전자 2025년 매출과 현재 PER", ["revenue", "per"], None,
+        date(2026, 7, 24), llm_fn=fake_llm,
+    )
+    assert result == {"revenue": {"kind": "annual", "year": 2025}, "per": None}
+
+
+def test_resolve_metric_periods_llm_incomplete_response_falls_back():
+    # 지표 중 하나만 답하면(불완전 응답) 신뢰하지 않고 기존 전역 period 동일적용으로 폴백.
+    fake_llm = lambda prompt: "operating_profit: 2025Q2"
+    period = {"kind": "quarter", "quarter": "2025Q2"}
+    result = _resolve_metric_periods(
+        "삼성전자 25년 2분기 영업이익과 현재 PER", ["operating_profit", "per"], period,
+        date(2026, 7, 24), llm_fn=fake_llm,
+    )
+    assert result == {"operating_profit": period, "per": period}
+
+
+def test_resolve_metric_periods_llm_exception_falls_back():
+    def boom(prompt):
+        raise RuntimeError("LLM 호출 실패")
+
+    period = {"kind": "quarter", "quarter": "2025Q2"}
+    result = _resolve_metric_periods(
+        "삼성전자 25년 2분기 영업이익과 현재 PER", ["operating_profit", "per"], period,
+        date(2026, 7, 24), llm_fn=boom,
+    )
+    assert result == {"operating_profit": period, "per": period}
+
+
+# ── answer_kr_question 통합: 다중지표 + 지표별 다른 시점(실서버 재현 버그) ───────────────
+
+def test_answer_kr_question_multi_metric_resolves_different_period_per_metric(tmp_path):
+    db = _seed(tmp_path)
+    calls: list[tuple[str, dict | None]] = []
+
+    def spy_resolve_metric(conn, stock_code, metric, llm_fn=None, period=None):
+        calls.append((metric, period))
+        value = 467605700000 if metric == "operating_profit" else 17.5
+        return {"stock_code": stock_code, "metric": metric, "value": value,
+                "source": "DART", "period": period or "latest"}
+
+    def fake_llm(prompt):
+        # _metric_period_prompt만 지표별 시점을 답하고, 다른 프롬프트(classify_intent 등)는
+        # 빈 응답으로 각자 키워드 폴백을 태운다(다른 LLM 호출과 섞여도 안전하게 동작 확인).
+        if "지표 목록" in prompt:
+            return "operating_profit: 2025Q2\nper: CURRENT"
+        return ""
+
+    conn = connect_readonly(db)
+    try:
+        result = answer_kr_question(
+            "삼성전자 25년 2분기 영업이익과 현재 PER 알려줘", conn,
+            resolve_metric_fn=spy_resolve_metric, llm_fn=fake_llm, today=date(2026, 7, 24),
+        )
+    finally:
+        conn.close()
+
+    assert calls == [
+        ("operating_profit", {"kind": "quarter", "quarter": "2025Q2"}),
+        ("per", None),
+    ]
+    metrics = {m["metric"]: m["financial"] for m in result["metrics"]}
+    assert metrics["operating_profit"]["value"] == 467605700000
+    assert metrics["per"]["value"] == 17.5
 
 
 # ── period 배선: answer_kr_question이 파싱한 기간을 resolve_metric_fn에 전달 ──────────

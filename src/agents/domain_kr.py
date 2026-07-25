@@ -1572,12 +1572,85 @@ def _extract_metrics(question: str) -> list[str]:
     return [key for _, key in hits]
 
 
+def _metric_period_prompt(question: str, metrics: list[str], today: date) -> str:
+    """다중지표 질문의 지표별 기준시점 판단용 LLM 프롬프트.
+
+    "25년 2분기 영업이익과 현재 PER"처럼 한 질문에 여러 지표가 섞이면 지표마다 기준
+    시점이 다를 수 있다(과거 특정 분기 vs 현재/최신). classify_intent/_price_date_llm_prompt와
+    동일 관례(LLM 우선 → 실패 시 폴백)를 "지표-시점 매칭"에도 적용한다.
+    """
+    metric_list = ", ".join(metrics)
+    return (
+        f"오늘은 {today.isoformat()}입니다.\n"
+        f"다음 질문은 여러 재무 지표({metric_list})를 함께 묻고 있습니다. 지표마다 기준"
+        "시점이 다를 수 있습니다(예: 하나는 특정 과거 분기, 다른 하나는 현재/최신 기준).\n"
+        "각 지표가 어느 시점 기준인지 판단해, 지표 개수만큼 한 줄에 하나씩 "
+        "'지표키: 시점' 형식으로 답하세요. 시점은 다음 중 하나만 씁니다:\n"
+        "- YYYYQn (예: 2025Q3) — 특정 분기가 명시된 경우\n"
+        "- YYYY (예: 2025) — 특정 연도(전체)가 명시된 경우\n"
+        "- CURRENT — 그 지표에 특정 시점이 안 붙어 있거나 '현재/최신/지금'처럼 명시된 경우\n\n"
+        f"지표 목록: {metric_list}\n"
+        f"질문: {question}\n답:"
+    )
+
+
+_METRIC_PERIOD_LINE_RE = re.compile(
+    r"([a-zA-Z_]+)\s*[:\-]\s*(CURRENT|\d{4}Q[1-4]|\d{4})", re.IGNORECASE
+)
+
+
+def _parse_metric_periods(raw: str | None, metrics: list[str]) -> dict[str, dict | None] | None:
+    """LLM 응답에서 지표별 시점을 뽑는다. metrics 전부를 못 뽑으면 None(→ 호출부 폴백)."""
+    if not raw:
+        return None
+    found: dict[str, dict | None] = {}
+    for m in _METRIC_PERIOD_LINE_RE.finditer(raw):
+        key, token = m.group(1).lower(), m.group(2).upper()
+        if key not in metrics or key in found:
+            continue
+        if token == "CURRENT":
+            found[key] = None
+        elif re.match(r"^\d{4}Q[1-4]$", token):
+            found[key] = {"kind": "quarter", "quarter": token}
+        else:
+            found[key] = {"kind": "annual", "year": int(token)}
+    if set(found) != set(metrics):
+        return None
+    return found
+
+
+def _resolve_metric_periods(
+    question: str,
+    metrics: list[str],
+    period: dict | None,
+    today: date,
+    llm_fn: Callable[[str], str] | None,
+) -> dict[str, dict | None]:
+    """다중지표 질문에서 지표별로 쓸 기준시점을 정한다.
+
+    llm_fn이 없거나(기존 호출부/테스트 회귀 없음) 실패/미파싱이면, 기존처럼 전역 period를
+    모든 지표에 동일하게 적용한다(_resolve_metrics의 예전 동작과 완전히 동일한 안전한 폴백).
+    llm_fn이 있고 지표가 2개 이상이면 지표별로 다른 시점을 쓸 수 있는지 먼저 LLM에 물어본다
+    (실서버 재현 버그: "25년 2분기 영업이익과 현재 PER"에서 PER까지 25년 2분기 기준 오래된
+    가격으로 잘못 조회됨 — "현재"를 원하는 지표에도 전역 period가 무조건 적용되던 문제).
+    """
+    fallback = {m: period for m in metrics}
+    if llm_fn is None or len(metrics) < 2:
+        return fallback
+    try:
+        raw = llm_fn(_metric_period_prompt(question, metrics, today)) or ""
+    except Exception:  # noqa: BLE001 — LLM 실패는 기존 동작(전역 period 동일 적용)으로 흡수
+        return fallback
+    parsed = _parse_metric_periods(raw, metrics)
+    return parsed if parsed is not None else fallback
+
+
 def _resolve_metrics(
     resolve_metric_fn: Callable,
     conn,
     stock_code: str,
     metrics: list[str],
-    period: dict | None,
+    metric_periods: dict[str, dict | None],
     llm_fn: Callable[[str], str] | None,
     computed_metric_fn: Callable,
     execute_sql_fn: Callable,
@@ -1587,23 +1660,23 @@ def _resolve_metrics(
     반환 원소: {"metric": <지표키>, "financial": <조회 결과 or None>, "errors": [...]}.
     _resolve_metric_over_periods(다중 기간)와 동일한 '리스트-of-딕셔너리' 관례를 따른다.
     지표마다 계산전용 여부(_COMPUTED_ONLY_FIELDS)에 따라 올바른 경로를 고른다 — 단일지표
-    경로(answer_kr_question의 else 분기)와 동일한 분기 로직이다. period는 모든 지표에
-    동일하게 적용된다(호출부가 다중 기간일 때는 이 경로로 오지 않는다 — 다중기간 x
-    다중지표 조합은 아직 요청된 적 없어 범위 밖).
+    경로(answer_kr_question의 else 분기)와 동일한 분기 로직이다. metric_periods는 지표별
+    기준시점 매핑(_resolve_metric_periods가 결정)이라 지표마다 다른 시점을 쓸 수 있다.
     """
     out: list[dict] = []
     for metric in metrics:
         entry: dict = {"metric": metric, "financial": None, "errors": []}
+        period = metric_periods.get(metric)
         if metric in _COMPUTED_ONLY_FIELDS:
             computed_asof = _resolve_screening_asof(period, conn, "prices", execute_sql_fn)
             financial, err = _call_with_retry(
-                lambda metric=metric: computed_metric_fn(
+                lambda metric=metric, computed_asof=computed_asof: computed_metric_fn(
                     conn, stock_code, metric, asof=computed_asof, execute_sql_fn=execute_sql_fn,
                 )
             )
         else:
             financial, err = _call_with_retry(
-                lambda metric=metric: _resolve_metric_with_fallback(
+                lambda metric=metric, period=period: _resolve_metric_with_fallback(
                     conn, stock_code, metric, period, llm_fn,
                     resolve_metric_fn, computed_metric_fn, execute_sql_fn,
                 )
@@ -2231,8 +2304,13 @@ def answer_kr_question(
         # 그 경우는 기존처럼 첫 지표만 쓰는 단일지표 분기로 흘러간다(회귀 없음, 기존 동작 유지).
         metrics = _extract_metrics(question) if len(periods) < 2 else []
         if len(metrics) >= 2:
+            # 지표마다 기준시점이 다를 수 있다("25년 2분기 영업이익과 현재 PER") — 전역
+            # period를 무조건 전부에 적용하지 않고, 지표별 시점을 먼저 정한다(문제 D).
+            metric_periods = _resolve_metric_periods(
+                base_question, metrics, period, today or date.today(), llm_fn,
+            )
             result["metrics"] = _resolve_metrics(
-                resolve_metric_fn, conn, stock_code, metrics, period, llm_fn,
+                resolve_metric_fn, conn, stock_code, metrics, metric_periods, llm_fn,
                 computed_metric_fn=computed_metric_fn, execute_sql_fn=execute_sql_fn,
             )
         else:
