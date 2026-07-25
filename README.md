@@ -172,6 +172,9 @@ vision 판정과 대조하였습니다.
 - **API 비용 낭비 버그 수정 ($4.8 실측)** — "코스피 전체 종목" 요청이 무제한 매직넘버(top_n=4000)로 해석돼 프롬프트가 77만 자(31.7만 토큰)까지 불어나고, 실제 API 호출로 약 $4.8가 소진되는 것까지 실측 확인한 뒤 상한을 추가해 근본 해결했습니다.
 - **gpt-5.5 100% 실패 버그 수정** — OpenAI 추론모델(gpt-5.5)이 temperature=0을 거부해 모든 질의가 100% 실패하는 걸 실제 API 호출로 확인하고, 설정값을 4단계로 순차 완화하는 재시도 로직으로 근본 해결했습니다.
 - **다중지표 질문 시 첫 지표만 조회되던 버그 수정** — 프롬프트에 "PER PBR PSR"과 같은 재무지표를 동시에 물으면, 지표를 하나만 반환하도록 설계된 추출 함수 탓에 첫 번째 지표(PER)만 조회되고 나머지는 통째로 누락되는 걸 실서버 재현으로 확인했습니다. 지표 값은 이미 DB에 다 저장돼 있어 조회 자체는 가능했는데 추출 단계가 하나만 뽑고 있었던 게 원인이었습니다. 질문에 등장한 모든 지표를 순서대로 인식하는 로직을 추가해 근본 해결했습니다.
+- **날짜 오매칭 버그 수정** — "하이닉스 25년 3분기 영업이익과 26년 7월 24일 종가"처럼 한 질문에 서로 다른 목적의 연도가 두 번 나오면, `src/agents/domain_kr.py`의 `_parse_price_target_date` 정규식이 문장에서 먼저 나오는 연도("25년")를 엉뚱하게 집어 "7월 24일"과 잘못 짝지어 2025-07-24로 조회하던 걸 확인했습니다(정확히 1년 어긋남). 원인은 정규식이 문맥을 못 읽고 첫 연도만 붙잡는 것이었습니다. LLM이 먼저 "어느 연도가 이 날짜에 붙는지"를 문맥으로 판단하게 하고, 실패하면 기존 정규식으로 폴백하도록 고쳤습니다.
+- **PER/PBR 등 사전계산 지표 최신화 지연 버그 수정** — 일별 주가(`prices` 테이블)는 매일 자동 갱신되는데 PER/PBR/ROE 등을 미리 계산해두는 `metrics` 테이블은 수동 재수집 스크립트에서만 갱신돼, 최대 며칠씩 뒤처지는 걸 실측했습니다(prices는 최신인데 metrics는 3거래일 전에 멈춰 있었습니다). 원인은 매일 도는 주가 갱신 흐름이 `compute_metrics()`를 호출하지 않는 배선 누락이었습니다. `scripts/update_prices.py`가 매일 주가 갱신 뒤 `compute_metrics()`도 자동으로 같이 호출하도록 배선해 근본 해결했습니다.
+- **다중지표 질문에서 지표별 기준시점이 무시되던 버그 수정** — "25년 2분기 영업이익과 현재 PER"처럼 한 질문에 여러 재무지표가 섞이면 지표마다 기준시점이 다를 수 있는데(하나는 과거 특정 분기, 하나는 현재), 질문 전체에서 뽑은 기간 하나를 모든 지표에 무조건 동일 적용해 "현재"를 원하는 PER까지 과거 시점의 오래된 값으로 조회하던 걸 확인했습니다. `_resolve_metric_periods`를 추가해 LLM이 지표별로 기준시점을 먼저 판단하게 하고, 실패하거나 불완전한 응답이면 기존처럼 전역 기간을 모든 지표에 동일 적용하는 것으로 안전하게 폴백하도록 고쳤습니다.
 
 
 ---
@@ -218,10 +221,63 @@ vision 판정과 대조하였습니다.
 | `charting.py` | 히스토그램·막대·산점도·라인 4종 렌더 헬퍼(참고용 옵션 — `chart_agent`가 원하면 가져다 쓰고, 아니면 matplotlib을 직접 씀). |
 
 #### 노드별 — LangGraph 그래프 구조
-계층형 실행은 **두 겹의 그래프**로 되어 있습니다.
 
-1. **바깥 감싸개(`src/agents/graph.py`)** — 노드가 하나인 얇은 래퍼입니다: `START → supervisor → END`. 이 `supervisor` 노드가 아래 `answer_with_verification`를 호출하고 `.stream()`으로 실행해 진행 이벤트(`{"step": "...", "summary": "..."}`)를 방출합니다. 스트리밍은 예전의 커스텀 스레드+큐 배선을 걷어내고 LangGraph 표준(`get_stream_writer()` + `stream_mode="custom"`)으로 바꿔, 노드가 끝난 뒤가 아니라 **실행 도중**에 진행 이벤트가 실시간으로 SSE로 흘러갑니다.
-2. **총괄 다중 노드 그래프(`src/agents/supervisor_graph.py`)** — `answer_with_verification` 안에서 실제로 도는 진짜 `StateGraph`입니다. 예전엔 이 오케스트레이션이 순수 파이썬 for 루프였지만, 이제 다이어그램 그대로 노드로 쪼개져 있습니다: `START → router(라우팅) → dispatch_gate → (한국주식·매크로·백테스트 노드 중 라우팅된 것만 병렬 fan-out) → verify(검증) → [검증 실패 시 실패한 도메인만 재-dispatch(최대 2회) · 그래도 실패면 backtest 추가시도 1회 또는 자유 코드 폴백] → synthesize(종합결론) → chart(차트 요청 시 조건부) → END`. 도메인 노드들은 같은 superstep에서 LangGraph가 스레드로 동시에 실행하고, `dispatch_domains`도 `ThreadPoolExecutor`로 도메인들을 **실제 병렬** 호출합니다. 검증에 실패하면 통과한 도메인 결과는 보존하고 **실패한 도메인만** 다시 부릅니다(전체 재실행 아님).
+계층형 실행은 **LangGraph**(여러 작업 단계를 "노드"와 "화살표"로 이어붙여 흐름을 그림처럼 조립하는 라이브러리)로 구현돼 있습니다. 핵심 개념 다섯 가지를 먼저 짚어둡니다.
+
+- **State**(그래프의 모든 노드가 함께 읽고 쓰는 하나의 공유 데이터 뭉치 — 여러 사람이 같이 채워나가는 화이트보드라고 생각하면 됩니다). 여기서는 `SupervisorGraphState`(TypedDict)입니다.
+- **노드**(state를 읽어서 그 일부를 갱신해 돌려주는 함수 하나 — 화이트보드를 보고 자기 담당 칸을 채워 넣는 사람).
+- **엣지**(edge, 노드에서 노드로 가는 화살표 — 다음에 어디로 갈지 미리 고정된 길).
+- **조건부 엣지**(conditional edge, 다음에 어디로 갈지 함수가 매번 state를 보고 계산해서 정하는 화살표 — 갈림길에서 그때그때 방향을 트는 것).
+- **리듀서**(reducer, 여러 노드가 State의 같은 칸에 동시에 쓸 때 그 값들을 어떻게 합칠지 정하는 규칙).
+
+**두 겹의 그래프.** 실행은 바깥/안쪽 두 그래프로 포개져 있습니다.
+
+1. **바깥 래퍼(`src/agents/graph.py`)** — 노드가 딱 하나인 얇은 껍데기입니다: `START → supervisor → END`. 이 `supervisor` 노드가 아래 2번의 `answer_with_verification`(사실상 안쪽 그래프)을 호출합니다. 실행하는 동안 `get_stream_writer()` + `stream_mode="custom"`으로 진행 이벤트(`{"step": "...", "summary": "..."}`)를 **실시간 SSE**로 흘려보냅니다(노드가 끝난 뒤가 아니라 실행 도중에).
+2. **안쪽 다중 노드 그래프(`src/agents/supervisor_graph.py`)** — `build_supervisor_graph()`가 조립하는 진짜 여러 노드짜리 `StateGraph`입니다. `answer_with_verification`이 내부에서 이 그래프를 빌드하고 실행합니다. 아래 설명은 전부 이 안쪽 그래프에 대한 것입니다.
+
+**State(`SupervisorGraphState`) 필드** — 모든 노드가 함께 채우는 화이트보드의 칸들입니다.
+
+| 필드 | 무엇을 담나 |
+|---|---|
+| `question` | 원본 질문. 검증·종합결론이 항상 기준으로 삼는 값(재시도 피드백이 섞이지 않은 원본). |
+| `dispatch_question` | 이번 시도에 실제로 도메인에 보낼 질문. 재시도 때는 직전 실패 피드백 문구가 덧붙습니다. |
+| `routes` | 최초 라우팅 결과(예: `["kr","macro"]`). 한번 정해지면 안 바뀝니다. |
+| `routes_to_dispatch` | 이번 시도에 실행할 도메인 목록. 첫 시도=전체, 재시도=검증에 실패한 도메인만. |
+| `attempts` | 정형 재시도 루프를 몇 번째 도는지 세는 카운터. |
+| `phase` | 지금 어느 국면인지 — `"formal"`(정규 재시도 중) / `"escalation"`(백테스트 추가시도) / `"fallback"`(자유 코드 폴백). |
+| `last_reason` | 직전 검증 실패 사유. 다음 시도에 피드백으로 주입됩니다. |
+| `next_action` | 검증·폴백 노드가 계산한 "다음에 어디로 갈지". 조건부 엣지가 이 값을 읽고 분기합니다. |
+| `domain_results` | 도메인별 조회 결과. **리듀서 채널**(`Annotated[Dict, _merge_domain_results]`) — 아래 설명 참고. |
+| `uncertain` / `conclusion` / `reason` / `final_routes` / `used_fallback` / `used_backtest_escalation` / `chart_base64` / `chart_title` / `charts` | 최종 결과값들. 그래프 실행이 끝나면 `answer_with_verification`이 이 칸들을 모아 반환 dict로 바꿉니다. |
+
+`domain_results`가 리듀서 채널인 이유: 여러 도메인 노드가 병렬로 동시에 이 칸에 쓰기 때문입니다. 이 리듀서(`_merge_domain_results`)는 **"기존 값 위에 새 값만 덮어쓰기"**(dict 병합)라서, 이미 검증을 통과한 도메인 결과는 보존되고 이번에 재실행한 도메인만 갱신됩니다.
+
+**노드** — 각 노드는 state를 읽어 일부를 갱신해 돌려주는 함수입니다.
+
+| 노드 | 역할 |
+|---|---|
+| `router` | 질문을 보고 라우팅합니다(kr/macro/backtest 중 몇 개가 필요한지 결정). 라우팅 결과가 없으면 곧장 종료(END). |
+| `dispatch_gate` | 이번 시도를 준비하는 길목 노드. 재시도 횟수를 올리고, 직전 실패 피드백을 질문에 주입하며, (배치 모드일 때는) 도메인 호출까지 직접 수행합니다. 이후 조건부 엣지가 "이번에 실행할 도메인 노드들"로 갈라져 나갑니다(**팬아웃**, fan-out — 한 노드에서 여러 노드로 동시에 퍼짐). |
+| `kr` / `macro` / `backtest` | 도메인 노드(`make_domain_node`로 동적 생성). 각자 자기 도메인만 조회합니다. 같은 **슈퍼스텝**(superstep, LangGraph가 한 번에 동시에 실행하는 단위)에 든 노드들은 실제로 스레드로 나란히 돌아 병렬성이 유지됩니다. 셋 다 끝나면 고정 엣지로 모두 `verify`로 모입니다(**팬인**, fan-in — 여러 노드가 한 노드로 합쳐짐). |
+| `verify` | 도메인 결과가 원래 질문에 답이 되는지 검증하고 `next_action`을 계산합니다. `phase`에 따라 분기가 다릅니다(formal 통과→synthesize, formal 실패+재시도 여력 있음→retry, formal 소진+backtest 없음→escalate, 그 외 실패→fallback, escalation·fallback 재검증 등). |
+| `fallback` | 정형 경로가 다 실패했을 때 자유 코드 생성으로 딱 1번 시도하는 최후 수단. |
+| `synthesize` | 검증을 통과한 결과를 모아 최종 결론 문장을 만듭니다. |
+| `chart` | 질문이 차트를 원할 때만(조건부 진입) 그래프를 그립니다. |
+
+**엣지와 조건부 엣지** — 노드를 잇는 화살표입니다. 고정 화살표는 항상 그 길로 가고, 조건부 화살표는 함수가 매번 다음 목적지를 계산합니다.
+
+| 화살표 | 종류 | 흐름 |
+|---|---|---|
+| `START → router` | 고정 | 항상 라우팅부터 시작. |
+| `router → dispatch_gate` / `router → END` | 조건부 | 라우팅 성공이면 진행, 실패면 곧장 종료. |
+| `dispatch_gate → kr/macro/backtest` / `dispatch_gate → verify` | 조건부(팬아웃) | 이번 시도의 도메인들로 동시에 갈라짐. 배치 모드 등 도메인 노드를 건너뛸 땐 곧장 `verify`로. |
+| `kr/macro/backtest → verify` | 고정(팬인) | 도메인 노드들이 전부 끝나면 `verify`로 모임. |
+| `verify → dispatch_gate` / `verify → fallback` / `verify → synthesize` | 조건부 | `verify → dispatch_gate`는 **사이클**(자기 자신 쪽으로 되돌아가는 순환)! 실패한 도메인만 재시도하거나 backtest 추가시도. |
+| `fallback → verify` / `fallback → END` | 조건부 | 폴백 성공이면 재검증(사이클), 실패면 종료. |
+| `synthesize → chart` / `synthesize → END` | 조건부 | 차트를 원할 때만 `chart`로, 아니면 종료. |
+| `chart → END` | 고정 | 차트를 그린 뒤 종료. |
+
+**무한루프 방지.** `verify → dispatch_gate` 사이클이 있지만, `attempts`·`phase` 값이 진행을 강제해 정확히 `max_retries`회(+ backtest 추가시도 1회)에서 반드시 빠져나옵니다. 이중 안전장치로 `recursion_limit`(그래프가 돌 수 있는 최대 스텝 수)도 `max_retries`에 비례한 유한값으로 지정돼 있어, 어떤 경우에도 무한히 돌지 않습니다.
 
 ---
 
