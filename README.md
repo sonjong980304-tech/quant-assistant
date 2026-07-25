@@ -15,7 +15,20 @@ SQL·검증된 백테스트 프리미티브로 번역해 답합니다. 화면은
 두 가지이며, **내부 아키텍처는 하나의 총괄 에이전트(`answer_with_verification`)를 공유**합니다.
 (GPT-5.4-mini / EXAONE 3.5 / Qwen2.5-coder 3종 지원)
 
+> ⚠️ **개인용 리서치·학습 도구입니다** — 투자자문업 등록이 없고, 스크리닝·백테스트 결과는
+> 참고용이지 매수·매도 추천이 아닙니다.
+
 ![복합 통계 질문 응답 화면 — PBR·GPA 상관관계와 5분위별 평균, 근거 데이터가 함께 표시됨](docs/screenshots/02-query-result.png)
+
+## 목차
+
+- [아키텍처 한눈에 보기](#아키텍처-한눈에-보기) — 총괄 에이전트 → 도메인 3종 → 정합성 검증까지의 전체 흐름
+- [배경과 설계 판단](#배경과-설계-판단) — 왜 이렇게 만들었나 + 36개 사실확인 항목 실측 결과(GPT/Qwen/EXAONE)
+- [자세한 기능](#자세한-기능) — 기능별·에이전트별 역할, LangGraph 그래프 구조
+- [아키텍처 심층](#아키텍처-심층) — 하드차단 vs 소프트경고, LLM 생성 SQL/Python 실행 격리
+- [데이터 정합성과 품질 안전장치](#데이터-정합성과-품질-안전장치) — 미래참조·생존편향을 막는 6가지 장치
+- [수정사항](#수정사항) — 실측으로 찾아내 고친 버그 9건
+- [설치와 빠른 시작](#설치와-빠른-시작) — API 키 없이 더미 데이터로 체험하는 방법
 
 ## 아키텍처 한눈에 보기
 
@@ -151,6 +164,12 @@ GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 
   종목코드를 만들어내는 할루시네이션이 반복 관찰됐습니다.
 - **응답 속도**는 GPT가 압도적으로 빨랐고, 로컬 모델 중에서는 Qwen이 EXAONE보다 뚜렷하게 빨랐습니다.
 
+이 실측 과정 자체가 버그 탐지기 역할을 했습니다. 4분기 실적이 분기값이 아니라 연간누적값 그대로
+저장되던 ingest 버그(**전체 3,924종목의 57%, 2,235종목**이 영향), "코스피 전체 종목" 요청이 무제한
+매직넘버(top_n=4000)로 해석돼 프롬프트가 77만 자(31.7만 토큰)까지 불어나 **API 비용 약 $4.8가 실제로
+소진**되던 버그, 차트처럼 결과가 큰 경우 응답이 조용히 실패하던 멀티프로세싱 파이프 교착상태를
+전부 실측으로 찾아내 근본 원인까지 고쳤습니다. 전체 9건은 [수정사항](#수정사항) 참고.
+
 ### 실제 화면 예시
 
 | | |
@@ -162,9 +181,14 @@ GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 
 | ![CAGR·MDD·샤프비율 등 11개 성과지표, 전략과 시장을 비교하는 수익곡선, 분기별 보유종목 교체내역이 표시된 백테스트 결과 화면](docs/screenshots/05-backtest-result.png) | **백테스트 결과** — CAGR·MDD·샤프·소르티노·승률·베타 등 11개 성과지표와 전략의 수익곡선, 그리고 리밸런싱마다 어떤 종목이 편입·편출됐는지 분기별 이력까지 함께 보여줍니다. |
 | ![몬테카를로로 최적화한 7자산 목표비중과 19년+ walk-forward 백테스트 자산곡선이 표시된 올웨더 포트폴리오 화면](docs/screenshots/06-allweather.png) | **올웨더 포트폴리오** — QQQ·삼성전자·TLT·ACE KRX금현물·IEF·TIP·BIL 7자산의 목표비중을 매달 몬테카를로로 재계산하고, 2007년부터 19년+(매달 자동으로 늘어남) walk-forward 백테스트 곡선으로 신뢰도를 함께 보여주는 모니터링 전용 화면입니다. |
 
-> 위 6개 파일(`01-query-progress.png`, `02-query-result.png`, `03-macro-signal.png`,
-> `04-backtest-settings.png`, `05-backtest-result.png`, `06-allweather.png`)은 이미
-> `docs/screenshots/`에 반영돼 있어 표에 그대로 표시됩니다.
+**API 키 없이 3줄로 체험 가능** — OpenAI/DART 키가 없어도 더미 데이터로 위 화면들을 직접 띄워볼 수
+있습니다(자세한 설명은 [설치와 빠른 시작](#설치와-빠른-시작) 참고).
+
+```bash
+pip install -r requirements.txt
+python scripts/setup_dummy.py     # 더미 데이터 생성(API 키 불필요)
+uvicorn web.app:app --reload      # http://127.0.0.1:8000
+```
 
 ---
 
@@ -175,7 +199,7 @@ GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 
 - **재무 데이터를 자주 찾아보는 사람**: "삼성전자 PER 알려줘"처럼 종목명만 말해서 DART/FnGuide 재무데이터를 바로 확인하고 싶은 사람(어느 시점·어느 소스 값인지 항상 함께 표시됨).
 - **매크로·시장 상황을 정기적으로 체크하는 사람**: 환율·금리차·VIX·Fear&Greed 기반 매크로 레짐 신호를 매일 자동 계산해두고 확인만 하고 싶은 사람.
 - **특정 자산배분 전략을 자동으로 추적하고 싶은 사람**: 올웨더(7자산 몬테카를로) 같은 전략의 목표 비중을 매달 자동 재계산하고 텔레그램으로 알림받고 싶은 사람.
-- ⚠️ **개인용 리서치·학습 도구**입니다 — 투자자문업 등록이 없고, 스크리닝·백테스트 결과는 참고용이지 매수·매도 추천이 아닙니다.
+- ⚠️ **투자 조언을 기대하는 사람에게는 맞지 않습니다** — 개인용 리서치·학습 도구이고, 결과는 참고용이지 매수·매도 추천이 아닙니다(위 면책 참고).
 
 #### 기능별
 | 기능 | 무엇인가 |
@@ -210,6 +234,14 @@ GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 
 | `charting.py` | 히스토그램·막대·산점도·라인 4종 렌더 헬퍼(참고용 옵션 — `chart_agent`가 원하면 가져다 쓰고, 아니면 matplotlib을 직접 씀). |
 
 #### 노드별 — LangGraph 그래프 구조
+
+바깥 래퍼(`graph.py`)는 SSE 스트리밍용 단일 노드, 안쪽(`supervisor_graph.py`)이
+router→도메인 병렬 fan-out→verify→실패 도메인만 재시도→synthesize 실제 다중 노드
+그래프입니다. `verify`→`dispatch_gate` 사이클은 `attempts`·`phase` + `recursion_limit`
+이중 안전장치로 유한 종료가 보장됩니다.
+
+<details>
+<summary>LangGraph 그래프 구조 상세 (State·노드·엣지·무한루프 방지)</summary>
 
 계층형 실행은 **LangGraph**(여러 작업 단계를 "노드"와 "화살표"로 이어붙여 흐름을 그림처럼 조립하는 라이브러리)로 구현돼 있습니다. 핵심 개념 다섯 가지를 먼저 짚어둡니다.
 
@@ -267,6 +299,8 @@ GPT·Qwen·EXAONE 3종으로 평가했습니다. 채점은 **100% 외부 대조 
 | `chart → END` | 고정 | 차트를 그린 뒤 종료. |
 
 **무한루프 방지.** `verify → dispatch_gate` 사이클이 있지만, `attempts`·`phase` 값이 진행을 강제해 정확히 `max_retries`회(+ backtest 추가시도 1회)에서 반드시 빠져나옵니다. 이중 안전장치로 `recursion_limit`(그래프가 돌 수 있는 최대 스텝 수)도 `max_retries`에 비례한 유한값으로 지정돼 있어, 어떤 경우에도 무한히 돌지 않습니다.
+
+</details>
 
 ---
 
@@ -395,17 +429,9 @@ LLM이 만든 신뢰할 수 없는 코드가 그 프로세스나 데이터베이
 
 #### 데이터 품질 안전장치
 스크리닝과 백테스트가 공유하는 데이터접근 계층(`src/backtest/data_access.py::metrics_at`)에
-안전장치가 걸려 있습니다. **"비싼 판단은 배치로 1회만 하고 런타임은 캐시만 읽는다"** 는
-원칙을 따릅니다(전체 스캔을 매 요청마다 재호출하지 않음).
+가격 이상치 안전장치가 걸려 있습니다.
 
-- **가격 이상치 asof-국소 제외**(`src/data_quality.py`): 인접 거래일 종가비가 2배 이상(≥2.0)
-  이거나 1/2 이하(≤0.5)로 튀는 불연속(액면분할/병합이 수정주가로 소급 반영되지 않았거나
-  원본 파싱이 틀어진 경우 등)이 있는 종목을 걸러 랭킹·백테스트 오염을 막습니다. 단,
-  정리매매·감자처럼 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이
-  되레 재유입되므로, `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고
-  `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에
-  asof가 들어갈 때만 **국소적으로** 제외합니다(멀리 떨어진 과거 시점의 정상 데이터는 살려둠).
-  결과는 '종목→이상 발생일' 매핑으로 `ingest_meta`에 캐싱하고, 이후엔 캐시만 조회합니다.
+→ 자세한 내용은 [데이터 정합성과 품질 안전장치](#데이터-정합성과-품질-안전장치) 절 참고.
 
 #### 재무 지표 스크리닝 필드 (단일 정의처)
 스크리닝 LLM 프롬프트에 노출되는 재무·파생 지표 목록은 **딕셔너리 한 곳**
@@ -422,6 +448,9 @@ LLM이 만든 신뢰할 수 없는 코드가 그 프로세스나 데이터베이
 상위" 같은 절대값 스크리닝을 지원합니다.
 
 ### 디렉토리 구조
+
+<details>
+<summary>디렉토리 구조 전체 트리 (src/agents · backtest · ingest · web · scripts)</summary>
 
 ```
 quant-assistant/
@@ -464,6 +493,7 @@ quant-assistant/
 └── start_server.sh / stop_server.sh / show_url.sh  # 웹 서버 기동·중지·접속 URL 확인 스크립트
 ```
 
+</details>
 
 ---
 
@@ -493,7 +523,8 @@ quant-assistant/
 - **어떻게**: 공시일 오름차순 이력에서 asof 유효값을 고르되, 종목 전체 median 대비 `_SHARES_ANOMALY_RATIO` 배 이상 벗어난 값은 단위오류(×1000 원복형 스파이크, 실측 다수 종목)로 보고 무효화하는 **이상치 가드**를 조회(read) 시점에 한 번 더 적용합니다(액면분할 같은 정상 변화는 배수가 작아 살아남습니다 — `prices.market_cap`·스크리닝 랭킹처럼 자기자본 가드가 없는 소비자를 오염에서 보호).
 
 #### 5. 가격 이상치 가드 asof-국소화 (`src/data_quality.py`)
-- **무엇/왜/어떻게**: 정리매매·감자 등으로 인한 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이 되레 재유입됩니다. `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고 `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에 asof가 들어갈 때만 국소적으로 제외합니다(멀리 떨어진 과거 정상 시점 데이터는 보존). 위 [데이터 품질 안전장치](#데이터-품질-안전장치) 절의 그 장치입니다.
+- **무엇**: 인접 거래일 종가비가 2배 이상(≥2.0)이거나 1/2 이하(≤0.5)로 튀는 불연속(액면분할/병합이 수정주가로 소급 반영되지 않았거나 원본 파싱이 틀어진 경우 등)이 있는 종목을 걸러 랭킹·백테스트 오염을 막습니다.
+- **왜/어떻게**: 정리매매·감자 등으로 인한 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이 되레 재유입됩니다. `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고 `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에 asof가 들어갈 때만 국소적으로 제외합니다(멀리 떨어진 과거 정상 시점 데이터는 보존). 결과는 '종목→이상 발생일' 매핑으로 `ingest_meta`에 캐싱하고 이후엔 캐시만 조회합니다 — **"비싼 판단은 배치로 1회만 하고 런타임은 캐시만 읽는다"** 는 이 프로젝트 공통 원칙입니다(전체 스캔을 매 요청마다 재호출하지 않음).
 
 #### 6. 거래세율 연도별 스케줄 (`references/securities_transaction_tax_rate_history.md`)
 - **무엇/왜**: 매도 거래세율은 해가 바뀌며 인하돼 왔고 코스피/코스닥이 서로 다른데, 과거 백테스트 비용을 단일 현재세율로 계산하면 부정확합니다.
@@ -601,6 +632,8 @@ quant_trader와 동일한 텔레그램 채널로 알림 발송(직전 달 대비
 
 ## 데이터와 API 레퍼런스
 
+<details>
+<summary>데이터·API 레퍼런스 (DB 스키마, 엔드포인트, 자동갱신 스케줄)</summary>
 
 ### 데이터 (SQLite, `data/market.db`)
 
@@ -707,14 +740,14 @@ uvicorn web.app:app --reload      # http://127.0.0.1:8000
 
 ### 파마프렌치 팩터 온디맨드 조회
 
-`.omc/specs/brainstorming-fama-french-factor-lookup.md` 참고. 매크로 에이전트
-(`domain_macro.py`)가 질문을 파마프렌치 팩터(Mkt-RF/SMB/HML/RMW/CMA/RF, Momentum)
-질문으로 감지하면(`classify_factor_intent`) `macro_signal` 테이블을 거치지 않고
+매크로 에이전트(`domain_macro.py`)가 질문을 파마프렌치 팩터
+(Mkt-RF/SMB/HML/RMW/CMA/RF, Momentum) 질문으로 감지하면(`classify_factor_intent`) `macro_signal` 테이블을 거치지 않고
 [Ken French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html)를
 `pandas_datareader`로 즉시 조회해 답합니다. **저장·캐시 없음, 웹 요청 하나로 바로 응답**
 (원래 `src/factors/fama_french.py`의 `handle_query()`는 CLI용 y/n 확인을 전제로 설계됐으나,
 웹 요청-응답 흐름엔 안 맞아 매크로 에이전트는 확인 없이 바로 조회하도록 재구성했습니다).
 
+</details>
 
 ---
 
@@ -772,10 +805,19 @@ OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
 - **factcheck** (`src/eval/factcheck/`, `scripts/eval_factcheck.py`): 무작위로 뽑은
   실제 종목·질문에 대해 시스템(`run_hierarchical`) 답을 낸 뒤, DART 원문·네이버 실시간
   시세·DB 재계산·vision 판정 등 **그때그때 다시 조회한 값**과 대조합니다. 재무제표/
-  실시간 주가/차트/스크리닝/백테스트 5개 도메인을 커버합니다. 평가는 항상 원본 DB의
-  격리 사본(`db_isolation.py`)에서 실행됩니다(원본 보호).
+  실시간 주가/차트/스크리닝/백테스트 5개 도메인을 커버합니다. 원본 DB는 **엔진 레벨
+  읽기전용 연결**(`mode=ro`)로만 열어 평가가 원본에 쓰기를 할 수 없게 막습니다(용량이 큰
+  DB라 사본을 만들지 않는 대신 물리적으로 차단 — 사본 격리 경로는 `db_isolation.py`에
+  구현돼 있고 백테스트 시나리오 헬퍼가 씁니다).
 
-</details>
+**실측 결과 전문**: [`src/eval/factcheck/results/summary.md`](src/eval/factcheck/results/summary.md)
+— 36개 항목의 종목코드·질문·시스템 답·외부 대조값·판정이 그대로 들어 있습니다.
+가장 최근 실행(2026-07-26, GPT `gpt-5.4-mini` 단독)은 **36/36(100%), 평균응답시간 11.63s**
+였습니다. 위 3종 모델 비교표(GPT 35/36 · Qwen 30/36 · EXAONE 27/36)는 2026-07-22에 로컬
+모델까지 함께 돌린 별도 실측이고, 이번 재실행에서는 그때 빠졌던 차트 1건이 통과해 5/5가
+됐습니다 — 서로 다른 시점의 실행이라 두 수치를 모두 남겨둡니다. 결과 파일에는 **채점에서
+제외한 항목(코스피 지수 vs 동일가중 백테스트 5건)이 왜 제외됐는지와 그 실패 수치까지**
+함께 적어뒀습니다.
 
 ---
 
@@ -797,8 +839,6 @@ OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
   (토큰: https://dashboard.ngrok.com/get-started/your-authtoken)
 - 무료 ngrok은 **실행할 때마다 URL이 바뀝니다.** 현재 URL은 실행 출력 또는 ngrok 대시보드 http://localhost:4040 에서 확인.
 - ⚠️ **보안**: OpenAI/DART 키가 든 앱이므로 basic-auth는 필수이고, 비밀번호를 충분히 강하게 두세요. 외부 노출 중에는 질의가 OpenAI 비용을 유발할 수 있으니 사용 후 `./stop_server.sh`로 닫는 것을 권장합니다.
-
-</details>
 
 ---
 
