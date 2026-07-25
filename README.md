@@ -27,7 +27,7 @@
 %%{init: {'themeVariables': {'fontSize': '18px'}}}%%
 flowchart TB
     Q(["사용자 질문"])
-    SUP{{"총괄 에이전트<br/>Routing · 정합성 검증<br/>재시도(최대 2회)"}}
+    SUP{{"총괄 에이전트<br/>Routing"}}
 
     Q --> SUP
 
