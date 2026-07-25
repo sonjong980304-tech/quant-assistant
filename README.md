@@ -34,7 +34,7 @@ flowchart TB
     subgraph KR_BOX["한국주식 에이전트"]
         direction TB
         KR_FIN["재무<br/>DART · FnGuide (resolve_metric)"]
-        KR_PRICE["주가<br/>순수 시세 (종가/시가/거래량)"]
+        KR_PRICE["주가 · 기술지표<br/>순수 시세(종가/시가/거래량)<br/>+ TA-Lib 지표(이동평균/RSI/MACD/볼린저)"]
     end
 
     subgraph MACRO_BOX["매크로 에이전트"]
