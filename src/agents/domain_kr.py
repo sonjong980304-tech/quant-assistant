@@ -74,6 +74,13 @@ _METRIC_KO_ALIASES: dict[str, str] = {
     "매출총이익률": "gross_margin",
     "매출원가율": "cogs_ratio",
     "매출성장률": "revenue_growth", "매출성장": "revenue_growth", "매출증가율": "revenue_growth",
+    # "매출총이익"/"매출원가"(원본 계정 금액 그 자체)도 위의 비율(률) 변형과 같은 이유로
+    # "매출액"/"매출"보다 먼저 와야 한다 — 안 그러면 "매출"이 먼저 매치돼 엉뚱하게 revenue로
+    # 오매핑된다(실서버 재현 버그: "매출총이익 알려줘"가 gross_profit이 아니라 매출액(revenue)
+    # 값을 반환함 — METRIC_SOURCE_MAP엔 gross_profit이 등록돼 있고 financials에 실제 데이터도
+    # 있었는데, 이 한국어 별칭이 빠져 있어 조회 자체가 안 됐다).
+    "매출총이익": "gross_profit",
+    "매출원가": "cost_of_sales",
     "매출액": "revenue",
     "매출": "revenue",
     # "영업이익률"/"영업이익성장률"(비율·성장률)은 반드시 "영업이익"(원본 계정 금액)보다 먼저
@@ -105,6 +112,15 @@ _METRIC_KO_ALIASES: dict[str, str] = {
     "매출총이익/총자산": "gp_a", "gpa": "gp_a", "gp/a": "gp_a",
     "이자보상배율": "interest_coverage",
     "유동비율": "current_ratio",
+    # ── DART 표준계정 중 한국어 별칭이 아예 없어 조회 자체가 안 되던 나머지 항목들 ──────────
+    # (매출총이익/매출원가와 같은 부류의 문제 — METRIC_SOURCE_MAP엔 등록돼 있고 financials에
+    # 실제 데이터도 있는데, 한국어 별칭이 없어 _extract_metric이 못 찾거나(None) 다른 짧은
+    # 별칭에 우연히 걸려 오매핑됐다. 아래 별칭들은 다른 등록 별칭과 부분문자열 충돌이 없다).
+    "판관비": "sga", "판매비와관리비": "sga",
+    "이자비용": "interest_expense",
+    "영업활동현금흐름": "operating_cashflow", "영업현금흐름": "operating_cashflow",
+    "감가상각비": "depreciation", "감가상각": "depreciation",
+    "발행주식수": "shares_outstanding",
 }
 
 # 순수 시세(종가/시가/거래량 등) 키워드 — get_price_snapshot_kr(indicators=None) 경로.

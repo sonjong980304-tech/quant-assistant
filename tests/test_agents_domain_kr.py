@@ -1064,6 +1064,37 @@ def test_extract_metric_psr_pcr_ev_ebitda_korean_aliases():
     assert _extract_metric("삼성전자 매출 알려줘") == "revenue"
 
 
+# ── 지표 파싱(_extract_metric) — "매출총이익"/"매출원가" 등 한국어 별칭 누락 버그 ──────────
+# 실서버 재현 버그: gross_profit/cost_of_sales는 METRIC_SOURCE_MAP에 등록돼 있고
+# financials에 실제 데이터도 있는데, 한국어 별칭이 없어 "매출총이익 알려줘"가 "매출"
+# 부분문자열에 걸려 엉뚱하게 revenue(매출액)로 오매핑됐다("매출총이익률"/"매출원가율"과
+# 동일한 순서 규율 — 원본 계정 별칭은 반드시 그 비율 변형보다 뒤, "매출액"/"매출"보다 앞).
+# 판관비/이자비용/영업활동현금흐름/감가상각비/발행주식수도 같은 이유(한국어 별칭 자체가
+# 아예 없음)로 함께 추가했다.
+
+def test_extract_metric_gross_profit_and_cost_of_sales_korean_aliases():
+    assert _extract_metric("삼성전자 매출총이익 알려줘") == "gross_profit"
+    assert _extract_metric("삼성전자 매출원가 알려줘") == "cost_of_sales"
+    # 회귀: 비율 변형과 원본 매출액은 여전히 올바르게 구분돼야 한다.
+    assert _extract_metric("삼성전자 매출총이익률 알려줘") == "gross_margin"
+    assert _extract_metric("삼성전자 매출원가율 알려줘") == "cogs_ratio"
+    assert _extract_metric("삼성전자 매출액 알려줘") == "revenue"
+    assert _extract_metric("삼성전자 매출 알려줘") == "revenue"
+
+
+def test_extract_metric_previously_unmapped_dart_accounts():
+    assert _extract_metric("삼성전자 판관비 알려줘") == "sga"
+    assert _extract_metric("삼성전자 판매비와관리비 알려줘") == "sga"
+    assert _extract_metric("삼성전자 이자비용 알려줘") == "interest_expense"
+    assert _extract_metric("삼성전자 영업활동현금흐름 알려줘") == "operating_cashflow"
+    assert _extract_metric("삼성전자 영업현금흐름 알려줘") == "operating_cashflow"
+    assert _extract_metric("삼성전자 감가상각비 알려줘") == "depreciation"
+    assert _extract_metric("삼성전자 감가상각 알려줘") == "depreciation"
+    assert _extract_metric("삼성전자 발행주식수 알려줘") == "shares_outstanding"
+    # 회귀: 이미 등록돼 있던 이자보상배율(비율, 부분문자열 충돌 없음)은 그대로 유지.
+    assert _extract_metric("삼성전자 이자보상배율 알려줘") == "interest_coverage"
+
+
 # ── 다중 지표 인식(_extract_metrics) — 실서버 재현 버그: "현대차 PER PBR PSR"처럼 한 질문에
 # 지표를 여러 개 물으면 _extract_metric(단수형)은 설계상 하나만 반환해 첫 지표(PER) 외에는
 # 통째로 누락됐다. _extract_metrics(복수형)는 질문에 등장한 모든 지표를 등장 순서대로 반환한다.
