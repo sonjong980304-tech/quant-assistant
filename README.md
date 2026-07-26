@@ -33,9 +33,11 @@ SQL·Python(검증된 프리미티브)로 번역해 답합니다. **내부 아�
 
 프롬프트 입력 시, **총괄 에이전트 → (병렬) 활성 도메인 에이전트 3종(한국·매크로·백테스트) → 데이터
 에이전트 → 총괄 에이전트의 정합성 검증 → (차트 요청 시) 차트 에이전트** 순서로 흐릅니다. 아래
-다이어그램에서 색깔 있는 박스 하나하나가 독립된 에이전트(파일)입니다. 한국주식 에이전트는 질문을 **재무·주가 정보·기술지표** 세
-축으로 분류(`classify_intent`)하여, 필요한 하위 데이터 에이전트만 단독으로 또는 여럿을 함께
-호출합니다.
+다이어그램에서 색깔 있는 박스는 독립된 에이전트(파일) 또는 그 안의 세부 기능 단위입니다. 한국주식
+에이전트는 질문을 **재무·주가·기술지표** 세 축으로 각각 독립적으로 판단(`classify_intent`)해,
+필요한 축만 단독으로 또는 여럿을 함께 호출합니다. 다만 **기술지표는 주가 위에서 계산하는 파생값**이라
+(주가 데이터 없이는 계산 불가) 재무처럼 완전히 독립된 데이터 소스는 아닙니다 — 같은 파일
+(`data_price_kr.py`)이 주가를 먼저 조회한 뒤, 필요할 때만 그 위에 얹어 계산합니다.
 
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '18px'}}}%%
@@ -48,7 +50,12 @@ flowchart TB
     subgraph KR_BOX["한국주식 에이전트"]
         direction TB
         KR_FIN["재무<br/>DART · FnGuide (resolve_metric)"]
-        KR_PRICE["주가 · 기술지표<br/>순수 시세(종가/시가/거래량)<br/>+ TA-Lib 지표(이동평균/RSI/MACD/볼린저)"]
+        subgraph KR_PRICE_BOX["주가 · 기술지표 (data_price_kr.py)"]
+            direction TB
+            KR_PRICE["주가<br/>순수 시세(종가/시가/거래량)"]
+            KR_TECH["기술지표<br/>이동평균 · RSI · MACD · 볼린저<br/>(주가 위에서 계산, TA-Lib)"]
+            KR_PRICE --> KR_TECH
+        end
     end
 
     subgraph MACRO_BOX["매크로 에이전트"]
@@ -93,7 +100,7 @@ flowchart TB
     class Q q
     class SUP,VERIFY sup
     class RESULT result
-    class KR_BOX,KR_FIN,KR_PRICE kr
+    class KR_BOX,KR_FIN,KR_PRICE_BOX,KR_PRICE,KR_TECH kr
     class MACRO_BOX,MACRO_DATA macro
     class BT_BOX,BT_PIPE,BT_HARD,BT_SOFT bt
     class CHART chart
