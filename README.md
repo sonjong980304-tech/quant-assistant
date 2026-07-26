@@ -681,13 +681,13 @@ DART 일일 조회 한도 때문에 "매일 전부 다시 받기"가 아니라, 
 |---|---|---|
 | 신규상장 종목 재무 백필 | 매일 02:00/10:00/15:00 (하루 3회) | `scripts/backfill_full.py` |
 | 분기 공시 증분 체크 | 매일 아침 7시30분 | `scripts/update_financials.py` |
-| KRX 업종분류 재동기화 | 매월 1일 | `scripts/backfill_sector_krx.py` |
-| 국내 주가/시총 (+ PER/PBR·ROE 등 `metrics` 재계산) | 매일 | `scripts/update_prices.py`, `scripts/run_naver_prices.py` |
+| KRX 업종분류 재동기화 | 매월 1일 08:10 | `scripts/backfill_sector_krx.py` |
+| 국내 주가/시총 (+ PER/PBR·ROE 등 `metrics` 재계산) | 매일 11:00/18:30/22:00(update_prices) + 16:00/20:30(naver) | `scripts/update_prices.py`, `scripts/run_naver_prices.py` |
 | 상장주식수(당일) | 매일 03:00/13:00 (하루 2회) | `scripts/backfill_shares.py` |
 | 상장주식수(일별 이력) | 매일 06:00 | `scripts/backfill_shares_daily.py` |
 | 관리종목·거래정지 현황 | 매일 19:00 | `scripts/run_kr_trading_status.py` |
 | FnGuide 지표 | 매주 토요일 03:00 | `scripts/run_fnguide_metrics.py` |
-| 매크로 지표 | 매일 | `scripts/run_macro_indicators.py` |
+| 매크로 지표 | 매일 07:40 | `scripts/run_macro_indicators.py` |
 | 올웨더 포트폴리오 리밸런싱+텔레그램 알림 | 매달 1일 08:10 | `scripts/run_all_weather.py` |
 | 전체 재수집(refeed, 복사본→swap) | 매일 새벽 3시 고정(완료 시 스스로 launchd 등록 해제) | `scripts/run_refeed_cron.sh` |
 
