@@ -787,10 +787,6 @@ OLLAMA_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
 
 ### 평가 (`src/eval/`)
 
-미리 써둔 정답셋과 대조하던 legacy 3층 평가(`evaluator.py`/`goldset.py`/`runner.py`,
-`cli.py eval`)는 제거했습니다 — 지금은 **factcheck(실측 재검증)** 방식이 실제 평가
-수단입니다.
-
 - **factcheck** (`src/eval/factcheck/`, `scripts/eval_factcheck.py`): 무작위로 뽑은
   실제 종목·질문에 대해 시스템(`run_hierarchical`) 답을 낸 뒤, DART 원문·네이버 실시간
   시세·DB 재계산·vision 판정 등 **그때그때 다시 조회한 값**과 대조합니다. 재무제표/
