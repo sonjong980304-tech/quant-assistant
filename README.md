@@ -537,7 +537,6 @@ quant-assistant/
 #### 세션은 어떻게 유지되는가
 - 세션(`ConversationSession`)은 **서버 프로세스의 메모리(딕셔너리)에만** 존재합니다.
   DB에 저장하지 않으므로 **서버를 재시작하면 대화 이력이 사라집니다** 
-- 브라우저는 발급받은 `session_id`를 저장해두고 새로고침해도 같은 세션으로 이어갑니다.
 
 #### 매 턴마다 "신규 조회"와 "이어가기" 중 무엇을 고르는가
 ```
@@ -577,8 +576,7 @@ quant-assistant/
 ### 올웨더 포트폴리오 (`/allweather`)
 
 7종목(QQQ/삼성전자/TLT/ACE KRX금현물/IEF/TIP/BIL)에 매달 몬테카를로로 비중을 재계산해 보여주는
-**모니터링 전용** 화면입니다(자동매매 없음 — 계산·저장·알림까지만 하고 실제 주문 실행은
-이 기능의 범위 밖입니다). 핵심 모듈은 `src/allweather/`이고, `montecarlo.py`(비중 최적화)는
+**모니터링 전용** 화면입니다. 핵심 모듈은 `src/allweather/`이고, `montecarlo.py`(비중 최적화)는
 실거래봇 `quant_trader/portfolio/rebalancer.py`의 계산 로직(연율화 ×252/√252, 샤프비율
 공식)을 기반으로 하되, 원본과 다른 제약이 두 가지 있습니다: (1) 종목당 비중 10~45%
 상하한(`montecarlo.py::MIN_WEIGHT`/`MAX_WEIGHT`), (2) MDD -20% 이내 제약
