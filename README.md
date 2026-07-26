@@ -680,7 +680,7 @@ DART 일일 조회 한도 때문에 "매일 전부 다시 받기"가 아니라, 
 | 작업 | 주기 | 스크립트 |
 |---|---|---|
 | 신규상장 종목 재무 백필 | 매일 02:00/10:00/15:00 (하루 3회) | `scripts/backfill_full.py` |
-| 분기 공시 증분 체크 | 매일 아침 7시30분 | `scripts/update_financials.py` |
+| 분기 공시 증분 체크 | 매일 07:30 | `scripts/update_financials.py` |
 | KRX 업종분류 재동기화 | 매월 1일 08:10 | `scripts/backfill_sector_krx.py` |
 | 국내 주가/시총 (+ PER/PBR·ROE 등 `metrics` 재계산) | 매일 11:00/18:30/22:00(update_prices) + 16:00/20:30(naver) | `scripts/update_prices.py`, `scripts/run_naver_prices.py` |
 | 상장주식수(당일) | 매일 03:00/13:00 (하루 2회) | `scripts/backfill_shares.py` |
