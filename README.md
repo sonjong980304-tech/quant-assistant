@@ -1,6 +1,6 @@
 # Quant Assistant
 
-**한국 주식 재무·주가·매크로 데이터를 SQLite에 적재하고, 계층형 멀티에이전트가 자연어 질문에 결정론적 검증까지 거쳐 답하는 개인용 퀀트 리서치 도구.**
+**한국 주식 재무·주가·매크로 데이터를 SQLite에 적재하고, 계층형 멀티에이전트가 자연어 질문에 검증까지 거쳐 답하는 개인용 퀀트 리서치 도구.**
 
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-web-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -11,7 +11,7 @@
 [![Qwen2.5-coder](https://img.shields.io/badge/Qwen2.5--coder-Local%20LLM-615CED?logo=ollama&logoColor=white)](https://ollama.com/library/qwen2.5-coder)
 
 한국 상장사 재무·주가·매크로 데이터를 SQLite로 통합하고, LangGraph 계층형 멀티에이전트가 자연어 질문을
-SQL·검증된 백테스트 프리미티브로 번역해 답합니다. **내부 아키텍처는 하나의 총괄 에이전트(`answer_with_verification`)를 공유**합니다.
+SQL·Python(검증된 프리미티브)로 번역해 답합니다. **내부 아키텍처는 하나의 총괄 에이전트(`answer_with_verification`)를 공유**합니다.
 (GPT-5.4-mini / EXAONE 3.5 / Qwen2.5-coder 3종 지원)
 
 > ⚠️ **개인용 리서치·학습 도구입니다** — 투자자문업 등록이 없고, 스크리닝·백테스트 결과는
