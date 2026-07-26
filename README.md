@@ -247,7 +247,7 @@ router→도메인 병렬 fan-out→verify→실패 도메인만 재시도→syn
 이중 안전장치로 유한 종료가 보장됩니다.
 
 <details>
-<summary>LangGraph 그래프 구조 상세 (State·노드·엣지·무한루프 방지)</summary>
+<summary>LangGraph 그래프 구조 상세 (State·노드·엣지·무한루프 방지) — 클릭해서 펼쳐보기</summary>
 
 계층형 실행은 **LangGraph**(여러 작업 단계를 "노드"와 "화살표"로 이어붙여 흐름을 그림처럼 조립하는 라이브러리)로 구현돼 있습니다. 핵심 개념 다섯 가지를 먼저 짚어둡니다.
 
@@ -442,7 +442,7 @@ LLM이 만든 신뢰할 수 없는 코드가 그 프로세스나 데이터베이
 ### 디렉토리 구조
 
 <details>
-<summary>디렉토리 구조 전체 트리 (src/agents · backtest · ingest · web · scripts)</summary>
+<summary>디렉토리 구조 전체 트리 (src/agents · backtest · ingest · web · scripts) — 클릭해서 펼쳐보기</summary>
 
 ```
 quant-assistant/
@@ -624,7 +624,7 @@ quant_trader와 동일한 텔레그램 채널로 알림 발송(직전 달 대비
 ## 데이터와 API 레퍼런스
 
 <details>
-<summary>데이터·API 레퍼런스 (DB 스키마, 엔드포인트, 자동갱신 스케줄)</summary>
+<summary>데이터·API 레퍼런스 (DB 스키마, 엔드포인트, 자동갱신 스케줄) — 클릭해서 펼쳐보기</summary>
 
 ### 데이터 (SQLite, `data/market.db`)
 
