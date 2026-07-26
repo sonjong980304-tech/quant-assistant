@@ -581,9 +581,9 @@ quant-assistant/
 공식)을 기반으로 하되, 원본과 다른 제약이 두 가지 있습니다: (1) 종목당 비중 10~45%
 상하한(`montecarlo.py::MIN_WEIGHT`/`MAX_WEIGHT`), (2) MDD -20% 이내 제약
 (`montecarlo.py::run_monte_carlo_mdd_constrained`, `DEFAULT_MAX_DRAWDOWN=-0.20`) — 상하한만
-있는 `run_monte_carlo`는 낙폭 개념이 없어 실측(2026-07-22 스냅샷)으로 MDD가 -34%까지
+있는 `run_monte_carlo`는 낙폭 개념이 없어 MDD가 -34%까지
 벌어질 수 있음을 확인했고, 그 구간 실제 가격 경로 기준 낙폭이 -20% 이내인 후보 중 샤프비율이
-가장 높은 조합을 채택하도록 바꿨습니다(2026-07 사용자 결정). 제약을 만족하는 후보가 끝내
+가장 높은 조합을 채택하도록 바꿨습니다. 제약을 만족하는 후보가 끝내
 없으면 지금까지 본 것 중 낙폭이 가장 얕았던 후보로 폴백하고 `constraint_satisfied=False`로
 정직하게 표시합니다. 매달 배치가 실제로 재학습에 쓰는 것은 이 MDD 제약 버전입니다
 (`pipeline.py`의 기본 `monte_carlo_fn`).
