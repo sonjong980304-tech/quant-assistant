@@ -519,8 +519,8 @@ quant-assistant/
 - **왜/어떻게**: 정리매매·감자 등으로 인한 **정상적인** 급등락까지 종목을 전 기간 영구 제외하면 생존편향이 되레 재유입됩니다. `detect_price_quality_anomaly_dates`가 이상 발생일 D를 잡고 `get_price_quality_excluded_codes(asof=…)`가 그 D 주변 윈도우(`PRICE_ANOMALY_WINDOW_*`)에 asof가 들어갈 때만 국소적으로 제외합니다(멀리 떨어진 과거 정상 시점 데이터는 보존). 결과는 '종목→이상 발생일' 매핑으로 `ingest_meta`에 캐싱하고 이후엔 캐시만 조회합니다 — **"비싼 판단은 배치로 1회만 하고 런타임은 캐시만 읽는다"** 는 이 프로젝트 공통 원칙입니다(전체 스캔을 매 요청마다 재호출하지 않음).
 
 #### 6. 거래세율 연도별 스케줄 (`references/securities_transaction_tax_rate_history.md`)
-- **무엇/왜**: 매도 거래세율은 해가 바뀌며 인하돼 왔고 코스피/코스닥이 서로 다른데, 과거 백테스트 비용을 단일 현재세율로 계산하면 부정확합니다.
-- **어떻게**: 과거 실제 세율을 1차 출처로 검증해 `references/securities_transaction_tax_rate_history.md`에 연도별로 문서화했습니다. **아직 백테스트 비용 계산 코드에는 배선하지 않았습니다(예정)** — 현재 백테스트는 단일 `tax_rate` 파라미터를 씁니다.
+- **무엇/왜**: 매도 거래세율은 해가 바뀌며 인하돼 왔고(코스피/코스닥은 같은 해엔 합산 실효세율이 일치), 과거 백테스트 비용을 단일 현재세율로 계산하면 부정확합니다(2015~2019년 구간을 2024년 세율로 계산하면 비용을 약 40% 과소평가).
+- **어떻게**: 과거 실제 세율을 1차 출처로 검증해 `references/securities_transaction_tax_rate_history.md`에 연도별로 문서화하고, `src/backtest/tax_schedule.py`의 순수 함수 `stt_rate_at(date)`로 배선했습니다. `engine.run_backtest`/`signal_engine.run_signal_backtest` 모두 `tax_rate` 파라미터를 안 주면(생략 또는 None) 각 리밸런싱·체결 시점의 실제 세율을 자동 조회하고, 명시적으로 값을 주면(0 포함) 그 값이 전 구간에 고정 적용됩니다(what-if 시나리오용). 웹 UI의 "매도 거래세(%)" 입력칸도 비워두면 자동 스케줄이 적용되도록 기본값을 없앴습니다.
 
 
 ---

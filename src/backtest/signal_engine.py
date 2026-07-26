@@ -26,6 +26,7 @@ import math
 from typing import Callable
 
 from .performance import performance
+from .tax_schedule import stt_rate_at
 
 # 신호 백테스트는 일단위 시뮬레이션이라 연환산 계수는 거래일 기준 252를 쓴다.
 _PERIODS_PER_YEAR_DAILY = 252
@@ -203,10 +204,13 @@ def run_signal_backtest(
         raise ValueError("선택 기간에 시뮬레이션할 거래일이 부족합니다(가격 시계열 범위 확인).")
 
     fee = (params or {}).get("fee_rate", 0.00015)
-    tax = (params or {}).get("tax_rate", 0.0018)
+    tax_override = (params or {}).get("tax_rate")  # None(생략 포함)이면 연도별 실제 세율 스케줄 적용
     slip = (params or {}).get("slippage_rate", 0.0010)
-    # engine.run_backtest와 동일한 1회 교체(매도+매수) 비용 모델 재사용(새 모델 금지).
-    cost_per_turn = (fee + slip) + (fee + tax + slip)
+
+    def cost_per_turn_at(date: str) -> float:
+        # engine.run_backtest와 동일한 1회 교체(매도+매수) 비용 모델 재사용(새 모델 금지).
+        tax = tax_override if tax_override is not None else stt_rate_at(date)
+        return (fee + slip) + (fee + tax + slip)
 
     def _owned_set(i: int) -> set:
         d = master[i]
@@ -235,7 +239,7 @@ def run_signal_backtest(
             cur_entry = None
             turn = _turnover(prev_set, cur_set)
             turnovers.append(turn)
-            nav *= (1 - turn * cost_per_turn)
+            nav *= (1 - turn * cost_per_turn_at(master[i]))
             if cur_set:
                 cur_entry = {"date": master[i], "codes": sorted(cur_set)}
                 holdings_log.append(cur_entry)

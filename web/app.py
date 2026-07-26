@@ -801,7 +801,9 @@ def api_backtest(req: BacktestReq):
             "sectors": req.sectors, "markets": req.markets, "winsorize_z": req.winsorize_z,
             "winsorize_pct": req.winsorize_pct, "rebalance": req.rebalance,
             "fee_rate": req.fee_rate if req.fee_rate is not None else CONFIG.fee_rate,
-            "tax_rate": req.tax_rate if req.tax_rate is not None else CONFIG.tax_rate,
+            # tax_rate: None이면 engine.run_backtest가 리밸런싱 시점마다 연도별 실제
+            # 세율(stt_rate_at)을 자동 조회한다 — 여기서 상수로 폴백하면 안 됨.
+            "tax_rate": req.tax_rate,
             "slippage_rate": req.slippage_rate if req.slippage_rate is not None else CONFIG.slippage_rate,
         }
         res = run_backtest(dates, mfn, pfn, params, benchmark_fn=bench_fn, benchmark_fn2=bench_fn2)

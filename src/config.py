@@ -63,8 +63,8 @@ class Config:
     slack_webhook_url: str = field(default_factory=lambda: os.getenv("SLACK_WEBHOOK_URL", ""))
 
     # --- 백테스트 거래비용 기본값 ---
+    # 매도 거래세는 연도별로 달라(src/backtest/tax_schedule.py) 여기서 상수로 관리하지 않는다.
     fee_rate: float = field(default_factory=lambda: float(os.getenv("FEE_RATE", "0.00015")))  # 수수료 0.015%
-    tax_rate: float = field(default_factory=lambda: float(os.getenv("TAX_RATE", "0.0018")))   # 매도 거래세 0.18%
     slippage_rate: float = field(default_factory=lambda: float(os.getenv("SLIPPAGE_RATE", "0.0010")))  # 슬리피지 0.1%
 
     @property

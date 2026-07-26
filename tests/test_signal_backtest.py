@@ -353,13 +353,14 @@ def test_search_signal_strategy_returns_satisfying_candidates_ranked():
     # 제약 만족(우상향)이 1위, best는 그것과 동일 참조.
     assert out["best"] is out["results"][0]
     assert out["results"][0]["constraints_met"] is True
-    # 우상향 +46%에서 기본 거래비용 차감 → 45.81(결정론적). 제약(>=5)은 충분히 만족.
-    assert out["results"][0]["performance"]["total_return"] == pytest.approx(45.81)
+    # 우상향 +46%에서 거래비용 차감(_DATES6가 2026년 구간이라 연도별 세율 스케줄상 0.20%
+    # 적용 — stt_rate_at 참고) → 45.78(결정론적). 제약(>=5)은 충분히 만족.
+    assert out["results"][0]["performance"]["total_return"] == pytest.approx(45.78)
     assert out["results"][0]["entry_rule"] == _ENTRY_ALWAYS
     # 미충족(평탄) 후보도 결과에 남되 뒤로 밀리고 constraints_met=False.
     assert out["results"][-1]["constraints_met"] is False
     # 반환 형식: 후보별로 navs/dates/holdings 포함(auditor·차트 배선 호환).
-    assert out["results"][0]["navs"][-1] == pytest.approx(1.4581, abs=1e-3)
+    assert out["results"][0]["navs"][-1] == pytest.approx(1.4578, abs=1e-3)
     assert out["results"][0]["dates"] == _DATES6
 
 
@@ -381,8 +382,8 @@ def test_search_signal_strategy_best_effort_when_none_satisfies():
     assert out["best"] is out["results"][0]
     assert len(out["results"]) == 2                   # 후보 전부 결과에 남음
     assert all(r["constraints_met"] is False for r in out["results"])
-    # rank_by(sharpe) 내림차순 → 우상향(거래비용 차감 후 +45.81%)이 최선의 시도로 1위.
-    assert out["best"]["performance"]["total_return"] == pytest.approx(45.81)
+    # rank_by(sharpe) 내림차순 → 우상향(거래비용 차감 후 +45.78%, 2026년 세율 0.20%)이 최선의 시도로 1위.
+    assert out["best"]["performance"]["total_return"] == pytest.approx(45.78)
 
 
 def test_search_signal_strategy_no_constraints_marks_all_met():

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from .performance import performance
 from .selection import select_stocks
+from .tax_schedule import stt_rate_at
 
 PERIODS_PER_YEAR = {"monthly": 12, "quarterly": 4, "semiannual": 2, "annual": 1}
 
@@ -42,13 +43,16 @@ def run_backtest(
     rebalance = params.get("rebalance", "quarterly")
 
     fee = params.get("fee_rate", 0.00015)
-    tax = params.get("tax_rate", 0.0018)
+    tax_override = params.get("tax_rate")  # None(생략 포함)이면 연도별 실제 세율 스케줄 적용
     slip = params.get("slippage_rate", 0.0010)
-    # 1회 교체(매도+매수) 비용: 매수(수수료+슬리피지)+매도(수수료+거래세+슬리피지)
-    cost_per_turn = (fee + slip) + (fee + tax + slip)
+
+    def cost_per_turn_at(date: str) -> float:
+        # 1회 교체(매도+매수) 비용: 매수(수수료+슬리피지)+매도(수수료+거래세+슬리피지)
+        tax = tax_override if tax_override is not None else stt_rate_at(date)
+        return (fee + slip) + (fee + tax + slip)
 
     if weights is not None:
-        return _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn,
+        return _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn_at,
                                       benchmark_fn, rebalance, benchmark_fn2)
 
     n = params.get("n", 20)
@@ -89,7 +93,7 @@ def run_backtest(
         else:
             turnover = 1.0  # 최초 편입
         turnovers.append(turnover)
-        nav *= (1 - turnover * cost_per_turn)
+        nav *= (1 - turnover * cost_per_turn_at(t))
 
         # 보유 수익 (t → t_next, 동일가중)
         rets = []
@@ -126,7 +130,7 @@ def run_backtest(
     }
 
 
-def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, benchmark_fn, rebalance,
+def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn_at, benchmark_fn, rebalance,
                             benchmark_fn2=None):
     """외부 비중벡터로 buy&hold 시뮬레이션. 음수 비중은 거부(공매도 불가)."""
     neg = {k: v for k, v in weights.items() if v is not None and v < 0}
@@ -138,7 +142,9 @@ def _run_weighted_backtest(rebalance_dates, price_fn, weights, cost_per_turn, be
 
     codes = [c for c, v in weights.items() if v]
     # 각 종목 슬리브 가치(초기 = 정규화 목표비중, 총합 1) — 진입비용(turnover=1) 1회 반영
-    sleeves = {c: (weights[c] / total) * (1 - cost_per_turn) for c in codes}
+    # (진입일 = rebalance_dates[0] 기준 그 시점 실제 세율 조회)
+    entry_cost = cost_per_turn_at(rebalance_dates[0])
+    sleeves = {c: (weights[c] / total) * (1 - entry_cost) for c in codes}
     navs = [1.0]
     out_dates = [rebalance_dates[0]]
     bench = [benchmark_fn(rebalance_dates[0])] if benchmark_fn else None
