@@ -82,19 +82,20 @@ def test_build_price_panel_handles_tz_aware_yfinance_index():
 
 
 def test_gold_series_uses_synthetic_before_krx_listing_and_real_after():
-    # 411060.KS 상장 이전은 GLD×환율 합성값, 이후는 실제 시세를 쓴다(20년 이력 확보).
+    # 411060.KS 상장 이전은 GLD×환율 합성값에 스플라이스 경계 배율을 곱해 레벨을 맞춘 값,
+    # 이후는 실제 시세를 그대로 쓴다(20년 이력 확보 + 레벨 불일치 보정).
     listing_date = pd.Timestamp("2021-06-01")
+    dates = pd.date_range("2018-01-01", periods=1000, freq="B")
+    gld_vals = [100.0 + i * 0.1 for i in range(len(dates))]  # 변동이 있는 값(배율 검증용)
 
     def fake_fetch(ticker: str) -> pd.Series:
         if ticker == GOLD_ETF_TICKER:
-            dates = pd.date_range("2018-01-01", periods=1000, freq="B")
-            return pd.Series([100.0] * len(dates), index=dates)  # 달러 금가격 100 고정
+            return pd.Series(gld_vals, index=dates)
         if ticker == FX_TICKER:
-            dates = pd.date_range("2018-01-01", periods=1000, freq="B")
             return pd.Series([1000.0] * len(dates), index=dates)  # 환율 1000원 고정
         if ticker == KRX_GOLD_TICKER:
-            dates = pd.date_range(listing_date, periods=100, freq="B")
-            return pd.Series([999999.0] * len(dates), index=dates)  # 실제값 구분용 특이값
+            real_dates = pd.date_range(listing_date, periods=100, freq="B")
+            return pd.Series([999999.0] * len(real_dates), index=real_dates)  # 실제값 구분용 특이값
         raise AssertionError(f"unexpected ticker: {ticker}")
 
     combined = build_synthetic_krx_gold_series(fetch_fn=fake_fetch)
@@ -104,8 +105,74 @@ def test_gold_series_uses_synthetic_before_krx_listing_and_real_after():
 
     assert len(before) > 0
     assert len(after) > 0
-    assert (before == 100.0 * 1000.0).all()  # 합성값 = GLD(달러) × 환율
-    assert (after == 999999.0).all()  # 실제 411060.KS 값을 그대로 스플라이스
+    assert (after == 999999.0).all()  # 실제 411060.KS 값을 그대로 스플라이스(실제값은 스케일 안 함)
+
+    # before는 원본(GLD×환율)에 스플라이스 경계에서 구한 배율(scale) 하나를 곱한 값이어야
+    # 한다 — 구간 전체에 동일한 배율이 곱해졌는지(상대적 오르내림은 유지, 레벨만 조정) 확인.
+    raw_synthetic = pd.Series([g * 1000.0 for g in gld_vals], index=dates)
+    raw_before = raw_synthetic[raw_synthetic.index < listing_date]
+    ratio = (before / raw_before.reindex(before.index)).dropna()
+    assert (ratio.max() - ratio.min()) < 1e-6
+
+
+def test_gold_series_rebases_synthetic_to_avoid_boundary_jump():
+    # 스플라이스 경계(411060 상장 직전 vs 직후)에서 레벨이 안 맞아 생기는 가짜 폭락/폭등을
+    # 스케일 보정으로 없앤다 — 보정 전에는 실측상 약 19.8배(GLD×환율 vs 411060.KS 실가) 차이가
+    # 났었다(GLD 1주와 411060 1주가 담는 금의 양이 다르기 때문).
+    listing_date = pd.Timestamp("2021-06-01")
+
+    def fake_fetch(ticker: str) -> pd.Series:
+        if ticker == GOLD_ETF_TICKER:
+            dates = pd.date_range("2018-01-01", periods=1000, freq="B")
+            return pd.Series([169.37] * len(dates), index=dates)  # 실측 GLD 근사값(달러)
+        if ticker == FX_TICKER:
+            dates = pd.date_range("2018-01-01", periods=1000, freq="B")
+            return pd.Series([1185.92] * len(dates), index=dates)  # 실측 환율 근사값
+        if ticker == KRX_GOLD_TICKER:
+            dates = pd.date_range(listing_date, periods=100, freq="B")
+            return pd.Series([10130.0] * len(dates), index=dates)  # 실측 411060 근사값(~20배 낮음)
+        raise AssertionError(f"unexpected ticker: {ticker}")
+
+    combined = build_synthetic_krx_gold_series(fetch_fn=fake_fetch).sort_index()
+    idx = list(combined.index)
+    boundary_pos = idx.index(listing_date)
+    prev_val = combined.iloc[boundary_pos - 1]
+    first_real_val = combined.iloc[boundary_pos]
+
+    # 보정 전이라면 이 비율이 약 0.05(=1/19.8, 폭락처럼 보임)였을 것 — 보정 후엔 경계에서
+    # 레벨이 맞아떨어져 비율이 1에 가까워야 한다.
+    boundary_ratio = first_real_val / prev_val
+    assert abs(boundary_ratio - 1.0) < 0.01
+
+
+def test_gold_series_scaling_preserves_daily_returns_before_splice():
+    # 스케일 보정은 상수 배율을 곱하는 것이므로, 스플라이스 이전 구간의 일별 수익률(pct_change)
+    # 패턴 자체는 보정 전후로 완전히 동일해야 한다(레벨만 바뀌고 추세는 안 바뀜).
+    listing_date = pd.Timestamp("2021-06-01")
+    dates = pd.date_range("2018-01-01", periods=1000, freq="B")
+    gld_vals = [100.0 + (i % 7) * 0.5 for i in range(len(dates))]  # 변동이 있는 값
+
+    def fake_fetch(ticker: str) -> pd.Series:
+        if ticker == GOLD_ETF_TICKER:
+            return pd.Series(gld_vals, index=dates)
+        if ticker == FX_TICKER:
+            return pd.Series([1000.0] * len(dates), index=dates)
+        if ticker == KRX_GOLD_TICKER:
+            real_dates = pd.date_range(listing_date, periods=100, freq="B")
+            return pd.Series([500000.0] * len(real_dates), index=real_dates)
+        raise AssertionError(f"unexpected ticker: {ticker}")
+
+    combined = build_synthetic_krx_gold_series(fetch_fn=fake_fetch)
+    before = combined[combined.index < listing_date]
+
+    raw_synthetic = pd.Series([g * 1000.0 for g in gld_vals], index=dates)
+    raw_before = raw_synthetic[raw_synthetic.index < listing_date]
+
+    scaled_returns = before.pct_change().dropna()
+    raw_returns = raw_before.pct_change().dropna()
+    pd.testing.assert_series_equal(
+        scaled_returns, raw_returns, check_exact=False, rtol=1e-9, check_names=False,
+    )
 
 
 def test_gold_series_falls_back_to_synthetic_when_no_real_data():

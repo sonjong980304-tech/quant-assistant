@@ -75,6 +75,12 @@ def build_synthetic_krx_gold_series(fetch_fn: Callable[[str], pd.Series] | None 
 
     411060.KS가 실제 존재하는 구간(상장일 이후)은 항상 그 진짜 시세를 쓰고, 그 이전 과거는
     합성값으로 채운다. 411060.KS fetch가 빈 결과여도(네트워크 이슈 등) 합성값만으로 폴백한다.
+
+    GLD 1주와 411060.KS 1주가 담는 금의 양(단위)이 서로 달라, 단순 이어붙이기만 하면 스플라이스
+    시점에서 레벨이 실측상 약 20배 어긋나(하루 만에 -95%로 보이는 가짜 폭락) pct_change 기반
+    계산(montecarlo.py/backtest.py)을 오염시킨다. 그래서 실데이터 시작 직전 합성값 대비 실데이터
+    첫 값의 비율(scale)을 구해 합성 구간 전체에 곱해 레벨을 맞춘다 — 상수를 곱하는 것이므로
+    합성 구간 내부의 일별 수익률(추세)은 그대로 보존된다.
     """
     gld = fetch_yf_close_series(GOLD_ETF_TICKER, fetch_fn=fetch_fn)
     fx = fetch_yf_close_series(FX_TICKER, fetch_fn=fetch_fn)
@@ -84,6 +90,9 @@ def build_synthetic_krx_gold_series(fetch_fn: Callable[[str], pd.Series] | None 
     if len(real):
         cutover = real.index.min()
         synthetic = synthetic[synthetic.index < cutover]
+        if len(synthetic):
+            scale = real.iloc[0] / synthetic.iloc[-1]
+            synthetic = synthetic * scale
         combined = pd.concat([synthetic, real]).sort_index()
     else:
         combined = synthetic
